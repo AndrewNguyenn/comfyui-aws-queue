@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>ComfyUI AWS Queue</title>
+    <link rel="stylesheet" href="comfy-aws-queue.css" />
+    <script src="config.js"></script>
+    <script src="auth.js"></script>
+  </head>
+  <body class="login-page">
+    <main>
+      <h1>ComfyUI AWS Queue</h1>
+      <p class="hint">Personal ComfyUI deployment with spot-based GPU workers, queue-driven jobs, and image+video fleet specialization.</p>
+
+      <h2>Pages</h2>
+      <ul style="list-style: none; padding: 0;">
+        <li style="padding: 0.6em 0;"><a href="/login.html" style="color: #4ad;">Sign in</a> &mdash; Cognito-authenticated entry point</li>
+        <li style="padding: 0.6em 0;"><a href="/models.html" style="color: #4ad;">Models</a> &mdash; paste CivitAI URLs, browse the model catalog</li>
+        <li style="padding: 0.6em 0;"><a href="/viewer.html" style="color: #4ad;">Outputs viewer</a> &mdash; view generated images and videos by job ID</li>
+      </ul>
+
+      <h2>Status</h2>
+      <p class="hint">v1: standalone pages only. The vanilla ComfyUI workflow editor moved to a separate Comfy-Org repo and no longer ships a pre-built dist; full editor integration is deferred to v2. Submit workflow JSON manually to <code>POST /prompt</code> for now.</p>
+      <p class="hint">Source: <a href="https://github.com/AndrewNguyenn/comfyui-aws-queue" style="color: #4ad;" target="_blank">github.com/AndrewNguyenn/comfyui-aws-queue</a></p>
+    </main>
+  </body>
+</html>
