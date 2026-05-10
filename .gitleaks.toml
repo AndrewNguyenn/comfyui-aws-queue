@@ -1,0 +1,38 @@
+# gitleaks config for comfyui-aws-queue
+# Catches AWS account IDs, API keys, and other identifiers that should not land in a public repo.
+
+title = "comfyui-aws-queue gitleaks rules"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "aws-account-id"
+description = "AWS Account ID (12 contiguous digits in suspicious context)"
+regex = '''(?i)(account[_-]?id|aws[_-]?account)['"\s:=]+\d{12}'''
+
+[[rules]]
+id = "civitai-token"
+description = "CivitAI API token (UUID format in known context)"
+regex = '''(?i)civitai[_-]?(api[_-]?)?token['"\s:=]+[a-f0-9]{32}'''
+
+[allowlist]
+description = "Allowlist for non-secret matches"
+regexes = [
+  # Placeholder text
+  '''\{ACCOUNT_ID\}''',
+  '''AWS_ACCOUNT_ID''',
+  '''ACCOUNT-ID''',
+  '''<account-id>''',
+  '''123456789012''',
+  '''<user-email>''',
+  # CDK token references (not real values)
+  '''Aws\.ACCOUNT_ID''',
+  '''cdk\.Aws\.ACCOUNT_ID''',
+]
+paths = [
+  '''node_modules/''',
+  '''cdk\.out/''',
+  '''\.git/''',
+  '''package-lock\.json''',
+]

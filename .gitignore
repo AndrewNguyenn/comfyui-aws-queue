@@ -1,0 +1,58 @@
+# CDK
+node_modules/
+*.js
+!jest.config.js
+*.d.ts
+.cdk.staging/
+cdk.out/
+cdk.context.json
+
+# Build outputs
+dist/
+build/
+*.template.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.python-version
+.pytest_cache/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+config.local.js
+frontend/dist/config.js
+frontend/comfyui/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Worktrees (per CLAUDE.md workflow)
+.claude/worktrees/
+
+# Local CDK overrides
+cdk.local.json
+
+# Docker build context noise
+.dockerignore.local
