@@ -81,9 +81,10 @@ class SpotHandler:
                     self.terminating = True
                     with self._lock:
                         in_flight = self._in_flight
-                    job_id = in_flight[0] if in_flight else None
                     try:
-                        self._on_terminate(job_id)
+                        # Pass BOTH job_id and receipt_handle so the callback can
+                        # reset SQS visibility (resolves review C4).
+                        self._on_terminate(in_flight)
                     except Exception:  # noqa: BLE001 — keep watcher alive
                         log.exception("on_terminate callback failed")
                     return
@@ -111,17 +112,29 @@ class SpotHandler:
 
 def make_default_on_terminate(
     queue_url: str, jobs_table: str, region: str
-) -> Callable[[Optional[str]], None]:
-    """Standard handler: reset SQS visibility on the in-flight message, mark
-    DDB status=queued so it appears available for the next worker."""
+) -> Callable[[Optional[tuple[str, str]]], None]:
+    """Standard handler: reset SQS visibility on the in-flight message AND
+    mark DDB status=queued. Both must succeed for the job to redeliver
+    quickly (resolves code review C4)."""
     sqs = boto3.client("sqs", region_name=region)
     ddb = boto3.client("dynamodb", region_name=region)
 
-    def handler(job_id: Optional[str]) -> None:
-        if not job_id:
+    def handler(in_flight: Optional[tuple[str, str]]) -> None:
+        if not in_flight:
             log.info("no in-flight job at termination time")
             return
+        job_id, receipt_handle = in_flight
         log.warning("releasing in-flight job %s back to queue", job_id)
+        # Reset SQS visibility FIRST so message redelivers immediately.
+        try:
+            sqs.change_message_visibility(
+                QueueUrl=queue_url,
+                ReceiptHandle=receipt_handle,
+                VisibilityTimeout=0,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("failed to reset SQS visibility for %s", job_id)
+        # Then update DDB so a worker picking it up sees status=queued.
         try:
             ddb.update_item(
                 TableName=jobs_table,

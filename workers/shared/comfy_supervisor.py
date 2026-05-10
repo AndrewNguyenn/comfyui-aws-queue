@@ -88,7 +88,7 @@ class ComfySupervisor:
         raise RuntimeError(f"comfyui did not become ready within {timeout_seconds}s")
 
     def _watch(self) -> None:
-        """Restart on unexpected exit, up to max_restart_attempts."""
+        """Restart on unexpected exit with exponential backoff up to max attempts."""
         while not self._stopping and self._proc:
             self._proc.wait()
             if self._stopping:
@@ -102,8 +102,10 @@ class ComfySupervisor:
             self._restart_count += 1
             if self._restart_count > self.max_restart_attempts:
                 log.error("max restart attempts exceeded; instance will be marked unhealthy")
-                # Re-raise SIGTERM to ourselves so the worker exits and ECS replaces.
                 os.kill(os.getpid(), signal.SIGTERM)
                 return
-            time.sleep(2)
+            # Exponential backoff: 2s, 4s, 8s, ... capped at 60s.
+            backoff = min(2 ** self._restart_count, 60)
+            log.info("restarting comfyui in %ds", backoff)
+            time.sleep(backoff)
             self.start()

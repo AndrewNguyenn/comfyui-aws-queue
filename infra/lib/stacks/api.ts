@@ -1,9 +1,10 @@
-import { Stack, StackProps, Duration, RemovalPolicy } from 'aws-cdk-lib';
+import { Stack, StackProps, Duration, RemovalPolicy, CfnOutput } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as path from 'path';
 import { AppConfig } from '../config';
 import { StorageStack } from './storage';
@@ -246,5 +247,62 @@ export class ApiStack extends Stack {
     // /downloads/{id}
     const downloads = root.addResource('downloads').addResource('{id}');
     downloads.addMethod('GET', downloadKickoffIntegration, authMethodOptions);
+
+    // ----- Worker-only internal routes (API key auth, not Cognito) -----
+    // Used by workers to push their /object_info to the dispatcher on boot.
+    // Workers can't easily do Cognito auth (no human user) so we use an API key.
+    const workerApiKey = this.api.addApiKey('WorkerApiKey', {
+      apiKeyName: 'comfy-worker-key',
+      description: 'API key used by workers to publish /object_info',
+    });
+    const workerUsagePlan = this.api.addUsagePlan('WorkerUsagePlan', {
+      name: 'comfy-worker-plan',
+      throttle: { rateLimit: 5, burstLimit: 10 },
+    });
+    workerUsagePlan.addApiKey(workerApiKey);
+    workerUsagePlan.addApiStage({ stage: this.api.deploymentStage });
+
+    const internal = root.addResource('internal');
+    const internalObjectInfo = internal.addResource('object_info');
+    internalObjectInfo.addMethod(
+      'POST',
+      new apigw.LambdaIntegration(this.dispatcherFn),
+      { apiKeyRequired: true } // No Cognito; API key only
+    );
+
+    // Stub endpoints that ComfyUI's frontend expects (resolves N16 from review).
+    // Return minimal responses so the UI doesn't 404. dispatcher handler
+    // detects these paths and returns the appropriate stub.
+    for (const stubPath of ['queue', 'system_stats', 'embeddings', 'extensions']) {
+      const r = root.addResource(stubPath);
+      r.addMethod('GET', dispatcherIntegration, authMethodOptions);
+    }
+
+    // Publish key API outputs to SSM so other stacks can read them without
+    // creating direct CFN dependencies (which would cause cyclical imports
+    // between Api ↔ Compute ↔ Frontend).
+    new ssm.StringParameter(this, 'ApiUrlParam', {
+      parameterName: '/comfy/api/url',
+      stringValue: this.api.url,
+      description: 'API Gateway base URL for comfy dispatcher',
+    });
+
+    // Worker API key value goes to SecretsManager (CDK can't easily put
+    // an API key value into SSM as a String parameter without exposing it
+    // in CFN templates). Workers fetch it at boot.
+    // The key value is a runtime-generated token, not a secret in CFN.
+    new CfnOutput(this, 'WorkerApiKeyId', {
+      value: workerApiKey.keyId,
+      description: 'API key ID for workers (look up value with: aws apigateway get-api-key --api-key <id> --include-value)',
+    });
+    new CfnOutput(this, 'ApiUrl', {
+      value: this.api.url,
+      description: 'API Gateway base URL',
+    });
+    new ssm.StringParameter(this, 'WorkerApiKeyIdParam', {
+      parameterName: '/comfy/api/worker-key-id',
+      stringValue: workerApiKey.keyId,
+      description: 'API key ID — workers fetch the value at boot',
+    });
   }
 }

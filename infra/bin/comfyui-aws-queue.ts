@@ -83,7 +83,9 @@ const ci = new CiStack(app, 'ComfyCiStack', {
 });
 Tags.of(ci).add('Component', 'ci');
 
-// Phase 4 — compute (depends on CI for ECR repos to exist)
+// Phase 4 — compute (depends on CI for ECR repos to exist, and on api for
+// SSM parameters /comfy/api/url and /comfy/api/worker-key-id that the worker
+// task reads at runtime).
 const compute = new ComputeStack(app, 'ComfyComputeStack', {
   env,
   config: APP_CONFIG,
@@ -95,6 +97,7 @@ const compute = new ComputeStack(app, 'ComfyComputeStack', {
 });
 Tags.of(compute).add('Component', 'compute');
 compute.addDependency(ci);
+compute.addDependency(api);
 
 // Phase 5 — frontend (depends on api+auth for runtime config)
 const frontend = new FrontendStack(app, 'ComfyFrontendStack', {

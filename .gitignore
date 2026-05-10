@@ -1,11 +1,10 @@
 # CDK
 node_modules/
-*.js
-!jest.config.js
-*.d.ts
 .cdk.staging/
 cdk.out/
 cdk.context.json
+# Compiled CDK output gitignored only inside infra/ (see infra/.gitignore).
+# Don't put *.js / *.d.ts at root — that would also exclude frontend source.
 
 # Build outputs
 dist/

@@ -1,0 +1,5 @@
+# CDK compiled outputs (TypeScript → JS). Source is the .ts files.
+*.js
+!jest.config.js
+*.d.ts
+*.js.map

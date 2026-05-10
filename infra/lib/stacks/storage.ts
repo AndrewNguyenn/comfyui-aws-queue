@@ -1,8 +1,9 @@
-import { Stack, StackProps, RemovalPolicy, Duration, Aws } from 'aws-cdk-lib';
+import { Stack, StackProps, RemovalPolicy, Duration, Aws, SecretValue } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { AppConfig } from '../config';
 
 export interface StorageStackProps extends StackProps {
@@ -133,11 +134,12 @@ export class StorageStack extends Stack {
 
     // Public-read bucket policy — explicit and reviewable.
     // Grants s3:GetObject on the entire bucket to anonymous principals.
-    // SECURITY: only HTML/JS/CSS go here. Never config.js with secrets.
+    // SECURITY: only HTML/JS/CSS go here. Never config.js with secrets
+    // beyond Cognito IDs and API URL (both of which are public anyway).
     this.frontendBucket.addToResourcePolicy(
-      new (require('aws-cdk-lib/aws-iam').PolicyStatement)({
-        effect: (require('aws-cdk-lib/aws-iam').Effect).ALLOW,
-        principals: [new (require('aws-cdk-lib/aws-iam').AnyPrincipal)()],
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        principals: [new iam.AnyPrincipal()],
         actions: ['s3:GetObject'],
         resources: [`${this.frontendBucket.bucketArn}/*`],
       })
@@ -187,15 +189,18 @@ export class StorageStack extends Stack {
     });
 
     // ---------- SECRETS MANAGER ----------
+    // Placeholder secret. Operator populates after Phase 1 deploy with:
+    //   aws secretsmanager put-secret-value --secret-id civitai/api-token \
+    //       --secret-string '{"token":"YOUR_TOKEN"}'
+    // (Use put-secret-value, not create-secret, since this stack already created it.)
     this.civitaiTokenSecret = new secretsmanager.Secret(this, 'CivitaiTokenSecret', {
       secretName: 'civitai/api-token',
       description:
-        'CivitAI API token for downloading gated models. Populate manually with: aws secretsmanager put-secret-value --secret-id civitai/api-token --secret-string \'{"token":"YOUR_TOKEN"}\'',
-      // SecretValue.unsafePlainText creates a placeholder that signals "not yet populated"
+        'CivitAI API token for downloading gated models. Populate manually after deploy.',
       secretObjectValue: {
-        token: require('aws-cdk-lib').SecretValue.unsafePlainText('PLACEHOLDER_NOT_SET'),
+        token: SecretValue.unsafePlainText('PLACEHOLDER_NOT_SET'),
       },
-      removalPolicy: RemovalPolicy.RETAIN, // Don't accidentally delete a populated secret
+      removalPolicy: RemovalPolicy.RETAIN,
     });
   }
 }

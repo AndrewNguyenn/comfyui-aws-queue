@@ -1,6 +1,7 @@
 import { Stack, StackProps, CfnOutput, RemovalPolicy } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
+import * as fs from 'fs';
 import * as path from 'path';
 import { AppConfig } from '../config';
 import { StorageStack } from './storage';
@@ -43,13 +44,20 @@ window.COMFY_CONFIG = {
 
     // Use s3deploy to upload the frontend build artifact.
     // The build script (`frontend/build.sh`) outputs to `frontend/dist/`.
+    // Fail fast at synth time with a clear message if dist is missing
+    // (resolves code review N15).
+    const distPath = path.join(__dirname, '../../../frontend/dist');
+    if (!fs.existsSync(distPath)) {
+      throw new Error(
+        `FrontendStack: ${distPath} does not exist.\n` +
+        `Run ./frontend/build.sh before deploying this stack.`
+      );
+    }
+
     new s3deploy.BucketDeployment(this, 'FrontendDeployment', {
       destinationBucket: storage.frontendBucket,
       sources: [
-        s3deploy.Source.asset(path.join(__dirname, '../../../frontend/dist'), {
-          // If frontend/dist doesn't exist yet, this will fail at synth time.
-          // The build.sh script must be run before cdk deploy of this stack.
-        }),
+        s3deploy.Source.asset(distPath),
         s3deploy.Source.data('config.js', configJsContent),
       ],
       retainOnDelete: false,

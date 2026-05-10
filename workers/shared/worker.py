@@ -68,10 +68,16 @@ def main() -> int:
     comfy = ComfySupervisor(extra_args=tuple(extra_args))
 
     # Spot handler: wires DDB+SQS reset on termination notice.
+    # The handler now receives (job_id, receipt_handle) tuple so it can reset
+    # SQS visibility, not just update DDB (resolves code review C4).
     on_terminate = make_default_on_terminate(QUEUE_URL, JOBS_TABLE, REGION)
-    spot = SpotHandler(
-        on_terminate=lambda jid: (on_terminate(jid), comfy.stop(timeout=10), sys.exit(0))
-    )
+
+    def _terminate_chain(in_flight):
+        on_terminate(in_flight)
+        comfy.stop(timeout=10)
+        sys.exit(0)
+
+    spot = SpotHandler(on_terminate=_terminate_chain)
     spot.start()
 
     # SIGTERM (from ECS draining or manual stop) — graceful shutdown
@@ -126,7 +132,8 @@ def main() -> int:
             sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=receipt)
             continue
         if job_record.get("status") == "running":
-            log.warning("job %s already running on another worker; skipping", job_id)
+            log.warning("job %s already running on another worker; deleting duplicate delivery", job_id)
+            sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=receipt)
             continue
 
         spot.set_in_flight(job_id, receipt)

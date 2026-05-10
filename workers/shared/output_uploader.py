@@ -67,15 +67,13 @@ class OutputUploader:
 
         return keys
 
-    def cleanup_outputs(self, since: float) -> None:
-        """Remove output files modified after `since` to free disk for next job."""
+    def cleanup_outputs(self, _since: float | None = None) -> None:
+        """Remove ALL files in output dir to free disk for next job.
+        Called after upload_new_outputs has captured everything we want
+        to keep. (Resolves code review N18 — old code only cleaned up files
+        modified during this job, leaving accumulating cruft.)"""
         for path in self.output_dir.rglob("*"):
             if not path.is_file():
-                continue
-            try:
-                if path.stat().st_mtime < since:
-                    continue
-            except FileNotFoundError:
                 continue
             try:
                 path.unlink()

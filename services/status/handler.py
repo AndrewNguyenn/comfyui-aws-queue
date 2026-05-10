@@ -17,12 +17,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 ddb = boto3.client("dynamodb")
-s3 = boto3.client("s3", config=__import__("botocore.config", fromlist=["Config"]).Config(
-    signature_version="s3v4"
-))
+s3 = boto3.client("s3", config=Config(signature_version="s3v4"))
 
 JOBS_TABLE = os.environ["JOBS_TABLE"]
 OUTPUTS_BUCKET = os.environ["OUTPUTS_BUCKET"]

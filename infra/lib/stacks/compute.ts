@@ -54,7 +54,7 @@ export class ComputeStack extends Stack {
     this.cluster.addAsgCapacityProvider(imageCapacityProvider);
 
     const imageTaskDef = this.makeTaskDefinition('image', {
-      ecrImageUri: `${ci.imageWorkerRepo.repositoryUri}:latest`,
+      ecrRepository: ci.imageWorkerRepo,
       queueUrl: queue.imageJobsQueue.queueUrl,
       storage,
       config,
@@ -89,7 +89,7 @@ export class ComputeStack extends Stack {
     this.cluster.addAsgCapacityProvider(videoCapacityProvider);
 
     const videoTaskDef = this.makeTaskDefinition('video', {
-      ecrImageUri: `${ci.videoWorkerRepo.repositoryUri}:latest`,
+      ecrRepository: ci.videoWorkerRepo,
       queueUrl: queue.videoJobsQueue.queueUrl,
       storage,
       config,
@@ -217,12 +217,15 @@ export class ComputeStack extends Stack {
 
   /**
    * Task definition. Worker is a single container, network mode `host`.
+   *
+   * DISPATCHER_API_URL and worker API key are looked up from SSM at deploy
+   * time (resolves circular Compute ↔ Api dependency from review C3).
    */
   private makeTaskDefinition(
     fleetName: 'image' | 'video',
-    deps: { ecrImageUri: string; queueUrl: string; storage: StorageStack; config: AppConfig }
+    deps: { ecrRepository: import('aws-cdk-lib/aws-ecr').IRepository; queueUrl: string; storage: StorageStack; config: AppConfig }
   ): ecs.Ec2TaskDefinition {
-    const { ecrImageUri, queueUrl, storage, config } = deps;
+    const { ecrRepository, queueUrl, storage, config } = deps;
 
     const taskDef = new ecs.Ec2TaskDefinition(this, `${fleetName}TaskDef`, {
       family: `comfy-${fleetName}`,
@@ -235,11 +238,20 @@ export class ComputeStack extends Stack {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
+    // SSM parameter lookups happen at deploy time, not runtime — they resolve
+    // to literal strings in the task def. Compute stack only needs to be
+    // deployed AFTER api stack (already declared in bin via addDependency).
+    const dispatcherApiUrl = require('aws-cdk-lib/aws-ssm').StringParameter
+      .valueForStringParameter(this, '/comfy/api/url');
+    const workerApiKeyId = require('aws-cdk-lib/aws-ssm').StringParameter
+      .valueForStringParameter(this, '/comfy/api/worker-key-id');
+
     taskDef.addContainer(`${fleetName}Container`, {
       containerName: `comfy-${fleetName}-worker`,
-      image: ecs.ContainerImage.fromRegistry(ecrImageUri),
+      image: ecs.ContainerImage.fromEcrRepository(ecrRepository, 'latest'),
       gpuCount: 1,
-      memoryReservationMiB: 12288, // 12 GB; instance has more, lets ECS schedule
+      memoryReservationMiB: fleetName === 'image' ? 11264 : 24576,
+      memoryLimitMiB: fleetName === 'image' ? 13312 : 28672,
       essential: true,
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: fleetName,
@@ -258,8 +270,10 @@ export class ComputeStack extends Stack {
         JOBS_TABLE: storage.jobsTable.tableName,
         OBJECT_INFO_TABLE: storage.objectInfoTable.tableName,
         AWS_REGION: this.region,
-        VISIBILITY_TIMEOUT_SECONDS:
-          fleetName === 'image' ? '900' : '2700', // 15 min / 45 min
+        VISIBILITY_TIMEOUT_SECONDS: fleetName === 'image' ? '900' : '2700',
+        // For /internal/object_info publish (resolves review C2 + C3):
+        DISPATCHER_API_URL: dispatcherApiUrl,
+        WORKER_API_KEY_ID: workerApiKeyId,
       },
     });
 
@@ -295,5 +309,10 @@ export class ComputeStack extends Stack {
     storage.jobsTable.grantReadWriteData(role);
     storage.modelsTable.grantReadData(role);
     storage.objectInfoTable.grantReadWriteData(role);
+    // Allow worker to fetch its API key value for /internal/object_info push.
+    role.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: ['apigateway:GET'],
+      resources: [`arn:aws:apigateway:${this.region}::/apikeys/*`],
+    }));
   }
 }

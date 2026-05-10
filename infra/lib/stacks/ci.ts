@@ -93,9 +93,16 @@ export class CiStack extends Stack {
     // ----- CodeBuild Projects -----
     // The buildspecs live in `codebuild/` at repo root. They reference docker
     // buildx with registry layer caching to ECR for fast subsequent builds.
+    //
+    // GitHub owner/repo come from CDK context so this file stays portable for
+    // any user. Set via:
+    //   cdk deploy ComfyCiStack -c githubOwner=YOUR_USER -c githubRepo=THIS_REPO
+    // or via cdk.context.json (which is gitignored).
+    const githubOwner = this.node.tryGetContext('githubOwner') ?? 'YOUR_GITHUB_USERNAME';
+    const githubRepo = this.node.tryGetContext('githubRepo') ?? config.projectName;
     const sourceFromGitHub = codebuild.Source.gitHub({
-      owner: 'AndrewNguyenn',
-      repo: config.projectName,
+      owner: githubOwner,
+      repo: githubRepo,
       // No webhooks — manual trigger via scripts/trigger-build.sh
       webhook: false,
     });

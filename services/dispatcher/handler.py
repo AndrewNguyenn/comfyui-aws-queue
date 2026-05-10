@@ -61,6 +61,19 @@ def lambda_handler(event: dict, context: Any) -> dict:
             return _get_object_info(event)
         if method == "POST" and path == "/internal/object_info":
             return _post_internal_object_info(event)
+        # Stub endpoints that ComfyUI's frontend polls but we don't need to
+        # implement fully (resolves code review N16).
+        if method == "GET" and path == "/queue":
+            return _resp(200, {"queue_running": [], "queue_pending": []})
+        if method == "GET" and path == "/system_stats":
+            return _resp(200, {
+                "system": {"comfyui_version": "remote", "ram_total": 0, "ram_free": 0},
+                "devices": [],
+            })
+        if method == "GET" and path == "/embeddings":
+            return _resp(200, [])
+        if method == "GET" and path == "/extensions":
+            return _resp(200, [])
         return _resp(404, {"error": "not found"})
     except Exception as e:  # noqa: BLE001 — return JSON to client, log to CW
         print(f"ERROR {method} {path}: {e!r}")
@@ -105,14 +118,29 @@ def _post_prompt(event: dict) -> dict:
 
     # SQS message: small (just job_id + type). Worker reads full workflow from DDB.
     # Pure SQS body avoids hitting the 256 KB SQS message limit on big workflows.
-    sqs.send_message(
-        QueueUrl=queue_url,
-        MessageBody=json.dumps({"job_id": job_id, "type": job_type}),
-        MessageAttributes={
-            "job_id": {"DataType": "String", "StringValue": job_id},
-            "type": {"DataType": "String", "StringValue": job_type},
-        },
-    )
+    # If SQS send fails, mark the job failed so user gets a clear signal in /jobs/{id}
+    # (resolves code review N13).
+    try:
+        sqs.send_message(
+            QueueUrl=queue_url,
+            MessageBody=json.dumps({"job_id": job_id, "type": job_type}),
+            MessageAttributes={
+                "job_id": {"DataType": "String", "StringValue": job_id},
+                "type": {"DataType": "String", "StringValue": job_type},
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        ddb.update_item(
+            TableName=JOBS_TABLE,
+            Key={"job_id": {"S": job_id}},
+            UpdateExpression="SET #s = :s, #e = :e",
+            ExpressionAttributeNames={"#s": "status", "#e": "error"},
+            ExpressionAttributeValues={
+                ":s": {"S": "failed"},
+                ":e": {"S": f"sqs send failed: {e}"[:500]},
+            },
+        )
+        return _resp(503, {"error": "queue temporarily unavailable; job marked failed"})
 
     # Match ComfyUI's native /prompt response shape so existing client libraries work.
     return _resp(
@@ -174,7 +202,7 @@ def _format_outputs(s3_keys: list[str]) -> dict:
         filename = key.rsplit("/", 1)[-1]
         ref = {"filename": filename, "subfolder": "", "type": "output", "s3_key": key}
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-        if ext in ("mp4", "webm", "gif", "webp"):
+        if ext in ("mp4", "webm", "gif", "webp", "mkv", "mov"):
             videos.append(ref)
         else:
             images.append(ref)

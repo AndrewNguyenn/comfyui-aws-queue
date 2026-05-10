@@ -30,11 +30,6 @@ while true; do
     --max-number-of-messages 10 --wait-time-seconds 1 --output json)"
   msgs="$(echo "$resp" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d.get("Messages", [])))')"
   if [ "$msgs" = "[]" ]; then break; fi
-  echo "$msgs" | python3 - "$main_url" "$dlq_url" "$REGION" <<'PY'
-import sys, json, subprocess
-msgs = json.load(sys.stdin) if False else json.loads(sys.argv[0]) if False else None  # placeholder; using stdin in actual impl below
-PY
-  # Replay each message via boto3 in a small inline python (simpler than CLI parsing)
   echo "$msgs" | REGION="$REGION" MAIN_URL="$main_url" DLQ_URL="$dlq_url" python3 - <<'PY'
 import json, os, sys
 import boto3

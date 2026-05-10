@@ -52,6 +52,9 @@ class CacheManager:
         self.cache_root = cache_root
         self.comfy_models_root = comfy_models_root
         self._lock = threading.Lock()
+        # Per-model locks prevent two threads from concurrently downloading
+        # the same model file (resolves code review N8).
+        self._download_locks: dict[str, threading.Lock] = {}
         # Maps cached filename → ref count of in-use jobs
         self._in_use: dict[str, int] = {}
         self._pinned: set[str] = set()
@@ -93,23 +96,38 @@ class CacheManager:
                     log.exception("failed to warm pinned model %s", name)
 
     def ensure(self, model_name: str) -> Path:
-        """Returns local path. Downloads from S3 if missing, evicting LRU."""
+        """Returns local path. Downloads from S3 if missing, evicting LRU.
+        Per-model lock prevents concurrent downloads of the same model
+        (resolves code review N8)."""
         meta = self._lookup_in_catalog(model_name)
         if not meta:
             raise FileNotFoundError(f"model {model_name} not in catalog")
 
         local_path = self._cache_path(meta)
+        # Fast path: cache hit, no lock needed for symlink.
         if local_path.exists():
-            os.utime(local_path, None)  # bump mtime for LRU
+            os.utime(local_path, None)
             self._link_into_comfy(meta, local_path)
             return local_path
 
-        size_bytes = int(meta.get("size_gb", 0) * 1e9)
+        # Get-or-create a per-model lock under the global lock.
         with self._lock:
-            self._evict_to_fit(size_bytes, exclude=local_path.name)
-        self._download(meta, local_path)
-        self._link_into_comfy(meta, local_path)
-        return local_path
+            dl_lock = self._download_locks.setdefault(model_name, threading.Lock())
+
+        # Hold the per-model lock through eviction + download.
+        with dl_lock:
+            # Re-check after acquiring (another thread may have downloaded it).
+            if local_path.exists():
+                os.utime(local_path, None)
+                self._link_into_comfy(meta, local_path)
+                return local_path
+
+            size_bytes = int(meta.get("size_gb", 0) * 1e9)
+            with self._lock:
+                self._evict_to_fit(size_bytes, exclude=local_path.name)
+            self._download(meta, local_path)
+            self._link_into_comfy(meta, local_path)
+            return local_path
 
     @contextmanager
     def use(self, model_name: str):
