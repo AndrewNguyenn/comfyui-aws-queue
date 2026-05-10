@@ -16,16 +16,19 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    MAX_JOBS=4 \
-    NVCC_APPEND_FLAGS="--threads 4" \
-    # Constrain CUDA arch to GPUs we actually run on. Without this nvcc tries
-    # to compile for the full default list (incl. sm_50 Maxwell) which sage
-    # attention 2.x doesn't support → "CUDA synchronization primitives are
-    # only supported for sm_70 and up." build error.
-    #   8.6 = A10G (g5)
-    #   8.9 = L40S (g6e)
-    #   8.0 = A100 (future-proof)
-    TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9"
+    # CUDA compilation parallelism: low to avoid OOM-kill on
+    # BUILD_GENERAL1_LARGE (15 GB RAM). NVCC + cicc per-process memory is
+    # ~2-3 GB; 4 jobs × 3 archs blew past 15 GB and got SIGKILL'd. Two jobs
+    # is the safe ceiling for this build host.
+    MAX_JOBS=2 \
+    NVCC_APPEND_FLAGS="--threads 2" \
+    # Constrain CUDA arch to GPUs we actually deploy on. Without this nvcc
+    # tries to compile for the default set (incl. sm_50 Maxwell) which sage
+    # 2.x doesn't support. We target only the cards in our fleet:
+    #   8.6 = A10G (g5.xlarge primary, g5.2xlarge fallback)
+    #   8.9 = L40S (g6e.xlarge fallback)
+    # Dropped 8.0 (A100) since we don't run those — cuts compile time/memory.
+    TORCH_CUDA_ARCH_LIST="8.6;8.9"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git wget curl ca-certificates build-essential \
