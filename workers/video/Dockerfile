@@ -16,8 +16,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    MAX_JOBS=8 \
-    NVCC_APPEND_FLAGS="--threads 8"
+    MAX_JOBS=4 \
+    NVCC_APPEND_FLAGS="--threads 4" \
+    # Constrain CUDA arch to GPUs we actually run on. Without this nvcc tries
+    # to compile for the full default list (incl. sm_50 Maxwell) which sage
+    # attention 2.x doesn't support → "CUDA synchronization primitives are
+    # only supported for sm_70 and up." build error.
+    #   8.6 = A10G (g5)
+    #   8.9 = L40S (g6e)
+    #   8.0 = A100 (future-proof)
+    TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git wget curl ca-certificates build-essential \
