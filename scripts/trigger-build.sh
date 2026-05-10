@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Manually trigger a CodeBuild project. v1 has no GitHub webhook.
+#   ./scripts/trigger-build.sh image
+#   ./scripts/trigger-build.sh video
+set -euo pipefail
+
+target="${1:-}"
+if [ "$target" != "image" ] && [ "$target" != "video" ]; then
+  echo "Usage: $0 {image|video}" >&2
+  exit 1
+fi
+
+PROJECT="comfy-build-${target}-worker"
+REGION="${AWS_REGION:-us-west-2}"
+
+echo "==> Starting CodeBuild project: $PROJECT"
+build_id=$(
+  aws codebuild start-build \
+    --project-name "$PROJECT" \
+    --region "$REGION" \
+    --query 'build.id' \
+    --output text
+)
+echo "    build id: $build_id"
+echo "    Watch:    aws codebuild batch-get-builds --ids '$build_id' --region $REGION --query 'builds[0].{phase:currentPhase,status:buildStatus,logs:logs.deepLink}' --output table"
+echo "    Or in console: https://console.aws.amazon.com/codesuite/codebuild/projects/$PROJECT"

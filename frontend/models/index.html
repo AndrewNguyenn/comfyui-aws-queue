@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Models — ComfyUI AWS Queue</title>
+    <link rel="stylesheet" href="comfy-aws-queue.css" />
+    <script src="config.js"></script>
+    <script src="auth.js"></script>
+    <script src="api-shim.js"></script>
+  </head>
+  <body class="models-page">
+    <header>
+      <a href="/">← Back to ComfyUI</a>
+      <h1>Models</h1>
+      <button onclick="window.comfyAuth.signOut()">Sign out</button>
+    </header>
+
+    <section id="add-from-civitai">
+      <h2>Add from CivitAI</h2>
+      <form id="download-form">
+        <label>CivitAI URL
+          <input type="url" id="civitai-url" placeholder="https://civitai.com/models/12345?modelVersionId=67890" required />
+        </label>
+        <label>Model type
+          <select id="model-type" required>
+            <option value="checkpoint">Checkpoint</option>
+            <option value="lora">LoRA</option>
+            <option value="vae">VAE</option>
+            <option value="controlnet">ControlNet</option>
+            <option value="clip">CLIP</option>
+            <option value="embedding">Embedding</option>
+            <option value="upscale">Upscale</option>
+          </select>
+        </label>
+        <button type="submit">Download</button>
+      </form>
+      <p id="download-error" class="error"></p>
+    </section>
+
+    <section id="downloads">
+      <h2>Active downloads</h2>
+      <ul id="download-list"></ul>
+    </section>
+
+    <section id="catalog">
+      <h2>Catalog</h2>
+      <p id="catalog-summary"></p>
+      <details open><summary>Filter</summary>
+        <select id="type-filter">
+          <option value="">all</option>
+          <option value="checkpoint">checkpoint</option>
+          <option value="lora">lora</option>
+          <option value="vae">vae</option>
+          <option value="controlnet">controlnet</option>
+        </select>
+      </details>
+      <ul id="model-list"></ul>
+    </section>
+
+    <script src="models.js"></script>
+  </body>
+</html>

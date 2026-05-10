@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Outputs — ComfyUI AWS Queue</title>
+    <link rel="stylesheet" href="comfy-aws-queue.css" />
+    <script src="config.js"></script>
+    <script src="auth.js"></script>
+  </head>
+  <body class="viewer-page">
+    <header>
+      <a href="/">← Back to ComfyUI</a>
+      <h1>Outputs</h1>
+      <button onclick="window.comfyAuth.signOut()">Sign out</button>
+    </header>
+
+    <section>
+      <p class="hint">Recent generation outputs. Click any to open the full-size presigned URL.</p>
+      <div id="output-grid"></div>
+    </section>
+
+    <script src="viewer.js"></script>
+  </body>
+</html>

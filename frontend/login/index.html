@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Sign in — ComfyUI AWS Queue</title>
+    <link rel="stylesheet" href="comfy-aws-queue.css" />
+    <script src="config.js"></script>
+    <script src="auth.js"></script>
+  </head>
+  <body class="login-page">
+    <main>
+      <h1>ComfyUI AWS Queue</h1>
+      <form id="login-form">
+        <label>Username
+          <input type="text" id="username" autocomplete="username" required />
+        </label>
+        <label>Password
+          <input type="password" id="password" autocomplete="current-password" required />
+        </label>
+        <button type="submit">Sign in</button>
+        <p id="error" class="error"></p>
+      </form>
+      <p class="hint">Single-user deployment. Operator must create the user via:
+        <code>aws cognito-idp admin-create-user</code>.</p>
+    </main>
+    <script>
+      document.getElementById("login-form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const username = document.getElementById("username").value;
+        const password = document.getElementById("password").value;
+        const errEl = document.getElementById("error");
+        errEl.textContent = "";
+        try {
+          await window.comfyAuth.signIn(username, password);
+          window.location.href = "/";
+        } catch (err) {
+          errEl.textContent = err.message || "sign in failed";
+        }
+      });
+    </script>
+  </body>
+</html>
