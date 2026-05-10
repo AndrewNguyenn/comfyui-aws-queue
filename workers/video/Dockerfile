@@ -52,8 +52,9 @@ RUN pip install --no-build-isolation \
         git+https://github.com/thu-ml/SageAttention.git || \
     (echo "ERROR: sageattention build failed. Check CUDA toolkit + torch version compat." && exit 1)
 
-# Quick verification — fails build early if sage isn't usable.
-RUN python -c "import sageattention; print('sageattention version:', sageattention.__version__)"
+# Quick verification — fails build early if sage isn't importable.
+# (sageattention from GitHub HEAD doesn't expose __version__ on the module.)
+RUN python -c "import sageattention; print('sageattention import OK, attrs:', [a for a in dir(sageattention) if not a.startswith('_')][:5])"
 
 # ---------- ComfyUI custom nodes for Wan video ----------
 WORKDIR /opt/comfy/custom_nodes
@@ -86,6 +87,6 @@ RUN mkdir -p /opt/comfy/output
 # ---------- Smoke test ----------
 RUN cd /opt/comfy && python -c "import sys; sys.path.insert(0, '.'); import comfy" || \
     echo "WARNING: comfy module import quick-check failed (may still work at runtime)"
-RUN python -c "import sageattention; import torch; print('sage:', sageattention.__version__, 'torch:', torch.__version__)"
+RUN python -c "import sageattention; import torch; print('sage importable, torch:', torch.__version__)"
 
 ENTRYPOINT ["/entrypoint.sh"]
