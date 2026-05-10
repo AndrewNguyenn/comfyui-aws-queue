@@ -1,0 +1,45 @@
+version: 0.2
+
+# Image-worker build. ~30-45 min cold, <10 min warm with registry layer cache.
+# Compute: BUILD_GENERAL1_LARGE (15 GB RAM, 8 vCPU). Cost: ~$0.30 per cold build.
+
+env:
+  variables:
+    REPO_NAME: comfy-image-worker
+
+phases:
+  pre_build:
+    commands:
+      - echo "Logging in to ECR..."
+      - aws ecr get-login-password --region "$AWS_REGION" |
+        docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com"
+      - REPO="$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO_NAME"
+      - SHA="$CODEBUILD_RESOLVED_SOURCE_VERSION"
+      - if [ -z "$SHA" ]; then SHA="$(date -u +%Y%m%d%H%M%S)"; fi
+      - echo "REPO=$REPO SHA=$SHA"
+      # Buildkit + buildx for layer caching
+      - docker buildx create --use --name comfy-builder || docker buildx use comfy-builder
+
+  build:
+    commands:
+      - echo "Build started on $(date)"
+      # Use registry-cached layers from previous build to speed up subsequent runs.
+      - |
+        docker buildx build \
+          --file workers/image/Dockerfile \
+          --tag "$REPO:$SHA" \
+          --tag "$REPO:latest" \
+          --cache-from "type=registry,ref=$REPO:cache" \
+          --cache-to "type=registry,ref=$REPO:cache,mode=max" \
+          --push \
+          .
+
+  post_build:
+    commands:
+      - echo "Build complete: $REPO:$SHA"
+      - echo "To roll out: aws ecs update-service --cluster comfy-cluster --service comfy-image --force-new-deployment"
+
+artifacts:
+  files:
+    - '**/*'
+  discard-paths: yes

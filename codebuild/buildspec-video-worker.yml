@@ -1,0 +1,44 @@
+version: 0.2
+
+# Video-worker build. Slower than image-worker due to sage attention CUDA
+# compilation (~15-20 min added). 45-60 min cold, <15 min warm.
+# Compute: BUILD_GENERAL1_LARGE. Cost: ~$0.50 per cold build.
+
+env:
+  variables:
+    REPO_NAME: comfy-video-worker
+
+phases:
+  pre_build:
+    commands:
+      - echo "Logging in to ECR..."
+      - aws ecr get-login-password --region "$AWS_REGION" |
+        docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com"
+      - REPO="$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO_NAME"
+      - SHA="$CODEBUILD_RESOLVED_SOURCE_VERSION"
+      - if [ -z "$SHA" ]; then SHA="$(date -u +%Y%m%d%H%M%S)"; fi
+      - echo "REPO=$REPO SHA=$SHA"
+      - docker buildx create --use --name comfy-builder || docker buildx use comfy-builder
+
+  build:
+    commands:
+      - echo "Build started on $(date)"
+      - |
+        docker buildx build \
+          --file workers/video/Dockerfile \
+          --tag "$REPO:$SHA" \
+          --tag "$REPO:latest" \
+          --cache-from "type=registry,ref=$REPO:cache" \
+          --cache-to "type=registry,ref=$REPO:cache,mode=max" \
+          --push \
+          .
+
+  post_build:
+    commands:
+      - echo "Build complete: $REPO:$SHA"
+      - echo "To roll out: aws ecs update-service --cluster comfy-cluster --service comfy-video --force-new-deployment"
+
+artifacts:
+  files:
+    - '**/*'
+  discard-paths: yes

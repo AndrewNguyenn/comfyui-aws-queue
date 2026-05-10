@@ -1,0 +1,9 @@
+{
+  "_comment": "Pinned model names (must exist in DDB models catalog). On a fresh deploy the catalog is empty — populate it via /models UI before the first job, then add the names here and rebuild the container.",
+  "_recommended_for_wan": [
+    "wan-2.2-14b-i2v-q8",
+    "wan-2.2-lightning-lora-rank64",
+    "wan-2.2-vae"
+  ],
+  "pinned": []
+}
