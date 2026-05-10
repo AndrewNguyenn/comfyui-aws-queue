@@ -163,6 +163,10 @@ export class ApiStack extends Stack {
       restApiName: 'comfy-api',
       description: 'comfyui-aws-queue REST API',
       endpointTypes: [apigw.EndpointType.REGIONAL],
+      // Required for the access logs below to work. CDK creates an account-level
+      // CloudWatch role and points API GW at it via UpdateAccount. One-time per
+      // account; subsequent deploys are idempotent.
+      cloudWatchRole: true,
       deployOptions: {
         stageName: 'v1',
         throttlingRateLimit: config.api.throttleRatePerSec,
