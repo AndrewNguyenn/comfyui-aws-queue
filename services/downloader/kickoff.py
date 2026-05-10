@@ -1,0 +1,127 @@
+"""
+Download Kickoff Lambda — fast, sync. Returns a download_id and async-invokes
+the long-running worker Lambda.
+
+Routes (handled here):
+  POST /models/download   → kick off a CivitAI download
+  GET  /downloads/{id}    → return progress
+
+The actual work happens in `worker.py`, invoked async (Event invocation type).
+That allows API GW to return in <1s while the download runs up to 15 min.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+import boto3
+
+ddb = boto3.client("dynamodb")
+lam = boto3.client("lambda")
+
+DOWNLOADS_TABLE = os.environ["DOWNLOADS_TABLE"]
+DOWNLOAD_WORKER_FN = os.environ["DOWNLOAD_WORKER_FN"]
+
+ALLOWED_TYPES = ("checkpoint", "lora", "vae", "controlnet", "clip", "embedding", "upscale")
+DOWNLOAD_TTL = timedelta(hours=24)
+
+
+def lambda_handler(event: dict, _context: Any) -> dict:
+    method = event["httpMethod"]
+    path = event["resource"]
+    try:
+        if method == "POST" and path == "/models/download":
+            return _kickoff(event)
+        if method == "GET" and path == "/downloads/{id}":
+            return _status(event)
+        return _resp(404, {"error": "not found"})
+    except Exception as e:  # noqa: BLE001
+        print(f"ERROR {method} {path}: {e!r}")
+        return _resp(500, {"error": "internal error"})
+
+
+def _kickoff(event: dict) -> dict:
+    body = json.loads(event.get("body") or "{}")
+    civitai_url = body.get("civitai_url", "").strip()
+    model_type = body.get("model_type", "").strip().lower()
+
+    if not civitai_url or not _looks_like_civitai_url(civitai_url):
+        return _resp(400, {"error": "invalid civitai_url"})
+    if model_type not in ALLOWED_TYPES:
+        return _resp(400, {"error": f"model_type must be one of {ALLOWED_TYPES}"})
+
+    download_id = str(uuid.uuid4())
+    expire_at = int((datetime.now(timezone.utc) + DOWNLOAD_TTL).timestamp())
+
+    ddb.put_item(
+        TableName=DOWNLOADS_TABLE,
+        Item={
+            "download_id": {"S": download_id},
+            "civitai_url": {"S": civitai_url},
+            "model_type": {"S": model_type},
+            "status": {"S": "queued"},
+            "bytes_done": {"N": "0"},
+            "total_bytes": {"N": "0"},
+            "created_at": {"S": datetime.now(timezone.utc).isoformat()},
+            "expire_at": {"N": str(expire_at)},
+        },
+    )
+
+    # Async invoke (Event = fire-and-forget). Returns immediately.
+    lam.invoke(
+        FunctionName=DOWNLOAD_WORKER_FN,
+        InvocationType="Event",
+        Payload=json.dumps(
+            {"download_id": download_id, "civitai_url": civitai_url, "model_type": model_type}
+        ).encode(),
+    )
+
+    return _resp(202, {"download_id": download_id, "status": "queued"})
+
+
+def _status(event: dict) -> dict:
+    download_id = event["pathParameters"]["id"]
+    r = ddb.get_item(TableName=DOWNLOADS_TABLE, Key={"download_id": {"S": download_id}})
+    if "Item" not in r:
+        return _resp(404, {"error": "download not found (may have expired after 24h)"})
+
+    item = r["Item"]
+    bytes_done = int(item.get("bytes_done", {"N": "0"})["N"])
+    total_bytes = int(item.get("total_bytes", {"N": "0"})["N"])
+    pct = (bytes_done / total_bytes * 100.0) if total_bytes > 0 else 0.0
+    return _resp(
+        200,
+        {
+            "download_id": download_id,
+            "status": item.get("status", {"S": "unknown"})["S"],
+            "bytes_done": bytes_done,
+            "total_bytes": total_bytes,
+            "percent": round(pct, 2),
+            "model_name": item.get("model_name", {"S": ""})["S"],
+            "error": item.get("error", {"S": ""})["S"],
+        },
+    )
+
+
+_CIVITAI_RE = re.compile(r"^https?://(www\.)?civitai\.com/")
+
+
+def _looks_like_civitai_url(url: str) -> bool:
+    return bool(_CIVITAI_RE.match(url))
+
+
+def _resp(status: int, body: Any) -> dict:
+    return {
+        "statusCode": status,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Content-Type,Authorization",
+        },
+        "body": json.dumps(body),
+    }
