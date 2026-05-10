@@ -31,7 +31,6 @@ export class NetworkStack extends Stack {
     this.vpc = new ec2.Vpc(this, 'Vpc', {
       vpcName: `${config.projectName}-vpc`,
       ipAddresses: ec2.IpAddresses.cidr('10.0.0.0/16'),
-      maxAzs: 1,
       availabilityZones: [config.availabilityZone],
       natGateways: 0, // Critical: no NAT (saves $32/mo). Workers in public subnets.
       subnetConfiguration: [
@@ -57,7 +56,7 @@ export class NetworkStack extends Stack {
       vpc: this.vpc,
       securityGroupName: `${config.projectName}-worker-sg`,
       description:
-        'Workers: outbound only. No inbound rules — workers only initiate connections.',
+        'Workers outbound only; no inbound rules. Workers only initiate connections.',
       allowAllOutbound: true,
     });
 

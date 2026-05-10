@@ -99,17 +99,30 @@ Tags.of(compute).add('Component', 'compute');
 compute.addDependency(ci);
 compute.addDependency(api);
 
-// Phase 5 — frontend (depends on api+auth for runtime config)
-const frontend = new FrontendStack(app, 'ComfyFrontendStack', {
-  env,
-  config: APP_CONFIG,
-  storage,
-  api,
-  auth,
-  description: 'S3 static-website hosting with auto-generated runtime config',
-});
-Tags.of(frontend).add('Component', 'frontend');
-frontend.addDependency(api);
-frontend.addDependency(auth);
+// Phase 5 — frontend (depends on api+auth for runtime config).
+// Only instantiate if frontend/dist/ exists so other stacks can synth/deploy
+// before the frontend has been built. The build is a separate step
+// (./frontend/build.sh) since it pulls vanilla ComfyUI from upstream.
+const fs = require('fs');
+const path = require('path');
+const distExists = fs.existsSync(path.join(__dirname, '../../frontend/dist'));
+if (distExists) {
+  const frontend = new FrontendStack(app, 'ComfyFrontendStack', {
+    env,
+    config: APP_CONFIG,
+    storage,
+    api,
+    auth,
+    description: 'S3 static-website hosting with auto-generated runtime config',
+  });
+  Tags.of(frontend).add('Component', 'frontend');
+  frontend.addDependency(api);
+  frontend.addDependency(auth);
+} else {
+  console.error(
+    '[INFO] Skipping FrontendStack: frontend/dist not found. ' +
+    'Run ./frontend/build.sh before deploying that stack.'
+  );
+}
 
 app.synth();
