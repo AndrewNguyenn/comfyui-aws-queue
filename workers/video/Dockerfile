@@ -31,13 +31,14 @@ RUN git clone --depth 1 --branch ${COMFYUI_TAG} \
         https://github.com/comfyanonymous/ComfyUI.git . \
     && pip install -r requirements.txt
 
-# ---------- SageAttention 2.2 ----------
-# --no-build-isolation lets sageattention's setup.py see the existing torch + CUDA
-# headers from the NGC base. This is the documented installation method; without
-# this flag the build allocates an isolated env and fails to find nvcc.
-# Build is slow (~15-20 min on BUILD_GENERAL1_LARGE compute) due to CUDA kernel
-# compilation across multiple compute capabilities.
-RUN pip install --no-build-isolation sageattention==2.2.0 || \
+# ---------- SageAttention 2.x ----------
+# PyPI only publishes the 1.x series (latest 1.0.6). The 2.x line lives on
+# GitHub HEAD only — install from source. --no-build-isolation lets setup.py
+# see the existing torch + CUDA headers from the NGC base. Build is slow
+# (~15-20 min on BUILD_GENERAL1_LARGE) due to CUDA kernel compilation.
+# Pin to a known commit when reproducible builds matter; using HEAD here.
+RUN pip install --no-build-isolation \
+        git+https://github.com/thu-ml/SageAttention.git || \
     (echo "ERROR: sageattention build failed. Check CUDA toolkit + torch version compat." && exit 1)
 
 # Quick verification — fails build early if sage isn't usable.
