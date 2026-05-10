@@ -1,0 +1,76 @@
+import { Stack, StackProps, CfnOutput, RemovalPolicy } from 'aws-cdk-lib';
+import { Construct } from 'constructs';
+import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
+import * as path from 'path';
+import { AppConfig } from '../config';
+import { StorageStack } from './storage';
+import { ApiStack } from './api';
+import { AuthStack } from './auth';
+
+export interface FrontendStackProps extends StackProps {
+  readonly config: AppConfig;
+  readonly storage: StorageStack;
+  readonly api: ApiStack;
+  readonly auth: AuthStack;
+}
+
+/**
+ * Static-website hosting for the frontend.
+ *
+ * Deploys the contents of `frontend/` (built artifact) to the public-read S3
+ * bucket created in StorageStack. Also writes a runtime config.js with API URL,
+ * Cognito user pool ID, and app client ID — populated at deploy time, never
+ * committed to git.
+ */
+export class FrontendStack extends Stack {
+  constructor(scope: Construct, id: string, props: FrontendStackProps) {
+    super(scope, id, props);
+    const { config, storage, api, auth } = props;
+
+    // Generate runtime config.js content. Note these values are PUBLIC by design:
+    // - API URL: world-discoverable anyway
+    // - Cognito pool/client IDs: not secrets (safe to be in browser)
+    const configJsContent = `
+// AUTO-GENERATED at deploy time. Do not edit.
+window.COMFY_CONFIG = {
+  apiUrl: ${JSON.stringify(api.api.url)},
+  region: ${JSON.stringify(this.region)},
+  cognitoUserPoolId: ${JSON.stringify(auth.userPool.userPoolId)},
+  cognitoUserPoolClientId: ${JSON.stringify(auth.userPoolClient.userPoolClientId)},
+  projectName: ${JSON.stringify(config.projectName)},
+};
+`;
+
+    // Use s3deploy to upload the frontend build artifact.
+    // The build script (`frontend/build.sh`) outputs to `frontend/dist/`.
+    new s3deploy.BucketDeployment(this, 'FrontendDeployment', {
+      destinationBucket: storage.frontendBucket,
+      sources: [
+        s3deploy.Source.asset(path.join(__dirname, '../../../frontend/dist'), {
+          // If frontend/dist doesn't exist yet, this will fail at synth time.
+          // The build.sh script must be run before cdk deploy of this stack.
+        }),
+        s3deploy.Source.data('config.js', configJsContent),
+      ],
+      retainOnDelete: false,
+      memoryLimit: 512,
+    });
+
+    new CfnOutput(this, 'FrontendUrl', {
+      value: `http://${storage.frontendBucket.bucketWebsiteDomainName}`,
+      description: 'Frontend website URL',
+    });
+    new CfnOutput(this, 'ApiUrl', {
+      value: api.api.url,
+      description: 'API Gateway base URL',
+    });
+    new CfnOutput(this, 'CognitoUserPoolId', {
+      value: auth.userPool.userPoolId,
+      description: 'Cognito User Pool ID',
+    });
+    new CfnOutput(this, 'CognitoUserPoolClientId', {
+      value: auth.userPoolClient.userPoolClientId,
+      description: 'Cognito App Client ID',
+    });
+  }
+}

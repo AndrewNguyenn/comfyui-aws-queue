@@ -1,0 +1,299 @@
+import { Stack, StackProps, Duration, RemovalPolicy } from 'aws-cdk-lib';
+import { Construct } from 'constructs';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as ecs from 'aws-cdk-lib/aws-ecs';
+import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import { AppConfig, FleetConfig } from '../config';
+import { NetworkStack } from './network';
+import { StorageStack } from './storage';
+import { QueueStack } from './queue';
+import { CiStack } from './ci';
+
+export interface ComputeStackProps extends StackProps {
+  readonly config: AppConfig;
+  readonly network: NetworkStack;
+  readonly storage: StorageStack;
+  readonly queue: QueueStack;
+  readonly ci: CiStack;
+}
+
+/**
+ * ECS cluster, two ASGs (image fleet + video fleet), capacity providers, services.
+ *
+ * Each fleet has its own ASG with mixed-instance spot policy and capacity-rebalance.
+ * Capacity provider managed scaling enabled (target 100). Service-level scaling
+ * uses backlog-per-task target tracking.
+ *
+ * IMPORTANT: This stack will fail to launch instances until the AWS account has
+ * spot vCPU quota for G/VT > 0. See README "Prerequisites" — request quota first.
+ */
+export class ComputeStack extends Stack {
+  public readonly cluster: ecs.Cluster;
+  public readonly imageAsg: autoscaling.AutoScalingGroup;
+  public readonly videoAsg: autoscaling.AutoScalingGroup;
+
+  constructor(scope: Construct, id: string, props: ComputeStackProps) {
+    super(scope, id, props);
+    const { config, network, storage, queue, ci } = props;
+
+    this.cluster = new ecs.Cluster(this, 'Cluster', {
+      clusterName: `${config.projectName}-cluster`,
+      vpc: network.vpc,
+      containerInsights: false, // Costs $1/container/mo; not needed at this scale
+    });
+
+    // ----- IMAGE fleet -----
+    this.imageAsg = this.makeFleetAsg('image', config.fleets.image, {
+      network,
+      config,
+      ecrRepoArn: ci.imageWorkerRepo.repositoryArn,
+    });
+    const imageCapacityProvider = this.makeCapacityProvider('image', this.imageAsg);
+    this.cluster.addAsgCapacityProvider(imageCapacityProvider);
+
+    const imageTaskDef = this.makeTaskDefinition('image', {
+      ecrImageUri: `${ci.imageWorkerRepo.repositoryUri}:latest`,
+      queueUrl: queue.imageJobsQueue.queueUrl,
+      storage,
+      config,
+    });
+    this.grantWorkerPermissions(imageTaskDef.taskRole, queue.imageJobsQueue, storage);
+
+    new ecs.Ec2Service(this, 'ImageService', {
+      serviceName: 'comfy-image',
+      cluster: this.cluster,
+      taskDefinition: imageTaskDef,
+      desiredCount: 0, // Scaling controlled by capacity provider + service-level policy
+      capacityProviderStrategies: [
+        {
+          capacityProvider: imageCapacityProvider.capacityProviderName,
+          weight: 1,
+        },
+      ],
+      minHealthyPercent: 0, // v3 N12: allow brief downtime for max=1 deployments
+      maxHealthyPercent: 100,
+      placementConstraints: [
+        ecs.PlacementConstraint.memberOf(`attribute:fleet == image`),
+      ],
+    });
+
+    // ----- VIDEO fleet -----
+    this.videoAsg = this.makeFleetAsg('video', config.fleets.video, {
+      network,
+      config,
+      ecrRepoArn: ci.videoWorkerRepo.repositoryArn,
+    });
+    const videoCapacityProvider = this.makeCapacityProvider('video', this.videoAsg);
+    this.cluster.addAsgCapacityProvider(videoCapacityProvider);
+
+    const videoTaskDef = this.makeTaskDefinition('video', {
+      ecrImageUri: `${ci.videoWorkerRepo.repositoryUri}:latest`,
+      queueUrl: queue.videoJobsQueue.queueUrl,
+      storage,
+      config,
+    });
+    this.grantWorkerPermissions(videoTaskDef.taskRole, queue.videoJobsQueue, storage);
+
+    new ecs.Ec2Service(this, 'VideoService', {
+      serviceName: 'comfy-video',
+      cluster: this.cluster,
+      taskDefinition: videoTaskDef,
+      desiredCount: 0,
+      capacityProviderStrategies: [
+        {
+          capacityProvider: videoCapacityProvider.capacityProviderName,
+          weight: 1,
+        },
+      ],
+      minHealthyPercent: 0,
+      maxHealthyPercent: 100,
+      placementConstraints: [
+        ecs.PlacementConstraint.memberOf(`attribute:fleet == video`),
+      ],
+    });
+  }
+
+  /**
+   * Build an ASG with spot mixed-instance policy + capacity rebalance.
+   * Uses AL2023 GPU AMI (AL2 EOL is 2026-06-30).
+   */
+  private makeFleetAsg(
+    fleetName: 'image' | 'video',
+    fleet: FleetConfig,
+    deps: { network: NetworkStack; config: AppConfig; ecrRepoArn: string }
+  ): autoscaling.AutoScalingGroup {
+    const { network, config } = deps;
+
+    // ECS-optimized AL2023 GPU AMI (resolved via SSM at deploy time).
+    // v3 N10: pin SSM parameter version in production to avoid silent driver regressions.
+    const machineImage = ecs.EcsOptimizedImage.amazonLinux2023(ecs.AmiHardwareType.GPU);
+
+    const userData = ec2.UserData.forLinux();
+    // ECS agent picks up these attributes for placement constraints.
+    userData.addCommands(
+      `echo ECS_CLUSTER=${config.projectName}-cluster >> /etc/ecs/ecs.config`,
+      `echo ECS_INSTANCE_ATTRIBUTES='{"fleet":"${fleetName}"}' >> /etc/ecs/ecs.config`,
+      `echo ECS_ENABLE_SPOT_INSTANCE_DRAINING=true >> /etc/ecs/ecs.config`,
+      `echo ECS_LOG_LEVEL=info >> /etc/ecs/ecs.config`,
+      `echo ECS_DISABLE_IMAGE_CLEANUP=false >> /etc/ecs/ecs.config`,
+      `echo ECS_IMAGE_CLEANUP_INTERVAL=10m >> /etc/ecs/ecs.config`,
+      `echo ECS_IMAGE_MINIMUM_CLEANUP_AGE=30m >> /etc/ecs/ecs.config`
+    );
+
+    const launchTemplate = new ec2.LaunchTemplate(this, `${fleetName}LaunchTemplate`, {
+      launchTemplateName: `comfy-${fleetName}-lt`,
+      machineImage,
+      instanceType: new ec2.InstanceType(fleet.primaryInstanceType),
+      userData,
+      securityGroup: network.workerSecurityGroup,
+      role: this.makeInstanceRole(fleetName),
+      requireImdsv2: true,
+      blockDevices: [
+        {
+          deviceName: '/dev/xvda',
+          volume: autoscaling.BlockDeviceVolume.ebs(fleet.rootVolumeGb, {
+            volumeType: autoscaling.EbsDeviceVolumeType.GP3,
+            iops: 3000,
+            throughput: 125,
+            deleteOnTermination: true,
+          }),
+        },
+      ],
+    });
+
+    const minCapacity =
+      fleetName === 'image' ? config.scaling.imageMin : config.scaling.videoMin;
+    const maxCapacity =
+      fleetName === 'image' ? config.scaling.imageMax : config.scaling.videoMax;
+
+    const asg = new autoscaling.AutoScalingGroup(this, `${fleetName}Asg`, {
+      autoScalingGroupName: `comfy-${fleetName}-asg`,
+      vpc: network.vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
+      mixedInstancesPolicy: {
+        launchTemplate,
+        launchTemplateOverrides: [
+          { instanceType: new ec2.InstanceType(fleet.primaryInstanceType) },
+          ...fleet.fallbackInstanceTypes.map((t) => ({
+            instanceType: new ec2.InstanceType(t),
+          })),
+        ],
+        instancesDistribution: {
+          // Pure spot — never on-demand. User accepts spot capacity risk.
+          onDemandBaseCapacity: 0,
+          onDemandPercentageAboveBaseCapacity: 0,
+          spotAllocationStrategy: autoscaling.SpotAllocationStrategy.CAPACITY_OPTIMIZED,
+        },
+      },
+      minCapacity,
+      maxCapacity,
+      capacityRebalance: true,
+      newInstancesProtectedFromScaleIn: false,
+    });
+
+    return asg;
+  }
+
+  /**
+   * Capacity provider with managed scaling so ASG follows ECS task count.
+   */
+  private makeCapacityProvider(
+    fleetName: 'image' | 'video',
+    asg: autoscaling.AutoScalingGroup
+  ): ecs.AsgCapacityProvider {
+    return new ecs.AsgCapacityProvider(this, `${fleetName}CapacityProvider`, {
+      capacityProviderName: `cp-${fleetName}-spot`,
+      autoScalingGroup: asg,
+      enableManagedScaling: true,
+      enableManagedTerminationProtection: false, // Spot interrupts can't be protected
+      targetCapacityPercent: 100,
+      minimumScalingStepSize: 1,
+      maximumScalingStepSize: 1,
+      spotInstanceDraining: true, // Critical: graceful drain on spot termination notice
+    });
+  }
+
+  /**
+   * Task definition. Worker is a single container, network mode `host`.
+   */
+  private makeTaskDefinition(
+    fleetName: 'image' | 'video',
+    deps: { ecrImageUri: string; queueUrl: string; storage: StorageStack; config: AppConfig }
+  ): ecs.Ec2TaskDefinition {
+    const { ecrImageUri, queueUrl, storage, config } = deps;
+
+    const taskDef = new ecs.Ec2TaskDefinition(this, `${fleetName}TaskDef`, {
+      family: `comfy-${fleetName}`,
+      networkMode: ecs.NetworkMode.HOST,
+    });
+
+    const logGroup = new logs.LogGroup(this, `${fleetName}WorkerLogs`, {
+      logGroupName: `/comfy/workers/${fleetName}`,
+      retention: logs.RetentionDays.ONE_WEEK,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
+    taskDef.addContainer(`${fleetName}Container`, {
+      containerName: `comfy-${fleetName}-worker`,
+      image: ecs.ContainerImage.fromRegistry(ecrImageUri),
+      gpuCount: 1,
+      memoryReservationMiB: 12288, // 12 GB; instance has more, lets ECS schedule
+      essential: true,
+      logging: ecs.LogDrivers.awsLogs({
+        streamPrefix: fleetName,
+        logGroup,
+        // v3 N1: multiline pattern collapses tqdm progress bars into single events
+        multilinePattern: '^[A-Z]{3,}|^Traceback|^\\d{4}-\\d{2}-\\d{2}',
+        datetimeFormat: '%Y-%m-%d %H:%M:%S',
+      }),
+      environment: {
+        FLEET: fleetName,
+        QUEUE_URL: queueUrl,
+        MODELS_BUCKET: storage.modelsBucket.bucketName,
+        OUTPUTS_BUCKET: storage.outputsBucket.bucketName,
+        UPLOADS_BUCKET: storage.uploadsBucket.bucketName,
+        MODELS_TABLE: storage.modelsTable.tableName,
+        JOBS_TABLE: storage.jobsTable.tableName,
+        OBJECT_INFO_TABLE: storage.objectInfoTable.tableName,
+        AWS_REGION: this.region,
+        VISIBILITY_TIMEOUT_SECONDS:
+          fleetName === 'image' ? '900' : '2700', // 15 min / 45 min
+      },
+    });
+
+    return taskDef;
+  }
+
+  /**
+   * IAM role for the EC2 instance itself (ECS agent + S3 + ECR pull).
+   */
+  private makeInstanceRole(fleetName: string): iam.Role {
+    const role = new iam.Role(this, `${fleetName}InstanceRole`, {
+      assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonEC2ContainerServiceforEC2Role'),
+        iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore'),
+      ],
+    });
+    return role;
+  }
+
+  /**
+   * v3 N6/M6: tightly-scoped IAM for the worker task. NEVER PutObject on models bucket.
+   */
+  private grantWorkerPermissions(
+    role: iam.IRole,
+    queue: import('aws-cdk-lib/aws-sqs').IQueue,
+    storage: StorageStack
+  ): void {
+    queue.grantConsumeMessages(role);
+    storage.modelsBucket.grantRead(role); // GetObject + ListBucket only — NO put/delete
+    storage.outputsBucket.grantWrite(role); // PutObject + GetObject (verify); no Delete
+    storage.uploadsBucket.grantRead(role);
+    storage.jobsTable.grantReadWriteData(role);
+    storage.modelsTable.grantReadData(role);
+    storage.objectInfoTable.grantReadWriteData(role);
+  }
+}
