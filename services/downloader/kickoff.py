@@ -108,7 +108,9 @@ def _status(event: dict) -> dict:
     )
 
 
-_CIVITAI_RE = re.compile(r"^https?://(www\.)?civitai\.com/")
+# Allow civitai.com and civitai.red (the latter mirrors content the main site
+# filters from default views — same backend in practice for many models).
+_CIVITAI_RE = re.compile(r"^https?://(www\.)?civitai\.(com|red)/")
 
 
 def _looks_like_civitai_url(url: str) -> bool:
