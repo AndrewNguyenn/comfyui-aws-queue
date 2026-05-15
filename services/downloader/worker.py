@@ -50,7 +50,7 @@ def lambda_handler(event: dict, _context: Any) -> dict:
     try:
         _set_status(download_id, "resolving")
         token = _civitai_token()
-        version_id = _parse_version_id(civitai_url)
+        version_id = _parse_version_id(civitai_url, token)
         meta = _fetch_metadata(version_id, token)
         file_meta = _pick_primary_file(meta)
         s3_key = f"{model_type}/{file_meta['name']}"
@@ -82,11 +82,17 @@ def _civitai_token() -> str:
         return ""
 
 
-def _parse_version_id(url: str) -> int:
-    """Accepts URLs like:
-        https://civitai.com/models/12345?modelVersionId=67890
-        https://civitai.com/api/v1/model-versions/67890
-    Returns the modelVersionId as int.
+def _parse_version_id(url: str, token: str) -> int:
+    """Resolves a CivitAI URL to a modelVersionId.
+
+    Accepts:
+      https://civitai.com/models/12345?modelVersionId=67890   (explicit version)
+      https://civitai.com/api/v1/model-versions/67890         (api path)
+      https://civitai.com/models/12345/some-slug              (model id only - fetch latest version)
+      https://civitai.red/models/12345/some-slug              (mirror domain, same backend)
+
+    For URLs without an explicit version, looks up the model and uses
+    modelVersions[0] (CivitAI orders newest first).
     """
     m = re.search(r"modelVersionId=(\d+)", url)
     if m:
@@ -94,7 +100,29 @@ def _parse_version_id(url: str) -> int:
     m = re.search(r"/model-versions/(\d+)", url)
     if m:
         return int(m.group(1))
-    raise ValueError(f"could not extract modelVersionId from URL: {url}")
+
+    m = re.search(r"/models/(\d+)", url)
+    if not m:
+        raise ValueError(f"could not extract a model or version id from URL: {url}")
+
+    model_id = int(m.group(1))
+    headers = {"User-Agent": "comfyui-aws-queue/1.0"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    r = http.request(
+        "GET",
+        f"https://civitai.com/api/v1/models/{model_id}",
+        headers=headers,
+    )
+    if r.status >= 400:
+        raise RuntimeError(
+            f"civitai api {r.status} looking up model {model_id}: {r.data[:200]!r}"
+        )
+    data = json.loads(r.data.decode())
+    versions = data.get("modelVersions") or []
+    if not versions:
+        raise RuntimeError(f"model {model_id} has no published versions")
+    return int(versions[0]["id"])
 
 
 def _fetch_metadata(version_id: int, token: str) -> dict:
