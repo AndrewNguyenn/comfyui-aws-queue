@@ -1,56 +1,84 @@
 #!/usr/bin/env bash
 #
 # Frontend build:
-#   1. Vendor vanilla ComfyUI v0.20.1 frontend (the contents of its `web/` dir)
-#   2. Apply our patches (config.js loader + Cognito auth wrapper + queue button)
-#   3. Copy our standalone /models page and viewer
+#   1. Download the prebuilt Comfy-Org/ComfyUI_frontend release `dist.zip`
+#      (the visual workflow editor — drag-drop nodes, connections, queue button)
+#   2. Inject our patches (config.js loader + Cognito auth wrapper + API shim)
+#      into the built editor's index.html
+#   3. Copy our standalone /login, /models, /viewer pages alongside it
 #   4. Output to frontend/dist/ which CDK FrontendStack uploads to S3
+#
+# Why download the release rather than `npm run build`?
+#   The upstream Comfy-Org/ComfyUI_frontend repo is a large pnpm + nx + Vite
+#   workspace (Node 24 + pnpm required, ~100s of deps including @sentry, three.js,
+#   tailwind, @primevue, vue-tsc typecheck pass). Each tagged release ships a
+#   prebuilt `dist.zip` (~22 MB). Downloading it is faster, deterministic, and
+#   avoids dragging the whole toolchain into our deploy path.
+#
+#   To override the version: COMFYUI_FRONTEND_TAG=v1.45.0 ./frontend/build.sh
 #
 # Run from repo root:  ./frontend/build.sh
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$REPO_ROOT/frontend/dist"
-COMFYUI_TAG="${COMFYUI_TAG:-v0.20.1}"
 TMP_DIR="$(mktemp -d)"
+
+# Default to the latest release at time of writing. Bump as needed; the API
+# surface we shim (apiURL → /api/<path>, fetchApi, /upload/image, /view) has
+# been stable across the v1.x line.
+FRONTEND_TAG="${COMFYUI_FRONTEND_TAG:-v1.45.8}"
+FRONTEND_REPO="${COMFYUI_FRONTEND_REPO:-Comfy-Org/ComfyUI_frontend}"
 
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-echo "==> Building frontend (ComfyUI tag: $COMFYUI_TAG)"
+echo "==> Building frontend (Comfy-Org/ComfyUI_frontend tag: $FRONTEND_TAG)"
 rm -rf "$DIST"
 mkdir -p "$DIST"
 
-# Step 1: Pull vanilla ComfyUI web dir
-echo "==> Cloning ComfyUI $COMFYUI_TAG"
-git clone --depth 1 --branch "$COMFYUI_TAG" \
-  https://github.com/comfyanonymous/ComfyUI.git "$TMP_DIR/ComfyUI" 2>&1 | tail -3
+# Step 1: Download the prebuilt editor bundle.
+DOWNLOADED_EDITOR=0
+DIST_URL="https://github.com/$FRONTEND_REPO/releases/download/$FRONTEND_TAG/dist.zip"
+echo "==> Downloading $DIST_URL"
 
-if [ -d "$TMP_DIR/ComfyUI/web" ]; then
-  cp -r "$TMP_DIR/ComfyUI/web/"* "$DIST/"
-else
-  echo "==> Note: ComfyUI's frontend has moved to a separate repo (Comfy-Org/ComfyUI_frontend)"
-  echo "    Falling back to fetching from there..."
-  git clone --depth 1 \
-    https://github.com/Comfy-Org/ComfyUI_frontend.git "$TMP_DIR/frontend" 2>&1 | tail -3
-  if [ -d "$TMP_DIR/frontend/dist" ]; then
-    cp -r "$TMP_DIR/frontend/dist/"* "$DIST/"
-  else
-    echo "WARNING: ComfyUI frontend dist not found. You'll need to build it separately."
-    echo "         See https://github.com/Comfy-Org/ComfyUI_frontend for build instructions."
-    echo "         The auth + dispatcher patches won't be applied automatically."
-  fi
+# Prefer gh (handles auth + rate limits). Fall back to curl.
+if command -v gh >/dev/null 2>&1 && \
+     gh release download "$FRONTEND_TAG" --repo "$FRONTEND_REPO" \
+        --pattern dist.zip --dir "$TMP_DIR" 2>/dev/null; then
+  DOWNLOADED_EDITOR=1
+elif curl -fSL "$DIST_URL" -o "$TMP_DIR/dist.zip" 2>&1 | tail -3; then
+  DOWNLOADED_EDITOR=1
 fi
 
-# Step 2: Apply our patches.
-# We inject a small <script src="config.js"></script> + <script src="auth.js"></script>
-# into index.html so the frontend uses our API + Cognito auth.
+if [ "$DOWNLOADED_EDITOR" = "1" ] && [ -s "$TMP_DIR/dist.zip" ]; then
+  echo "==> Extracting ComfyUI editor"
+  unzip -q "$TMP_DIR/dist.zip" -d "$TMP_DIR/dist"
+  # The zip contains the dist/ folder contents at top-level.
+  cp -r "$TMP_DIR/dist/"* "$DIST/"
+else
+  echo "WARNING: failed to download $DIST_URL"
+  echo "         Falling back to landing page only."
+fi
+
+# Step 2: Inject our patches into the editor's index.html.
+# The Vite-built index.html is one minified line; </head> still appears literally
+# so a sed replacement works. We inject BEFORE </head> so our shim is registered
+# before the bundled <script type=module> at the end of <head> kicks off any
+# async work. Order matters: config.js must load before auth.js + api-shim.js
+# (both read window.COMFY_CONFIG synchronously).
 INDEX="$DIST/index.html"
 if [ -f "$INDEX" ]; then
-  echo "==> Patching index.html with config.js + auth.js"
-  # Insert before </head>. Idempotent — only adds if not already there.
-  if ! grep -q "config\.js" "$INDEX"; then
-    if command -v gsed >/dev/null 2>&1; then SED=gsed; else SED=sed; fi
-    "$SED" -i 's#</head>#<script src="config.js"></script><script src="auth.js"></script><script src="api-shim.js"></script></head>#' "$INDEX"
+  echo "==> Patching index.html with config.js + auth.js + api-shim.js"
+  # Idempotent — only adds if not already there.
+  if ! grep -q "comfy-aws-config" "$INDEX"; then
+    INJECT='<script src="config.js" data-comfy-aws-config></script><script src="auth.js"></script><script src="api-shim.js"></script>'
+    # Cross-platform in-place replace. GNU sed: `-i`. BSD sed (macOS): `-i ''`.
+    # Sniff via `sed --version` (GNU prints, BSD errors out).
+    if sed --version >/dev/null 2>&1; then
+      sed -i "s#</head>#${INJECT}</head>#" "$INDEX"
+    else
+      sed -i '' "s#</head>#${INJECT}</head>#" "$INDEX"
+    fi
   fi
 fi
 
@@ -64,9 +92,8 @@ cp "$REPO_ROOT/frontend/viewer/index.html"    "$DIST/viewer.html"
 cp "$REPO_ROOT/frontend/viewer/app.js"        "$DIST/viewer.js"
 cp "$REPO_ROOT/frontend/styles.css"           "$DIST/comfy-aws-queue.css"
 
-# If we couldn't get a vanilla ComfyUI workflow editor (the upstream Vite app
-# moved to its own repo and doesn't ship a pre-built dist), drop in our
-# fallback landing page so / has something useful.
+# If the editor download failed, drop in the fallback landing page so / still
+# has something useful at the bucket root.
 if [ ! -f "$DIST/index.html" ]; then
   echo "==> No upstream ComfyUI index.html found; using fallback landing page"
   cp "$REPO_ROOT/frontend/landing.html" "$DIST/index.html"
@@ -74,7 +101,15 @@ fi
 
 # Note: config.js is generated by the CDK FrontendStack at deploy time.
 # It contains the API URL, Cognito pool ID, and client ID.
+#
+# WebSocket support: the ComfyUI editor opens a WS to ${api_base}/ws for live
+# preview frames + queue updates. We don't run a WS server (Lambda can't), so
+# the WS connect will fail silently. The editor still loads, you can build
+# workflows and click Queue, but you won't see live preview frames. Job status
+# can be polled via /jobs/{id}. v2 idea: API GW WebSocket → DDB pub/sub.
 
 echo "==> Frontend built to $DIST"
 echo "    Files:"
 ls -lh "$DIST" | head -20
+echo "    Total size:"
+du -sh "$DIST"
