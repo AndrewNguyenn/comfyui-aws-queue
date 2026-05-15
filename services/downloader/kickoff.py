@@ -27,7 +27,30 @@ lam = boto3.client("lambda")
 DOWNLOADS_TABLE = os.environ["DOWNLOADS_TABLE"]
 DOWNLOAD_WORKER_FN = os.environ["DOWNLOAD_WORKER_FN"]
 
-ALLOWED_TYPES = ("checkpoint", "lora", "vae", "controlnet", "clip", "embedding", "upscale")
+# Catalog model types. Each maps to a directory under ComfyUI's models/ tree.
+# When unsure: use 'diffusion_models' for raw UNet/transformer checkpoints
+# (Wan 2.x, Flux, etc.) and 'text_encoders' for the matching text encoders
+# (T5/UMT5/CLIP-L). Standard SD1.5/SDXL fully-baked checkpoints go in 'checkpoint'.
+ALLOWED_TYPES = (
+    "checkpoint",        # → models/checkpoints — full SD1.5/SDXL/SD3 checkpoints
+    "diffusion_models",  # → models/diffusion_models — Wan, Flux, raw UNet/DiT (incl. GGUF)
+    "text_encoders",     # → models/text_encoders — UMT5 (Wan), T5 (Flux), etc.
+    "lora",              # → models/loras
+    "vae",               # → models/vae
+    "vae_approx",        # → models/vae_approx — TAESD-style fast preview VAEs
+    "controlnet",        # → models/controlnet
+    "clip",              # → models/clip — text encoder (legacy SDXL clip-L/G)
+    "clip_vision",       # → models/clip_vision — image conditioning (IPAdapter, I2V)
+    "embedding",         # → models/embeddings — textual inversion
+    "upscale",           # → models/upscale_models — ESRGAN/etc.
+    "style_models",      # → models/style_models — style transfer
+    "gligen",            # → models/gligen — GLIGEN bbox-conditioned
+    "hypernetworks",     # → models/hypernetworks — old-style fine-tuning
+    "photomaker",        # → models/photomaker — face-conditioned generation
+    "audio_encoders",    # → models/audio_encoders — for audio-conditioned video
+    "model_patches",     # → models/model_patches
+    "unet",              # → models/unet — deprecated alias for diffusion_models
+)
 DOWNLOAD_TTL = timedelta(hours=24)
 
 

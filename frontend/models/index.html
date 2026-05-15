@@ -24,13 +24,30 @@
         </label>
         <label>Model type
           <select id="model-type" required>
-            <option value="checkpoint">Checkpoint</option>
-            <option value="lora">LoRA</option>
-            <option value="vae">VAE</option>
-            <option value="controlnet">ControlNet</option>
-            <option value="clip">CLIP</option>
-            <option value="embedding">Embedding</option>
-            <option value="upscale">Upscale</option>
+            <optgroup label="Common">
+              <option value="checkpoint">Checkpoint (SD1.5 / SDXL / SD3 fully baked)</option>
+              <option value="diffusion_models">Diffusion model (Wan / Flux / raw UNet incl. GGUF)</option>
+              <option value="lora">LoRA</option>
+              <option value="vae">VAE</option>
+              <option value="controlnet">ControlNet</option>
+            </optgroup>
+            <optgroup label="Text / vision encoders">
+              <option value="text_encoders">Text encoder (UMT5 for Wan, T5 for Flux)</option>
+              <option value="clip">CLIP (SDXL clip-L / clip-G)</option>
+              <option value="clip_vision">CLIP vision (IPAdapter, I2V)</option>
+            </optgroup>
+            <optgroup label="Auxiliary">
+              <option value="upscale">Upscale (ESRGAN, etc.)</option>
+              <option value="embedding">Embedding (textual inversion)</option>
+              <option value="vae_approx">VAE approx (TAESD)</option>
+              <option value="style_models">Style model</option>
+              <option value="gligen">GLIGEN</option>
+              <option value="hypernetworks">Hypernetwork</option>
+              <option value="photomaker">PhotoMaker</option>
+              <option value="audio_encoders">Audio encoder</option>
+              <option value="model_patches">Model patches</option>
+              <option value="unet">UNet (deprecated, use diffusion_models)</option>
+            </optgroup>
           </select>
         </label>
         <button type="submit">Download</button>

@@ -282,23 +282,51 @@ _INPUT_TO_MODEL_TYPE = {
     "lora_name": "lora",
     "vae_name": "vae",
     "control_net_name": "controlnet",
+    "controlnet_name": "controlnet",
     "clip_name": "clip",
-    "unet_name": "checkpoint",
-    "model_name": "checkpoint",
+    "clip_vision_name": "clip_vision",
+    "text_encoder_name": "text_encoders",
+    "embedding_name": "embedding",
+    "unet_name": "diffusion_models",      # ComfyUI deprecated 'unet/' → 'diffusion_models/'
+    "diffusion_model_name": "diffusion_models",
+    "style_model_name": "style_models",
+    "gligen_name": "gligen",
+    "hypernetwork_name": "hypernetworks",
+    "photomaker_name": "photomaker",
+    "upscale_model_name": "upscale",
+    # 'model_name' is ambiguous — handled by _guess_model_type_from_input below
+    # so we can use node_class to disambiguate Wan/Flux/etc.
 }
 
 
 def _guess_model_type_from_input(node_class: str, input_name: str) -> str | None:
-    """Map ComfyUI input names (and node-class hints) to our DDB catalog 'type'."""
+    """Map ComfyUI input names (and node-class hints) to our DDB catalog 'type'.
+    Falls back to substring heuristics when there's no direct mapping."""
     direct = _INPUT_TO_MODEL_TYPE.get(input_name)
     if direct:
         return direct
-    if "lora" in input_name.lower():
+
+    name_lc = input_name.lower()
+    class_lc = node_class.lower()
+
+    # Wan / Hunyuan / Flux / SD3 — modern transformer-based models live in diffusion_models/
+    if "model" in name_lc and any(
+        k in class_lc for k in ("wan", "hunyuan", "flux", "sd3", "ltx", "cog", "pyramid")
+    ):
+        return "diffusion_models"
+    # Wan/Flux text encoders
+    if "text_encoder" in name_lc or ("encoder" in name_lc and "audio" not in name_lc):
+        return "text_encoders"
+    if "lora" in name_lc:
         return "lora"
-    if "vae" in input_name.lower():
+    if "vae" in name_lc:
         return "vae"
-    if "wan" in node_class.lower() and "model" in input_name.lower():
-        return "checkpoint"
+    if "clip_vision" in name_lc or "clipvision" in name_lc:
+        return "clip_vision"
+    if "controlnet" in name_lc or "control_net" in name_lc:
+        return "controlnet"
+    if "upscale" in name_lc:
+        return "upscale"
     return None
 
 

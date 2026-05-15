@@ -269,7 +269,11 @@ class CacheManager:
 
 
 def _comfy_type_dir(catalog_type: str) -> str:
-    """Map our catalog 'type' to ComfyUI's models/ subdirectory name."""
+    """Map our catalog 'type' to ComfyUI's models/ subdirectory name.
+    The fallback (`.get(..., catalog_type)`) handles types whose catalog name
+    already matches the dir name (diffusion_models, text_encoders, clip_vision,
+    style_models, gligen, hypernetworks, photomaker, audio_encoders, vae_approx,
+    model_patches, unet)."""
     return {
         "checkpoint": "checkpoints",
         "lora": "loras",
