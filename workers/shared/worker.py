@@ -24,11 +24,18 @@ import boto3
 from cache_manager import CacheManager
 from comfy_client import ComfyClient
 from comfy_supervisor import ComfySupervisor
-from extensions_publisher import publish_extensions
 from object_info_publisher import publish_object_info
 from output_uploader import OutputUploader
 from spot_handler import SpotHandler, make_default_on_terminate
 from ws_bridge import WsBridge
+
+# extensions_publisher is optional — older container images don't ship it.
+# Make import non-fatal so the worker doesn't crash on an old image during
+# rolling deploys.
+try:
+    from extensions_publisher import publish_extensions
+except ImportError:
+    publish_extensions = None  # type: ignore
 
 log = logging.getLogger(__name__)
 logging.basicConfig(
@@ -109,10 +116,11 @@ def main() -> int:
     # Publish custom-node JS extensions (Manager UI etc.) to S3 frontend bucket.
     # Editor calls /api/extensions to discover them, then loads each from the
     # frontend origin. Best-effort; failures don't block job processing.
-    try:
-        publish_extensions(FLEET)
-    except Exception:  # noqa: BLE001
-        log.exception("extensions publish failed (non-fatal)")
+    if publish_extensions is not None:
+        try:
+            publish_extensions(FLEET)
+        except Exception:  # noqa: BLE001
+            log.exception("extensions publish failed (non-fatal)")
 
     uploader = OutputUploader(OUTPUTS_BUCKET, REGION, COMFY_OUTPUT_DIR)
 
