@@ -36,7 +36,8 @@ export class AuthStack extends Stack {
       signInAliases: { username: true, email: true },
       autoVerify: { email: true },
       passwordPolicy: {
-        minLength: 12,
+        // Single-user personal deployment — 8 char minimum is acceptable risk.
+        minLength: 8,
         requireLowercase: true,
         requireUppercase: true,
         requireDigits: true,

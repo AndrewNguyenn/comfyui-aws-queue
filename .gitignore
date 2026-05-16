@@ -55,3 +55,4 @@ cdk.local.json
 
 # Docker build context noise
 .dockerignore.local
+.claude/

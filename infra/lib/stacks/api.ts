@@ -10,12 +10,14 @@ import { AppConfig } from '../config';
 import { StorageStack } from './storage';
 import { QueueStack } from './queue';
 import { AuthStack } from './auth';
+import { WebSocketStack } from './websocket';
 
 export interface ApiStackProps extends StackProps {
   readonly config: AppConfig;
   readonly storage: StorageStack;
   readonly queue: QueueStack;
   readonly auth: AuthStack;
+  readonly websocket: WebSocketStack;
 }
 
 /**
@@ -92,6 +94,10 @@ export class ApiStack extends Stack {
     storage.jobsTable.grantReadWriteData(this.dispatcherFn);
     storage.modelsTable.grantReadData(this.dispatcherFn);
     storage.objectInfoTable.grantReadWriteData(this.dispatcherFn);
+    // /ws-ticket needs to read the HMAC secret to sign tickets.
+    storage.wsTicketSecret.grantRead(this.dispatcherFn);
+    this.dispatcherFn.addEnvironment('WS_TICKET_SECRET_ARN', storage.wsTicketSecret.secretArn);
+    this.dispatcherFn.addEnvironment('WS_API_ENDPOINT', props.websocket.wsStage.url);
 
     // ----- Lambda: EditorCompat -----
     // Same code asset as dispatcher (handler.py routes by event["resource"]),
@@ -171,6 +177,30 @@ export class ApiStack extends Stack {
     // Wire the kickoff → worker async invoke
     this.downloadWorkerFn.grantInvoke(this.downloadKickoffFn);
     this.downloadKickoffFn.addEnvironment('DOWNLOAD_WORKER_FN', this.downloadWorkerFn.functionName);
+
+    // ----- Lambda: WebSocket Forward (REST endpoint /internal/ws-event) -----
+    // Workers POST events here; Lambda pushes them to the right WS connection.
+    const wsForwardFn = new lambda.Function(this, 'WsForwardFn', {
+      ...commonLambdaProps,
+      functionName: 'comfy-ws-forward',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../../services/websocket')),
+      handler: 'forward.lambda_handler',
+      description: 'Pushes ComfyUI events from worker to browser via WS API',
+      environment: {
+        REGION: this.region,
+        CONNECTIONS_TABLE: props.websocket.connectionsTable.tableName,
+        WS_API_ENDPOINT: `https://${props.websocket.wsApi.apiId}.execute-api.${this.region}.amazonaws.com/${props.websocket.wsStage.stageName}`,
+      },
+    });
+    props.websocket.connectionsTable.grantReadWriteData(wsForwardFn);
+    // Grant manage-connections on the WS API. CDK doesn't expose a helper for
+    // this; we add the IAM policy explicitly.
+    wsForwardFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['execute-api:ManageConnections'],
+      resources: [
+        `arn:aws:execute-api:${this.region}:${this.account}:${props.websocket.wsApi.apiId}/*`,
+      ],
+    }));
 
     // ----- API Gateway -----
     const apiLogs = new logs.LogGroup(this, 'ApiAccessLogs', {
@@ -311,6 +341,19 @@ export class ApiStack extends Stack {
       new apigw.LambdaIntegration(this.dispatcherFn),
       { apiKeyRequired: true } // No Cognito; API key only
     );
+    // Worker → server WebSocket event push (also API-key authed).
+    const internalWsEvent = internal.addResource('ws-event');
+    internalWsEvent.addMethod(
+      'POST',
+      new apigw.LambdaIntegration(wsForwardFn),
+      { apiKeyRequired: true }
+    );
+
+    // ----- /ws-ticket (Cognito-authed) -----
+    // Browser fetches this before opening a WebSocket; response includes the
+    // WS URL and a 60-sec HMAC ticket the WS connect Lambda validates.
+    const wsTicket = root.addResource('ws-ticket');
+    wsTicket.addMethod('GET', dispatcherIntegration, authMethodOptions);
 
     // Stub endpoints that ComfyUI's frontend expects (resolves N16 from review).
     // Return minimal responses so the UI doesn't 404. dispatcher handler

@@ -22,9 +22,11 @@
 // this shim — but we still rewrite bare relative paths like `/prompt` for
 // good measure, in case a stray script in the editor uses fetch() directly.)
 //
-// WebSocket interception is OUT OF SCOPE — we don't run a WS server. The
-// editor's `${api_base}/ws` connection will fail silently; live preview frames
-// won't render but workflows can still be queued via POST /api/prompt.
+// WebSocket: intercepted below. The editor opens `wss://<host>/ws` (or
+// `/api/ws`) for live progress events. We swap that for a connection to our
+// API GW WebSocket API, after fetching a short-lived HMAC ticket from the
+// REST /ws-ticket endpoint (Cognito-authed). Worker-side bridge forwards
+// ComfyUI's local WS events through to the right browser by client_id.
 (function () {
   const cfg = window.COMFY_CONFIG || {};
   const API_BASE = (cfg.apiUrl || "").replace(/\/$/, "");
@@ -103,4 +105,158 @@
     }
     return r;
   };
+
+  // ----- WebSocket interception -----
+  //
+  // The editor opens `ws(s)://<origin>/api/ws?...` (or sometimes `/ws`). We
+  // detect that pattern, fetch a fresh HMAC ticket from /ws-ticket, then open
+  // the real WebSocket against our API GW WebSocket endpoint with the ticket
+  // in the query string. We expose the underlying WebSocket via a Proxy that
+  // queues sends until the real socket is open.
+  const OriginalWebSocket = window.WebSocket;
+
+  function isComfyWsUrl(url) {
+    if (typeof url !== "string") return false;
+    // Same-origin path-style: '/api/ws?...' or '/ws?...'
+    if (url.startsWith("/api/ws") || url === "/api/ws") return true;
+    if (url.startsWith("/ws") || url === "/ws") return true;
+    // Absolute URL whose path matches: 'wss://localhost/api/ws?...'
+    try {
+      const u = new URL(url, window.location.href);
+      return u.pathname === "/api/ws" || u.pathname === "/ws";
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  // Cache the ticket+url for ~50 sec (ticket is valid for 60). Avoids hitting
+  // /ws-ticket on every reconnect attempt during a flaky session.
+  let _ticketCache = { value: null, expiresAt: 0 };
+  async function fetchTicket() {
+    const now = Date.now();
+    if (_ticketCache.value && now < _ticketCache.expiresAt) {
+      return _ticketCache.value;
+    }
+    const t = window.comfyAuth ? window.comfyAuth.getIdToken() : null;
+    if (!t) throw new Error("not signed in");
+    const r = await origFetch(`${API_BASE}/ws-ticket`, {
+      headers: { Authorization: t },
+    });
+    if (!r.ok) throw new Error(`ws-ticket HTTP ${r.status}`);
+    const data = await r.json();
+    _ticketCache = {
+      value: data,
+      expiresAt: now + 50_000,
+    };
+    return data;
+  }
+
+  // Wrapper: behaves like a WebSocket but does the async ticket fetch first.
+  // Implements the readyState/onopen/onmessage/onclose/onerror surface.
+  function ComfyWebSocket(_url, _protocols) {
+    const self = this;
+    self.readyState = 0; // CONNECTING
+    self.bufferedAmount = 0;
+    self.url = _url;
+    self.protocol = "";
+    self.binaryType = "blob";
+
+    const listeners = { open: [], message: [], close: [], error: [] };
+    const pending = []; // queued sends until inner WS is ready
+    let inner = null;
+    let closed = false;
+
+    function emit(name, evt) {
+      // Direct .onX handler
+      const h = self["on" + name];
+      if (typeof h === "function") {
+        try { h.call(self, evt); } catch (e) { console.error(e); }
+      }
+      // Listeners added via addEventListener
+      for (const fn of listeners[name] || []) {
+        try { fn.call(self, evt); } catch (e) { console.error(e); }
+      }
+    }
+
+    self.addEventListener = (name, fn) => {
+      (listeners[name] = listeners[name] || []).push(fn);
+    };
+    self.removeEventListener = (name, fn) => {
+      listeners[name] = (listeners[name] || []).filter((f) => f !== fn);
+    };
+    self.send = (data) => {
+      if (closed) throw new Error("WebSocket is closed");
+      if (inner && inner.readyState === 1) {
+        inner.send(data);
+      } else {
+        pending.push(data);
+      }
+    };
+    self.close = (code, reason) => {
+      closed = true;
+      self.readyState = 3; // CLOSED
+      if (inner) inner.close(code, reason);
+    };
+
+    fetchTicket()
+      .then(({ ws_url, ticket, client_id }) => {
+        if (closed) return;
+        // Append client_id from the original URL if present (editor passes one).
+        let originalClient = "";
+        try {
+          const u = new URL(_url, window.location.href);
+          originalClient = u.searchParams.get("clientId") || "";
+        } catch (_e) {}
+        const cid = originalClient || client_id;
+        const realUrl = `${ws_url}?ticket=${encodeURIComponent(ticket)}&client_id=${encodeURIComponent(cid)}`;
+        // Stash so callers / debug can read it
+        self.url = realUrl;
+        // Expose client_id so calling code (and prompt submission) can use it
+        window.comfyClientId = cid;
+
+        inner = new OriginalWebSocket(realUrl);
+        inner.binaryType = self.binaryType;
+        inner.onopen = (e) => {
+          self.readyState = 1; // OPEN
+          // Flush any queued sends
+          for (const d of pending.splice(0)) {
+            try { inner.send(d); } catch (err) { console.error(err); }
+          }
+          emit("open", e);
+        };
+        inner.onmessage = (e) => emit("message", e);
+        inner.onclose = (e) => {
+          self.readyState = 3;
+          emit("close", e);
+        };
+        inner.onerror = (e) => emit("error", e);
+      })
+      .catch((err) => {
+        console.error("ws ticket fetch failed:", err);
+        self.readyState = 3;
+        emit("error", err);
+        emit("close", { code: 1006, reason: "ticket fetch failed" });
+      });
+  }
+  // Mirror the standard WebSocket constants on our wrapper.
+  ComfyWebSocket.CONNECTING = 0;
+  ComfyWebSocket.OPEN = 1;
+  ComfyWebSocket.CLOSING = 2;
+  ComfyWebSocket.CLOSED = 3;
+  ComfyWebSocket.prototype.CONNECTING = 0;
+  ComfyWebSocket.prototype.OPEN = 1;
+  ComfyWebSocket.prototype.CLOSING = 2;
+  ComfyWebSocket.prototype.CLOSED = 3;
+
+  window.WebSocket = function (url, protocols) {
+    if (isComfyWsUrl(url)) {
+      return new ComfyWebSocket(url, protocols);
+    }
+    return new OriginalWebSocket(url, protocols);
+  };
+  // Inherit constants on the new constructor too.
+  window.WebSocket.CONNECTING = 0;
+  window.WebSocket.OPEN = 1;
+  window.WebSocket.CLOSING = 2;
+  window.WebSocket.CLOSED = 3;
 })();

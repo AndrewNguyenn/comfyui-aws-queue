@@ -34,6 +34,7 @@ export class StorageStack extends Stack {
   public readonly downloadsTable: dynamodb.Table;
   public readonly objectInfoTable: dynamodb.Table;
   public readonly civitaiTokenSecret: secretsmanager.Secret;
+  public readonly wsTicketSecret: secretsmanager.Secret;
 
   constructor(scope: Construct, id: string, props: StorageStackProps) {
     super(scope, id, props);
@@ -199,6 +200,22 @@ export class StorageStack extends Stack {
         'CivitAI API token for downloading gated models. Populate manually after deploy.',
       secretObjectValue: {
         token: SecretValue.unsafePlainText('PLACEHOLDER_NOT_SET'),
+      },
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+
+    // Auto-generated HMAC secret for short-lived WebSocket tickets. Used by:
+    //   - dispatcher /ws-ticket endpoint to sign tickets
+    //   - WebSocket $connect Lambda to verify them
+    // Auto-rotated never (client tickets are 60 sec); CDK generates a 32-byte
+    // hex string at first deploy and reuses it forever unless secret is deleted.
+    this.wsTicketSecret = new secretsmanager.Secret(this, 'WsTicketSecret', {
+      secretName: 'comfy/ws-ticket-hmac',
+      description:
+        'HMAC secret for signing short-lived WebSocket connection tickets',
+      generateSecretString: {
+        excludePunctuation: true,
+        passwordLength: 64,
       },
       removalPolicy: RemovalPolicy.RETAIN,
     });

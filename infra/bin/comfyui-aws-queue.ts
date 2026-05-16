@@ -11,6 +11,7 @@ import { ApiStack } from '../lib/stacks/api';
 import { CiStack } from '../lib/stacks/ci';
 import { ComputeStack } from '../lib/stacks/compute';
 import { FrontendStack } from '../lib/stacks/frontend';
+import { WebSocketStack } from '../lib/stacks/websocket';
 
 const app = new App();
 
@@ -65,14 +66,28 @@ const auth = new AuthStack(app, 'ComfyAuthStack', {
 });
 Tags.of(auth).add('Component', 'auth');
 
+// WebSocket stack is created BEFORE the REST API stack because the REST API
+// references the WS API endpoint via SSM (for the /ws-ticket response). The
+// SSM parameter is created during ws stack synth so REST stack can resolve it
+// at deploy time.
+const websocket = new WebSocketStack(app, 'ComfyWebSocketStack', {
+  env,
+  config: APP_CONFIG,
+  storage,
+  description: 'WebSocket API for live ComfyUI event streaming',
+});
+Tags.of(websocket).add('Component', 'websocket');
+
 const api = new ApiStack(app, 'ComfyApiStack', {
   env,
   config: APP_CONFIG,
   storage,
   queue,
   auth,
+  websocket,
   description: 'API Gateway + Lambda functions (dispatcher, status, catalog, downloader)',
 });
+api.addDependency(websocket);
 Tags.of(api).add('Component', 'api');
 
 // Phase 3 — CI (CodeBuild + ECR)

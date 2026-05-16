@@ -16,6 +16,9 @@ Authentication:
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import os
 import time
@@ -32,6 +35,7 @@ from workflow_router import classify_workflow
 sqs = boto3.client("sqs")
 ddb = boto3.client("dynamodb")
 s3 = boto3.client("s3")
+sm = boto3.client("secretsmanager")
 
 JOBS_TABLE = os.environ["JOBS_TABLE"]
 MODELS_TABLE = os.environ["MODELS_TABLE"]
@@ -39,6 +43,10 @@ OBJECT_INFO_TABLE = os.environ["OBJECT_INFO_TABLE"]
 IMAGE_QUEUE_URL = os.environ["IMAGE_QUEUE_URL"]
 VIDEO_QUEUE_URL = os.environ["VIDEO_QUEUE_URL"]
 OUTPUTS_BUCKET = os.environ.get("OUTPUTS_BUCKET", "")  # Storage for userdata + settings
+WS_TICKET_SECRET_ARN = os.environ.get("WS_TICKET_SECRET_ARN", "")
+WS_API_ENDPOINT = os.environ.get("WS_API_ENDPOINT", "")  # wss://<id>.execute-api.<region>.amazonaws.com/v1
+
+_ws_ticket_secret_cache: bytes | None = None
 
 # Job records expire from DDB after 30 days (TTL attribute).
 JOB_TTL = timedelta(days=30)
@@ -65,6 +73,8 @@ def lambda_handler(event: dict, context: Any) -> dict:
             return _get_object_info(event)
         if method == "POST" and path == "/internal/object_info":
             return _post_internal_object_info(event)
+        if method == "GET" and path == "/ws-ticket":
+            return _get_ws_ticket(event)
 
         # Stub endpoints that ComfyUI's frontend polls but we don't need full impl
         if method == "GET" and path == "/queue":
@@ -389,6 +399,44 @@ def _scan_catalog_by_type() -> dict[str, list[str]]:
             if t and n:
                 grouped.setdefault(t, []).append(n)
     return grouped
+
+
+# ----- GET /ws-ticket (Cognito-authed) -----
+# Returns a short-lived HMAC-signed ticket the browser uses to open a WS
+# connection to the WebSocket API. Browser flow:
+#   1. fetch /ws-ticket (with Cognito Authorization header)
+#   2. Receive {ws_url, ticket, client_id}
+#   3. Open new WebSocket(ws_url + "?ticket=" + ticket + "&client_id=" + client_id)
+def _get_ws_ticket(event: dict) -> dict:
+    if not WS_TICKET_SECRET_ARN or not WS_API_ENDPOINT:
+        return _resp(503, {"error": "ws not configured"})
+    username = _claim_username(event)
+    # Use the client's provided client_id if any; else generate one. Returning
+    # it lets the browser use the same id when submitting prompts so events
+    # route back through.
+    qs = event.get("queryStringParameters") or {}
+    client_id = qs.get("client_id") or str(uuid.uuid4())
+
+    # 60-sec ticket: just enough to open the WS, short enough to limit replay.
+    payload = {
+        "sub": username,
+        "client_id": client_id,
+        "exp": int(time.time()) + 60,
+    }
+    payload_json = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    payload_b64 = base64.urlsafe_b64encode(payload_json).rstrip(b"=").decode()
+    sig = hmac.new(_get_ws_ticket_secret(), payload_b64.encode(), hashlib.sha256).digest()
+    sig_b64 = base64.urlsafe_b64encode(sig).rstrip(b"=").decode()
+    ticket = f"{payload_b64}.{sig_b64}"
+    return _resp(200, {"ws_url": WS_API_ENDPOINT, "ticket": ticket, "client_id": client_id})
+
+
+def _get_ws_ticket_secret() -> bytes:
+    global _ws_ticket_secret_cache
+    if _ws_ticket_secret_cache is None:
+        r = sm.get_secret_value(SecretId=WS_TICKET_SECRET_ARN)
+        _ws_ticket_secret_cache = r["SecretString"].encode("utf-8")
+    return _ws_ticket_secret_cache
 
 
 # ----- POST /internal/object_info (worker → dispatcher) -----

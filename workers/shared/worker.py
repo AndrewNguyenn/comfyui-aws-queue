@@ -27,6 +27,7 @@ from comfy_supervisor import ComfySupervisor
 from object_info_publisher import publish_object_info
 from output_uploader import OutputUploader
 from spot_handler import SpotHandler, make_default_on_terminate
+from ws_bridge import WsBridge
 
 log = logging.getLogger(__name__)
 logging.basicConfig(
@@ -166,9 +167,20 @@ def main() -> int:
             # new files after (handles custom nodes that bypass standard outputs).
             since = uploader.snapshot_marker()
 
-            # Submit + wait
-            prompt_id = client.submit_prompt(workflow, client_id=f"worker-{FLEET}")
-            client.wait_for_completion(prompt_id, timeout_seconds=VISIBILITY_TIMEOUT_SEC - 60)
+            # Use the browser-supplied client_id so events route back to the
+            # right WS connection. Fallback to a synthetic id if missing
+            # (older clients that didn't send one — events get dropped at
+            # the forward Lambda since no WS connection matches).
+            ws_client_id = job_record.get("client_id") or f"worker-{FLEET}-{job_id[:8]}"
+            ws_bridge = WsBridge(client_id=ws_client_id)
+            ws_bridge.start()
+
+            try:
+                # Submit + wait
+                prompt_id = client.submit_prompt(workflow, client_id=ws_client_id)
+                client.wait_for_completion(prompt_id, timeout_seconds=VISIBILITY_TIMEOUT_SEC - 60)
+            finally:
+                ws_bridge.stop()
 
             # Upload anything new from the output dir.
             output_keys = uploader.upload_new_outputs(job_id, since)
@@ -219,6 +231,7 @@ def _read_job(job_id: str) -> dict | None:
         "status": item.get("status", {"S": ""})["S"],
         "type": item.get("type", {"S": ""})["S"],
         "workflow_json": item.get("workflow_json", {"S": "{}"})["S"],
+        "client_id": item.get("client_id", {"S": ""})["S"],
     }
 
 

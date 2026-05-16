@@ -1,0 +1,1 @@
+# Lambda runtime includes boto3. No extra deps needed (HMAC + base64 are stdlib).
