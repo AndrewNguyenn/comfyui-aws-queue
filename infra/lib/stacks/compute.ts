@@ -161,12 +161,17 @@ export class ComputeStack extends Stack {
       maxCapacity,
     });
 
+    // targetValue=0.5: the AlarmHigh threshold becomes 0.5 (metric > 0.5),
+    // so a single visible message (= 1.0) triggers scale-out. AlarmLow
+    // threshold is 0.45 (metric < 0.45), so empty queue (= 0) scales in.
+    // Using targetValue=1 was a bug: alarm = metric > 1, so 1 message sat
+    // at the boundary forever and nothing fired.
     target.scaleToTrackCustomMetric(`${fleetName}TrackBacklog`, {
       metric: queue.metricApproximateNumberOfMessagesVisible({
         period: Duration.minutes(1),
         statistic: 'Maximum',
       }),
-      targetValue: 1,
+      targetValue: 0.5,
       scaleOutCooldown: Duration.seconds(60),
       scaleInCooldown: Duration.minutes(15),
     });
