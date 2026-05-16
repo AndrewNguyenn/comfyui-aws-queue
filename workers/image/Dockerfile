@@ -31,6 +31,15 @@ RUN git clone --depth 1 --branch ${COMFYUI_TAG} \
 # xformers ships pre-built wheels matching torch + CUDA versions in the NGC base.
 RUN pip install xformers
 
+# ---------- ComfyUI-Manager (custom node manager UI) ----------
+# Tracks main; pin to a tag/SHA in production for reproducible builds.
+WORKDIR /opt/comfy/custom_nodes
+ARG COMFYUI_MANAGER_REF=main
+RUN git clone https://github.com/Comfy-Org/ComfyUI-Manager.git \
+    && cd ComfyUI-Manager \
+    && git checkout ${COMFYUI_MANAGER_REF} \
+    && pip install -r requirements.txt
+
 # ---------- AWS + worker shared deps ----------
 COPY workers/shared/requirements.txt /tmp/req.txt
 RUN pip install -r /tmp/req.txt && rm /tmp/req.txt

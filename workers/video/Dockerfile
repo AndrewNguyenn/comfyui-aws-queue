@@ -71,6 +71,13 @@ RUN git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.
     && cd ComfyUI-VideoHelperSuite \
     && pip install -r requirements.txt
 
+# ComfyUI-Manager — custom node manager UI (install/update nodes from editor).
+ARG COMFYUI_MANAGER_REF=main
+RUN git clone https://github.com/Comfy-Org/ComfyUI-Manager.git \
+    && cd ComfyUI-Manager \
+    && git checkout ${COMFYUI_MANAGER_REF} \
+    && pip install -r requirements.txt
+
 # ---------- AWS + worker shared deps ----------
 COPY workers/shared/requirements.txt /tmp/req.txt
 RUN pip install -r /tmp/req.txt && rm /tmp/req.txt
