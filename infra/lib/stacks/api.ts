@@ -188,8 +188,26 @@ export class ApiStack extends Stack {
       defaultCorsPreflightOptions: {
         allowOrigins: apigw.Cors.ALL_ORIGINS, // Restricted later by Cognito
         allowMethods: apigw.Cors.ALL_METHODS,
-        allowHeaders: ['Content-Type', 'Authorization', 'X-Api-Key'],
+        allowHeaders: ['Content-Type', 'Authorization', 'X-Api-Key', 'Comfy-User'],
       },
+    });
+
+    // Gateway responses: ensure CORS headers land on 4xx/5xx too.
+    // Without these, a 403 from "Missing Authentication Token" (returned for
+    // unmatched routes) lacks Access-Control-Allow-Origin and the browser
+    // throws a CORS error before the JSON body is even readable.
+    const corsResponseHeaders = {
+      'Access-Control-Allow-Origin': "'*'",
+      'Access-Control-Allow-Headers': "'Content-Type,Authorization,X-Api-Key,Comfy-User'",
+      'Access-Control-Allow-Methods': "'GET,POST,PUT,DELETE,OPTIONS'",
+    };
+    this.api.addGatewayResponse('Default4xx', {
+      type: apigw.ResponseType.DEFAULT_4XX,
+      responseHeaders: corsResponseHeaders,
+    });
+    this.api.addGatewayResponse('Default5xx', {
+      type: apigw.ResponseType.DEFAULT_5XX,
+      responseHeaders: corsResponseHeaders,
     });
 
     // ----- Cognito authorizer -----
@@ -281,6 +299,61 @@ export class ApiStack extends Stack {
       const r = root.addResource(stubPath);
       r.addMethod('GET', dispatcherIntegration, authMethodOptions);
     }
+
+    // ----- ComfyUI editor (Comfy-Org/ComfyUI_frontend v1.x) compat routes -----
+    // The new editor calls these on startup. Without them the editor blocks
+    // on init or shows network errors. dispatcher handler implements them.
+
+    // GET /history (list mode, no id) — the editor polls this for queue history
+    const historyList = this.api.root.getResource('history')!;
+    historyList.addMethod('GET', dispatcherIntegration, authMethodOptions);
+
+    // /users
+    const users = root.addResource('users');
+    users.addMethod('GET', dispatcherIntegration, authMethodOptions);
+    users.addMethod('POST', dispatcherIntegration, authMethodOptions);
+
+    // /i18n + /i18n/{locale}
+    const i18n = root.addResource('i18n');
+    i18n.addMethod('GET', dispatcherIntegration, authMethodOptions);
+    i18n.addResource('{locale}').addMethod('GET', dispatcherIntegration, authMethodOptions);
+
+    // /free
+    const freeRes = root.addResource('free');
+    freeRes.addMethod('POST', dispatcherIntegration, authMethodOptions);
+
+    // /workflow_templates
+    root.addResource('workflow_templates').addMethod('GET', dispatcherIntegration, authMethodOptions);
+
+    // /global_subgraphs
+    root.addResource('global_subgraphs').addMethod('GET', dispatcherIntegration, authMethodOptions);
+
+    // /experiment/models + /experiment/models/{folder}
+    const experiment = root.addResource('experiment');
+    const experimentModels = experiment.addResource('models');
+    experimentModels.addMethod('GET', dispatcherIntegration, authMethodOptions);
+    experimentModels.addResource('{folder}').addMethod('GET', dispatcherIntegration, authMethodOptions);
+
+    // /settings, /settings/{id}
+    const settings = root.addResource('settings');
+    settings.addMethod('GET', dispatcherIntegration, authMethodOptions);
+    settings.addMethod('POST', dispatcherIntegration, authMethodOptions);
+    const settingById = settings.addResource('{id}');
+    settingById.addMethod('GET', dispatcherIntegration, authMethodOptions);
+    settingById.addMethod('POST', dispatcherIntegration, authMethodOptions);
+    settingById.addMethod('DELETE', dispatcherIntegration, authMethodOptions);
+
+    // /userdata, /userdata/{file+} (proxy for nested paths)
+    const userdata = root.addResource('userdata');
+    userdata.addMethod('GET', dispatcherIntegration, authMethodOptions);
+    const userdataFile = userdata.addResource('{file+}');
+    userdataFile.addMethod('GET', dispatcherIntegration, authMethodOptions);
+    userdataFile.addMethod('POST', dispatcherIntegration, authMethodOptions);
+    userdataFile.addMethod('DELETE', dispatcherIntegration, authMethodOptions);
+
+    // Grant dispatcher Lambda S3 access to the outputs bucket for userdata storage.
+    storage.outputsBucket.grantReadWrite(this.dispatcherFn);
+    this.dispatcherFn.addEnvironment('OUTPUTS_BUCKET', storage.outputsBucket.bucketName);
 
     // Publish key API outputs to SSM so other stacks can read them without
     // creating direct CFN dependencies (which would cause cyclical imports

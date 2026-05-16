@@ -31,12 +31,14 @@ from workflow_router import classify_workflow
 # AWS clients are created at module load (re-used across warm invocations).
 sqs = boto3.client("sqs")
 ddb = boto3.client("dynamodb")
+s3 = boto3.client("s3")
 
 JOBS_TABLE = os.environ["JOBS_TABLE"]
 MODELS_TABLE = os.environ["MODELS_TABLE"]
 OBJECT_INFO_TABLE = os.environ["OBJECT_INFO_TABLE"]
 IMAGE_QUEUE_URL = os.environ["IMAGE_QUEUE_URL"]
 VIDEO_QUEUE_URL = os.environ["VIDEO_QUEUE_URL"]
+OUTPUTS_BUCKET = os.environ.get("OUTPUTS_BUCKET", "")  # Storage for userdata + settings
 
 # Job records expire from DDB after 30 days (TTL attribute).
 JOB_TTL = timedelta(days=30)
@@ -55,14 +57,16 @@ def lambda_handler(event: dict, context: Any) -> dict:
     try:
         if method == "POST" and path == "/prompt":
             return _post_prompt(event)
+        if method == "GET" and path == "/history":
+            return _get_history_list(event)
         if method == "GET" and path == "/history/{id}":
             return _get_history(event)
         if method == "GET" and path == "/object_info":
             return _get_object_info(event)
         if method == "POST" and path == "/internal/object_info":
             return _post_internal_object_info(event)
-        # Stub endpoints that ComfyUI's frontend polls but we don't need to
-        # implement fully (resolves code review N16).
+
+        # Stub endpoints that ComfyUI's frontend polls but we don't need full impl
         if method == "GET" and path == "/queue":
             return _resp(200, {"queue_running": [], "queue_pending": []})
         if method == "GET" and path == "/system_stats":
@@ -74,7 +78,51 @@ def lambda_handler(event: dict, context: Any) -> dict:
             return _resp(200, [])
         if method == "GET" and path == "/extensions":
             return _resp(200, [])
-        return _resp(404, {"error": "not found"})
+
+        # New ComfyUI editor (Comfy-Org/ComfyUI_frontend v1.x) expects these.
+        # Most are stubs — return defaults so the editor loads cleanly.
+        if method == "GET" and path == "/users":
+            return _resp(200, _users_response(event))
+        if method == "POST" and path == "/users":
+            return _resp(200, {"username": _claim_username(event)})
+        if method == "GET" and path == "/i18n":
+            return _resp(200, {})
+        if method == "GET" and path == "/i18n/{locale}":
+            return _resp(200, {})
+        if method == "POST" and path == "/free":
+            return _resp(200, {"freed": True})
+        if method == "GET" and path == "/workflow_templates":
+            return _resp(200, {})
+        if method == "GET" and path == "/global_subgraphs":
+            return _resp(200, {})
+        if method == "GET" and path == "/experiment/models":
+            return _resp(200, _experiment_models())
+        if method == "GET" and path == "/experiment/models/{folder}":
+            return _resp(200, _experiment_models_for(event["pathParameters"]["folder"]))
+
+        # Storage-backed: settings + userdata. Each user gets a prefix in S3.
+        if method == "GET" and path == "/settings":
+            return _get_settings(event)
+        if method == "POST" and path == "/settings":
+            return _post_settings(event)
+        if method == "GET" and path == "/settings/{id}":
+            return _get_setting(event)
+        if method == "POST" and path == "/settings/{id}":
+            return _post_setting(event)
+        if method == "DELETE" and path == "/settings/{id}":
+            return _delete_setting(event)
+        if method == "GET" and path == "/userdata":
+            return _list_userdata(event)
+        if method == "GET" and path == "/userdata/{file+}":
+            return _get_userdata(event)
+        if method == "POST" and path == "/userdata/{file+}":
+            return _post_userdata(event)
+        if method == "DELETE" and path == "/userdata/{file+}":
+            return _delete_userdata(event)
+        if method == "POST" and path == "/userdata/{file+}/move/{dest+}":
+            return _move_userdata(event)
+
+        return _resp(404, {"error": "not found", "method": method, "path": path})
     except Exception as e:  # noqa: BLE001 — return JSON to client, log to CW
         print(f"ERROR {method} {path}: {e!r}")
         return _resp(500, {"error": "internal error"})
@@ -364,13 +412,250 @@ def _post_internal_object_info(event: dict) -> dict:
     return _resp(200, {"ok": True})
 
 
-def _resp(status: int, body: Any) -> dict:
+def _resp(status: int, body: Any, content_type: str = "application/json") -> dict:
+    if content_type == "application/json":
+        body_str = json.dumps(body) if not isinstance(body, str) else body
+    else:
+        body_str = body if isinstance(body, str) else str(body)
     return {
         "statusCode": status,
         "headers": {
-            "Content-Type": "application/json",
+            "Content-Type": content_type,
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type,Authorization",
+            "Access-Control-Allow-Headers": "Content-Type,Authorization,Comfy-User",
+            "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
         },
-        "body": json.dumps(body),
+        "body": body_str,
     }
+
+
+# ============================================================================
+# ComfyUI editor compatibility endpoints
+# ============================================================================
+#
+# The new Comfy-Org/ComfyUI_frontend (v1.x) calls these on startup. Most are
+# stubs returning empty defaults; settings + userdata are storage-backed using
+# S3 prefixes under the outputs bucket (path: userdata/<username>/...).
+#
+# Username comes from the Cognito ID token claims that API GW passes through
+# in event["requestContext"]["authorizer"]["claims"]["cognito:username"].
+
+def _claim_username(event: dict) -> str:
+    """Pull the Cognito username from the verified JWT claims."""
+    try:
+        claims = event["requestContext"]["authorizer"]["claims"]
+        return claims.get("cognito:username") or claims.get("sub", "anonymous")
+    except (KeyError, TypeError):
+        return "anonymous"
+
+
+def _userdata_prefix(event: dict, suffix: str = "") -> str:
+    user = _claim_username(event)
+    base = f"userdata/{user}/"
+    return base + suffix.lstrip("/")
+
+
+# ----- /users -----
+def _users_response(event: dict) -> dict:
+    """Single-user-per-account model. Editor expects {storage, users}."""
+    user = _claim_username(event)
+    return {"storage": "server", "users": {user: user}}
+
+
+# ----- /settings -----
+# All settings stored as a single JSON object at userdata/<user>/.settings.json.
+# GET /settings → whole object. POST /settings → replace whole object.
+# GET /settings/{id} → one value. POST /settings/{id} → set one value.
+def _settings_key(event: dict) -> str:
+    return _userdata_prefix(event, ".settings.json")
+
+
+def _load_settings(event: dict) -> dict:
+    try:
+        r = s3.get_object(Bucket=OUTPUTS_BUCKET, Key=_settings_key(event))
+        return json.loads(r["Body"].read().decode())
+    except s3.exceptions.NoSuchKey:
+        return {}
+    except (ClientError, json.JSONDecodeError):
+        return {}
+
+
+def _save_settings(event: dict, settings: dict) -> None:
+    s3.put_object(
+        Bucket=OUTPUTS_BUCKET,
+        Key=_settings_key(event),
+        Body=json.dumps(settings).encode(),
+        ContentType="application/json",
+    )
+
+
+def _get_settings(event: dict) -> dict:
+    return _resp(200, _load_settings(event))
+
+
+def _post_settings(event: dict) -> dict:
+    body = json.loads(event.get("body") or "{}")
+    if isinstance(body, dict):
+        _save_settings(event, body)
+    return _resp(200, {})
+
+
+def _get_setting(event: dict) -> dict:
+    setting_id = event["pathParameters"]["id"]
+    settings = _load_settings(event)
+    return _resp(200, settings.get(setting_id))
+
+
+def _post_setting(event: dict) -> dict:
+    setting_id = event["pathParameters"]["id"]
+    body_raw = event.get("body") or "null"
+    try:
+        value = json.loads(body_raw)
+    except json.JSONDecodeError:
+        value = body_raw
+    settings = _load_settings(event)
+    settings[setting_id] = value
+    _save_settings(event, settings)
+    return _resp(200, {})
+
+
+def _delete_setting(event: dict) -> dict:
+    setting_id = event["pathParameters"]["id"]
+    settings = _load_settings(event)
+    settings.pop(setting_id, None)
+    _save_settings(event, settings)
+    return _resp(200, {})
+
+
+# ----- /userdata -----
+# File-like storage. Each user gets a prefix; nested paths supported via
+# {file+} proxy. ComfyUI saves workflow JSON, default workflow, etc. here.
+def _userdata_filepath(event: dict) -> str:
+    raw = event["pathParameters"].get("file") or event["pathParameters"].get("file+", "")
+    return _userdata_prefix(event, raw)
+
+
+def _get_userdata(event: dict) -> dict:
+    key = _userdata_filepath(event)
+    qs = event.get("queryStringParameters") or {}
+    full = qs.get("full") in ("true", "1")
+    try:
+        r = s3.get_object(Bucket=OUTPUTS_BUCKET, Key=key)
+        body = r["Body"].read().decode("utf-8", errors="replace")
+        ctype = r.get("ContentType", "application/octet-stream")
+        if not full and ctype == "application/json":
+            return _resp(200, json.loads(body))
+        return _resp(200, body, content_type=ctype)
+    except s3.exceptions.NoSuchKey:
+        return _resp(404, {"error": "not found"})
+
+
+def _post_userdata(event: dict) -> dict:
+    key = _userdata_filepath(event)
+    raw_body = event.get("body") or ""
+    is_b64 = event.get("isBase64Encoded", False)
+    if is_b64:
+        import base64
+        body_bytes = base64.b64decode(raw_body)
+    else:
+        body_bytes = raw_body.encode("utf-8")
+    qs = event.get("queryStringParameters") or {}
+    overwrite = qs.get("overwrite", "true") not in ("false", "0")
+    if not overwrite:
+        try:
+            s3.head_object(Bucket=OUTPUTS_BUCKET, Key=key)
+            return _resp(409, {"error": "exists"})
+        except ClientError:
+            pass
+    s3.put_object(Bucket=OUTPUTS_BUCKET, Key=key, Body=body_bytes)
+    return _resp(200, {"path": key})
+
+
+def _delete_userdata(event: dict) -> dict:
+    key = _userdata_filepath(event)
+    s3.delete_object(Bucket=OUTPUTS_BUCKET, Key=key)
+    return _resp(200, {})
+
+
+def _move_userdata(event: dict) -> dict:
+    src_key = _userdata_filepath(event)
+    dest_raw = event["pathParameters"].get("dest") or event["pathParameters"].get("dest+", "")
+    dest_key = _userdata_prefix(event, dest_raw)
+    try:
+        s3.copy_object(
+            Bucket=OUTPUTS_BUCKET,
+            Key=dest_key,
+            CopySource={"Bucket": OUTPUTS_BUCKET, "Key": src_key},
+        )
+        s3.delete_object(Bucket=OUTPUTS_BUCKET, Key=src_key)
+        return _resp(200, {"moved": dest_key})
+    except ClientError as e:
+        return _resp(404, {"error": str(e)})
+
+
+def _list_userdata(event: dict) -> dict:
+    qs = event.get("queryStringParameters") or {}
+    sub_dir = qs.get("dir", "")
+    recurse = qs.get("recurse") in ("true", "1")
+    prefix = _userdata_prefix(event, sub_dir)
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
+    paginator = s3.get_paginator("list_objects_v2")
+    files: list[dict] = []
+    user_prefix = _userdata_prefix(event)
+    for page in paginator.paginate(Bucket=OUTPUTS_BUCKET, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            relative = key[len(user_prefix):] if key.startswith(user_prefix) else key
+            if not recurse and "/" in relative.lstrip("/"):
+                continue
+            files.append({
+                "path": relative,
+                "size": obj["Size"],
+                "modified": obj["LastModified"].timestamp(),
+            })
+    return _resp(200, files)
+
+
+# ----- /experiment/models -----
+def _experiment_models() -> dict:
+    """Return the model catalog grouped by type, in the editor's expected
+    folder structure shape."""
+    grouped = _scan_catalog_by_type()
+    return {folder: list(names) for folder, names in grouped.items()}
+
+
+def _experiment_models_for(folder: str) -> list:
+    grouped = _scan_catalog_by_type()
+    return list(grouped.get(folder, []))
+
+
+# ----- /history (no id, list mode) -----
+def _get_history_list(event: dict) -> dict:
+    """Return a list of recent jobs in ComfyUI's history shape."""
+    qs = event.get("queryStringParameters") or {}
+    max_items = min(int(qs.get("max_items", "200")), 500)
+    paginator = ddb.get_paginator("query")
+    history: dict[str, Any] = {}
+    try:
+        for page in paginator.paginate(
+            TableName=JOBS_TABLE,
+            IndexName="status-index",
+            KeyConditionExpression="#s = :s",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":s": {"S": "complete"}},
+            ScanIndexForward=False,
+            Limit=max_items,
+        ):
+            for item in page.get("Items", []):
+                job_id = item["job_id"]["S"]
+                output_keys = json.loads(item.get("output_keys", {"S": "[]"})["S"])
+                history[job_id] = {
+                    "outputs": _format_outputs(output_keys),
+                    "status": {"status_str": "success", "completed": True, "messages": []},
+                }
+            if len(history) >= max_items:
+                break
+    except ClientError:
+        pass
+    return _resp(200, history)
