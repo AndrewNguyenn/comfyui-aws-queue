@@ -303,17 +303,37 @@ def _get_object_info(_event: dict) -> dict:
 
 
 def _build_object_info() -> dict:
-    """Read worker-pushed /object_info from DDB, union image + video, swap
-    model name lists for live DDB catalog values.
+    """Read worker-pushed /object_info from S3 (large), union image + video,
+    swap model name lists for live DDB catalog values.
+
+    DDB row stores object_info_s3_key (the S3 location of the full JSON);
+    object_info JSON is too big for the 400 KB DDB item limit (~1-5 MB for
+    a typical install).
     """
-    # Fetch both fleets' object_info
     merged: dict[str, Any] = {}
     for fleet in ("image", "video"):
         try:
             r = ddb.get_item(TableName=OBJECT_INFO_TABLE, Key={"fleet": {"S": fleet}})
-            if "Item" in r:
-                fleet_oi = json.loads(r["Item"]["object_info_json"]["S"])
-                merged.update(fleet_oi)
+            item = r.get("Item")
+            if not item:
+                continue
+            # Prefer S3-stored key; fall back to legacy inline json for older rows
+            s3_key = item.get("object_info_s3_key", {}).get("S")
+            if s3_key and OUTPUTS_BUCKET:
+                try:
+                    s3_resp = s3.get_object(Bucket=OUTPUTS_BUCKET, Key=s3_key)
+                    fleet_oi = json.loads(s3_resp["Body"].read().decode())
+                    merged.update(fleet_oi)
+                except (ClientError, json.JSONDecodeError):
+                    pass
+            else:
+                inline = item.get("object_info_json", {}).get("S")
+                if inline:
+                    try:
+                        fleet_oi = json.loads(inline)
+                        merged.update(fleet_oi)
+                    except json.JSONDecodeError:
+                        pass
         except ClientError:
             pass
 
@@ -488,24 +508,44 @@ def _post_internal_extensions(event: dict) -> dict:
 
 
 # ----- POST /internal/object_info (worker → dispatcher) -----
+# object_info from a real install is 1-5 MB JSON (way past DDB's 400 KB item
+# limit). Store the JSON in S3 (outputs bucket, metadata/ prefix), keep just
+# the S3 key in DDB. _build_object_info reads via the S3 key.
 def _post_internal_object_info(event: dict) -> dict:
     body = json.loads(event.get("body") or "{}")
     fleet = body.get("fleet")
     object_info = body.get("object_info")
     if fleet not in ("image", "video") or not isinstance(object_info, dict):
         return _resp(400, {"error": "fleet must be image|video, object_info must be dict"})
+    if not OUTPUTS_BUCKET:
+        return _resp(500, {"error": "OUTPUTS_BUCKET unset"})
 
-    ddb.put_item(
+    s3_key = f"metadata/object_info/{fleet}.json"
+    try:
+        s3.put_object(
+            Bucket=OUTPUTS_BUCKET,
+            Key=s3_key,
+            Body=json.dumps(object_info).encode(),
+            ContentType="application/json",
+        )
+    except ClientError as e:
+        print(f"S3 put_object failed: {e!r}")
+        return _resp(500, {"error": "s3 write failed"})
+
+    # UpdateItem (not PutItem) preserves the extensions_json attribute that
+    # _post_internal_extensions writes on the same row.
+    ddb.update_item(
         TableName=OBJECT_INFO_TABLE,
-        Item={
-            "fleet": {"S": fleet},
-            "object_info_json": {"S": json.dumps(object_info)},
-            "updated_at": {"S": datetime.now(timezone.utc).isoformat()},
+        Key={"fleet": {"S": fleet}},
+        UpdateExpression="SET object_info_s3_key = :k, updated_at = :t REMOVE object_info_json",
+        ExpressionAttributeValues={
+            ":k": {"S": s3_key},
+            ":t": {"S": datetime.now(timezone.utc).isoformat()},
         },
     )
     # Invalidate this Lambda's in-memory cache so next /object_info re-fetches.
     _object_info_cache["data"] = None
-    return _resp(200, {"ok": True})
+    return _resp(200, {"ok": True, "s3_key": s3_key, "size_bytes": len(json.dumps(object_info))})
 
 
 def _resp(status: int, body: Any, content_type: str = "application/json") -> dict:
