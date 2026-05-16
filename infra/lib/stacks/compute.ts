@@ -162,7 +162,7 @@ export class ComputeStack extends Stack {
     });
 
     target.scaleToTrackCustomMetric(`${fleetName}TrackBacklog`, {
-      customMetric: queue.metricApproximateNumberOfMessagesVisible({
+      metric: queue.metricApproximateNumberOfMessagesVisible({
         period: Duration.minutes(1),
         statistic: 'Maximum',
       }),
