@@ -94,6 +94,10 @@ export class ApiStack extends Stack {
     storage.jobsTable.grantReadWriteData(this.dispatcherFn);
     storage.modelsTable.grantReadData(this.dispatcherFn);
     storage.objectInfoTable.grantReadWriteData(this.dispatcherFn);
+    // dispatcher writes object_info to outputs bucket (under metadata/ prefix)
+    // because the JSON exceeds DDB's 400 KB item limit, then reads it back
+    // when serving /object_info.
+    storage.outputsBucket.grantReadWrite(this.dispatcherFn);
     // /ws-ticket needs to read the HMAC secret to sign tickets.
     storage.wsTicketSecret.grantRead(this.dispatcherFn);
     this.dispatcherFn.addEnvironment('WS_TICKET_SECRET_ARN', storage.wsTicketSecret.secretArn);
