@@ -348,6 +348,13 @@ export class ApiStack extends Stack {
       new apigw.LambdaIntegration(wsForwardFn),
       { apiKeyRequired: true }
     );
+    // Worker → server custom-node extension publish (api-key authed).
+    const internalExtensions = internal.addResource('extensions');
+    internalExtensions.addMethod(
+      'POST',
+      new apigw.LambdaIntegration(this.dispatcherFn),
+      { apiKeyRequired: true }
+    );
 
     // ----- /ws-ticket (Cognito-authed) -----
     // Browser fetches this before opening a WebSocket; response includes the

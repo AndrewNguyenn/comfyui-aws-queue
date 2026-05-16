@@ -266,6 +266,7 @@ export class ComputeStack extends Stack {
         MODELS_BUCKET: storage.modelsBucket.bucketName,
         OUTPUTS_BUCKET: storage.outputsBucket.bucketName,
         UPLOADS_BUCKET: storage.uploadsBucket.bucketName,
+        FRONTEND_BUCKET: storage.frontendBucket.bucketName,
         MODELS_TABLE: storage.modelsTable.tableName,
         JOBS_TABLE: storage.jobsTable.tableName,
         OBJECT_INFO_TABLE: storage.objectInfoTable.tableName,
@@ -309,6 +310,11 @@ export class ComputeStack extends Stack {
     storage.jobsTable.grantReadWriteData(role);
     storage.modelsTable.grantReadData(role);
     storage.objectInfoTable.grantReadWriteData(role);
+    // Frontend bucket: write under extensions/ prefix only (custom-node JS files).
+    role.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: ['s3:PutObject', 's3:PutObjectAcl'],
+      resources: [`${storage.frontendBucket.bucketArn}/extensions/*`],
+    }));
     // Allow worker to fetch its API key value for /internal/object_info push.
     role.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: ['apigateway:GET'],

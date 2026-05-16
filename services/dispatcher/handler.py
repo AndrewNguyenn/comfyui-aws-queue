@@ -87,7 +87,9 @@ def lambda_handler(event: dict, context: Any) -> dict:
         if method == "GET" and path == "/embeddings":
             return _resp(200, [])
         if method == "GET" and path == "/extensions":
-            return _resp(200, [])
+            return _get_extensions()
+        if method == "POST" and path == "/internal/extensions":
+            return _post_internal_extensions(event)
 
         # New ComfyUI editor (Comfy-Org/ComfyUI_frontend v1.x) expects these.
         # Most are stubs — return defaults so the editor loads cleanly.
@@ -437,6 +439,52 @@ def _get_ws_ticket_secret() -> bytes:
         r = sm.get_secret_value(SecretId=WS_TICKET_SECRET_ARN)
         _ws_ticket_secret_cache = r["SecretString"].encode("utf-8")
     return _ws_ticket_secret_cache
+
+
+# ----- /extensions and /internal/extensions -----
+# Workers POST their list of extension JS file paths on boot. Dispatcher
+# returns the merged list to the editor. Files themselves live in the
+# frontend S3 bucket (uploaded by extensions_publisher) and are loaded by
+# the editor directly from there (same-origin, no api shim involved).
+def _get_extensions() -> dict:
+    """Return merged extension list from both fleets."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for fleet in ("image", "video"):
+        try:
+            r = ddb.get_item(TableName=OBJECT_INFO_TABLE, Key={"fleet": {"S": fleet}})
+            item = r.get("Item")
+            if not item:
+                continue
+            ext_json = item.get("extensions_json", {}).get("S", "[]")
+            for path in json.loads(ext_json):
+                if path not in seen:
+                    seen.add(path)
+                    merged.append(path)
+        except (ClientError, json.JSONDecodeError):
+            continue
+    return _resp(200, merged)
+
+
+def _post_internal_extensions(event: dict) -> dict:
+    body = json.loads(event.get("body") or "{}")
+    fleet = body.get("fleet")
+    extensions = body.get("extensions")
+    if fleet not in ("image", "video") or not isinstance(extensions, list):
+        return _resp(400, {"error": "fleet must be image|video, extensions must be list"})
+    # Update the fleet's row in the object_info table with the extensions list.
+    # We use UpdateItem rather than PutItem so we don't clobber the
+    # object_info_json attribute.
+    ddb.update_item(
+        TableName=OBJECT_INFO_TABLE,
+        Key={"fleet": {"S": fleet}},
+        UpdateExpression="SET extensions_json = :e, ext_updated_at = :t",
+        ExpressionAttributeValues={
+            ":e": {"S": json.dumps(extensions)},
+            ":t": {"S": datetime.now(timezone.utc).isoformat()},
+        },
+    )
+    return _resp(200, {"ok": True, "count": len(extensions)})
 
 
 # ----- POST /internal/object_info (worker → dispatcher) -----

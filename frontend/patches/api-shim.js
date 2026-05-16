@@ -39,6 +39,12 @@
   // Bare-path allowlist (used by our standalone pages and as a fallback). The
   // editor itself almost always goes through `/api/<path>`; the leading-`/api`
   // case is handled separately below.
+  //
+  // NOTE: `/extensions` is intentionally NOT in this list. The editor loads
+  // custom-node JS via raw `/extensions/<path>` URLs (not `/api/extensions/`).
+  // Those need to hit the frontend S3 origin (where extensions_publisher
+  // uploads them), NOT our REST API. The bare `/api/extensions` (the
+  // discovery endpoint) is handled by the `/api/` prefix branch above.
   const COMFY_API_PATHS = [
     "/prompt",
     "/history",
@@ -49,7 +55,6 @@
     "/upload/mask",
     "/system_stats",
     "/embeddings",
-    "/extensions",
     "/models",
     "/jobs",
     "/downloads",
