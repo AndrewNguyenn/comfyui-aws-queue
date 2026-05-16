@@ -1,0 +1,28 @@
+version: 0.2
+
+# Metadata container build. Smaller than worker images (~1 GB vs ~14 GB)
+# since no CUDA/torch-cuda/sage. Build time ~5 min.
+
+env:
+  variables:
+    REPO_NAME: "comfy-metadata"
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to ECR
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com"
+      - export REPO="$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO_NAME"
+      - export SHA="$CODEBUILD_RESOLVED_SOURCE_VERSION"
+      - if [ -z "$SHA" ]; then export SHA="$(date -u +%Y%m%d%H%M%S)"; fi
+      - echo Building "$REPO:$SHA"
+      - docker buildx create --use --name comfy-builder || docker buildx use comfy-builder
+
+  build:
+    commands:
+      - echo Build started on `date`
+      - docker buildx build --file workers/metadata/Dockerfile --tag "$REPO:$SHA" --tag "$REPO:latest" --cache-from "type=registry,ref=$REPO:cache" --cache-to "type=registry,ref=$REPO:cache,mode=max" --push .
+
+  post_build:
+    commands:
+      - echo Build complete tag "$REPO:$SHA"

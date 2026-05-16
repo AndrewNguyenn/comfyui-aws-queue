@@ -29,8 +29,10 @@ export interface CiStackProps extends StackProps {
 export class CiStack extends Stack {
   public readonly imageWorkerRepo: ecr.Repository;
   public readonly videoWorkerRepo: ecr.Repository;
+  public readonly metadataRepo: ecr.Repository;
   public readonly imageWorkerProject: codebuild.Project;
   public readonly videoWorkerProject: codebuild.Project;
+  public readonly metadataProject: codebuild.Project;
 
   constructor(scope: Construct, id: string, props: CiStackProps) {
     super(scope, id, props);
@@ -64,6 +66,15 @@ export class CiStack extends Stack {
       emptyOnDelete: false,
     });
 
+    // Metadata instance image (CPU-only, ~1 GB, served from always-on t3.small).
+    this.metadataRepo = new ecr.Repository(this, 'MetadataRepo', {
+      repositoryName: 'comfy-metadata',
+      imageScanOnPush: true,
+      removalPolicy: RemovalPolicy.RETAIN,
+      lifecycleRules,
+      emptyOnDelete: false,
+    });
+
     // ----- CodeBuild role -----
     const buildRole = new iam.Role(this, 'CodeBuildRole', {
       assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com'),
@@ -71,6 +82,7 @@ export class CiStack extends Stack {
     });
     this.imageWorkerRepo.grantPullPush(buildRole);
     this.videoWorkerRepo.grantPullPush(buildRole);
+    this.metadataRepo.grantPullPush(buildRole);
     buildRole.addToPolicy(
       new iam.PolicyStatement({
         actions: ['ecr:GetAuthorizationToken'],
@@ -125,6 +137,16 @@ export class CiStack extends Stack {
       buildSpec: codebuild.BuildSpec.fromSourceFilename('codebuild/buildspec-image-worker.yml'),
       timeout: Duration.minutes(90),
       logging: { cloudWatch: { logGroup: buildLogs, prefix: 'image-worker' } },
+    });
+
+    this.metadataProject = new codebuild.Project(this, 'MetadataBuildProject', {
+      projectName: 'comfy-build-metadata',
+      role: buildRole,
+      source: sourceFromGitHub,
+      environment: buildEnvironment,
+      buildSpec: codebuild.BuildSpec.fromSourceFilename('codebuild/buildspec-metadata.yml'),
+      timeout: Duration.minutes(30),
+      logging: { cloudWatch: { logGroup: buildLogs, prefix: 'metadata' } },
     });
 
     this.videoWorkerProject = new codebuild.Project(this, 'VideoWorkerBuildProject', {

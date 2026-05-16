@@ -11,6 +11,7 @@ import { ApiStack } from '../lib/stacks/api';
 import { CiStack } from '../lib/stacks/ci';
 import { ComputeStack } from '../lib/stacks/compute';
 import { FrontendStack } from '../lib/stacks/frontend';
+import { MetadataStack } from '../lib/stacks/metadata';
 import { WebSocketStack } from '../lib/stacks/websocket';
 
 const app = new App();
@@ -113,6 +114,22 @@ const compute = new ComputeStack(app, 'ComfyComputeStack', {
 Tags.of(compute).add('Component', 'compute');
 compute.addDependency(ci);
 compute.addDependency(api);
+
+// Always-on metadata instance (CPU-only t3.small). Publishes object_info +
+// extensions on boot so the editor always has node defs + Manager UI without
+// waiting for a GPU spot worker. Depends on ci (needs ECR repo) and api
+// (reads dispatcher URL + worker API key id via SSM).
+const metadata = new MetadataStack(app, 'ComfyMetadataStack', {
+  env,
+  config: APP_CONFIG,
+  network,
+  storage,
+  ci,
+  description: 'Always-on t3.small running ComfyUI in CPU mode for editor metadata',
+});
+Tags.of(metadata).add('Component', 'metadata');
+metadata.addDependency(ci);
+metadata.addDependency(api);
 
 // Phase 5 — frontend (depends on api+auth for runtime config).
 // Only instantiate if frontend/dist/ exists so other stacks can synth/deploy

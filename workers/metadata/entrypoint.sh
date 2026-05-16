@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Metadata-instance entrypoint.
+#
+# Boots ComfyUI in CPU mode, publishes object_info + extensions to
+# dispatcher (so the editor's node menu and Manager UI work), then sits
+# idle. Does NOT poll SQS — job processing stays on the GPU workers.
+#
+# Restarts ComfyUI if it crashes (simple supervisor loop).
+set -euo pipefail
+
+echo "comfy-metadata starting on $(hostname)"
+echo "  FLEET=${FLEET:-metadata}"
+echo "  DISPATCHER_API_URL=${DISPATCHER_API_URL:-unset}"
+echo "  FRONTEND_BUCKET=${FRONTEND_BUCKET:-unset}"
+
+export TQDM_DISABLE=1
+export PYTHONUNBUFFERED=1
+
+# Start ComfyUI in the background, CPU mode, listening on 127.0.0.1:8188.
+cd /opt/comfy
+python main.py --listen 127.0.0.1 --port 8188 --cpu &
+COMFY_PID=$!
+echo "  comfy pid=$COMFY_PID"
+
+# Wait for /system_stats to respond (means ComfyUI is ready).
+for i in $(seq 1 60); do
+  if curl -sf http://127.0.0.1:8188/system_stats >/dev/null 2>&1; then
+    echo "  comfy ready"
+    break
+  fi
+  sleep 2
+done
+
+# Publish object_info + extensions once.
+# We use the workers/shared/ modules directly since we already imported them.
+cd /opt/worker
+python - <<'PY'
+import logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+from comfy_client import ComfyClient
+from object_info_publisher import publish_object_info
+from extensions_publisher import publish_extensions
+import os
+
+fleet = os.environ.get("FLEET", "image")  # Use 'image' so the merged /object_info works
+client = ComfyClient("http://127.0.0.1:8188")
+try:
+    oi = client.fetch_object_info()
+    print(f"  fetched object_info: {len(oi)} node classes")
+    publish_object_info(fleet, oi)
+    print("  ✓ object_info published")
+except Exception as e:
+    print(f"  ✗ object_info publish failed: {e!r}")
+
+try:
+    ok = publish_extensions(fleet)
+    print(f"  extensions publish: {'✓' if ok else '✗'}")
+except Exception as e:
+    print(f"  ✗ extensions publish failed: {e!r}")
+PY
+
+echo "  initial publish complete; metadata server now idling"
+echo "  (re-publish on container restart; nothing else to do)"
+
+# Keep the foreground process alive so the container doesn't exit.
+# If ComfyUI dies, exit so docker restarts us.
+wait "$COMFY_PID"
+echo "  comfy exited (rc=$?); container will restart via docker --restart policy"
