@@ -47,6 +47,7 @@ export interface ApiStackProps extends StackProps {
 export class ApiStack extends Stack {
   public readonly api: apigw.RestApi;
   public readonly dispatcherFn: lambda.Function;
+  public readonly editorCompatFn: lambda.Function;
   public readonly statusFn: lambda.Function;
   public readonly downloadKickoffFn: lambda.Function;
   public readonly downloadWorkerFn: lambda.Function;
@@ -91,6 +92,25 @@ export class ApiStack extends Stack {
     storage.jobsTable.grantReadWriteData(this.dispatcherFn);
     storage.modelsTable.grantReadData(this.dispatcherFn);
     storage.objectInfoTable.grantReadWriteData(this.dispatcherFn);
+
+    // ----- Lambda: EditorCompat -----
+    // Same code asset as dispatcher (handler.py routes by event["resource"]),
+    // but a separate Function so the editor-compat routes have their own
+    // 20 KB Lambda resource policy budget — combining them on DispatcherFn
+    // exceeded the limit.
+    this.editorCompatFn = new lambda.Function(this, 'EditorCompatFn', {
+      ...commonLambdaProps,
+      functionName: 'comfy-editor-compat',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../../services/dispatcher')),
+      handler: 'handler.lambda_handler',
+      description: 'ComfyUI editor compat endpoints (/users, /settings, /userdata, /i18n, etc.)',
+    });
+    storage.jobsTable.grantReadWriteData(this.editorCompatFn);
+    storage.modelsTable.grantReadData(this.editorCompatFn);
+    storage.objectInfoTable.grantReadData(this.editorCompatFn);
+    storage.outputsBucket.grantReadWrite(this.editorCompatFn);
+    queue.imageJobsQueue.grantSendMessages(this.editorCompatFn); // not used but cheaper than conditional env
+    queue.videoJobsQueue.grantSendMessages(this.editorCompatFn);
 
     // ----- Lambda: Status -----
     this.statusFn = new lambda.Function(this, 'StatusFn', {
@@ -301,59 +321,56 @@ export class ApiStack extends Stack {
     }
 
     // ----- ComfyUI editor (Comfy-Org/ComfyUI_frontend v1.x) compat routes -----
-    // The new editor calls these on startup. Without them the editor blocks
-    // on init or shows network errors. dispatcher handler implements them.
+    // Routed to the separate EditorCompatFn Lambda to avoid blowing the 20 KB
+    // Lambda resource policy limit on DispatcherFn.
+    const editorIntegration = new apigw.LambdaIntegration(this.editorCompatFn);
 
-    // GET /history (list mode, no id) — the editor polls this for queue history
+    // GET /history (list mode, no id) — editor polls for queue history
     const historyList = this.api.root.getResource('history')!;
-    historyList.addMethod('GET', dispatcherIntegration, authMethodOptions);
+    historyList.addMethod('GET', editorIntegration, authMethodOptions);
 
     // /users
     const users = root.addResource('users');
-    users.addMethod('GET', dispatcherIntegration, authMethodOptions);
-    users.addMethod('POST', dispatcherIntegration, authMethodOptions);
+    users.addMethod('GET', editorIntegration, authMethodOptions);
+    users.addMethod('POST', editorIntegration, authMethodOptions);
 
     // /i18n + /i18n/{locale}
     const i18n = root.addResource('i18n');
-    i18n.addMethod('GET', dispatcherIntegration, authMethodOptions);
-    i18n.addResource('{locale}').addMethod('GET', dispatcherIntegration, authMethodOptions);
+    i18n.addMethod('GET', editorIntegration, authMethodOptions);
+    i18n.addResource('{locale}').addMethod('GET', editorIntegration, authMethodOptions);
 
     // /free
     const freeRes = root.addResource('free');
-    freeRes.addMethod('POST', dispatcherIntegration, authMethodOptions);
+    freeRes.addMethod('POST', editorIntegration, authMethodOptions);
 
     // /workflow_templates
-    root.addResource('workflow_templates').addMethod('GET', dispatcherIntegration, authMethodOptions);
+    root.addResource('workflow_templates').addMethod('GET', editorIntegration, authMethodOptions);
 
     // /global_subgraphs
-    root.addResource('global_subgraphs').addMethod('GET', dispatcherIntegration, authMethodOptions);
+    root.addResource('global_subgraphs').addMethod('GET', editorIntegration, authMethodOptions);
 
     // /experiment/models + /experiment/models/{folder}
     const experiment = root.addResource('experiment');
     const experimentModels = experiment.addResource('models');
-    experimentModels.addMethod('GET', dispatcherIntegration, authMethodOptions);
-    experimentModels.addResource('{folder}').addMethod('GET', dispatcherIntegration, authMethodOptions);
+    experimentModels.addMethod('GET', editorIntegration, authMethodOptions);
+    experimentModels.addResource('{folder}').addMethod('GET', editorIntegration, authMethodOptions);
 
     // /settings, /settings/{id}
     const settings = root.addResource('settings');
-    settings.addMethod('GET', dispatcherIntegration, authMethodOptions);
-    settings.addMethod('POST', dispatcherIntegration, authMethodOptions);
+    settings.addMethod('GET', editorIntegration, authMethodOptions);
+    settings.addMethod('POST', editorIntegration, authMethodOptions);
     const settingById = settings.addResource('{id}');
-    settingById.addMethod('GET', dispatcherIntegration, authMethodOptions);
-    settingById.addMethod('POST', dispatcherIntegration, authMethodOptions);
-    settingById.addMethod('DELETE', dispatcherIntegration, authMethodOptions);
+    settingById.addMethod('GET', editorIntegration, authMethodOptions);
+    settingById.addMethod('POST', editorIntegration, authMethodOptions);
+    settingById.addMethod('DELETE', editorIntegration, authMethodOptions);
 
     // /userdata, /userdata/{file+} (proxy for nested paths)
     const userdata = root.addResource('userdata');
-    userdata.addMethod('GET', dispatcherIntegration, authMethodOptions);
+    userdata.addMethod('GET', editorIntegration, authMethodOptions);
     const userdataFile = userdata.addResource('{file+}');
-    userdataFile.addMethod('GET', dispatcherIntegration, authMethodOptions);
-    userdataFile.addMethod('POST', dispatcherIntegration, authMethodOptions);
-    userdataFile.addMethod('DELETE', dispatcherIntegration, authMethodOptions);
-
-    // Grant dispatcher Lambda S3 access to the outputs bucket for userdata storage.
-    storage.outputsBucket.grantReadWrite(this.dispatcherFn);
-    this.dispatcherFn.addEnvironment('OUTPUTS_BUCKET', storage.outputsBucket.bucketName);
+    userdataFile.addMethod('GET', editorIntegration, authMethodOptions);
+    userdataFile.addMethod('POST', editorIntegration, authMethodOptions);
+    userdataFile.addMethod('DELETE', editorIntegration, authMethodOptions);
 
     // Publish key API outputs to SSM so other stacks can read them without
     // creating direct CFN dependencies (which would cause cyclical imports
