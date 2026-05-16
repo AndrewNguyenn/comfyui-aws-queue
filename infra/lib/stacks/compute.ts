@@ -3,6 +3,7 @@ import { Construct } from 'constructs';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
+import * as appscaling from 'aws-cdk-lib/aws-applicationautoscaling';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { AppConfig, FleetConfig } from '../config';
@@ -61,11 +62,11 @@ export class ComputeStack extends Stack {
     });
     this.grantWorkerPermissions(imageTaskDef.taskRole, queue.imageJobsQueue, storage);
 
-    new ecs.Ec2Service(this, 'ImageService', {
+    const imageService = new ecs.Ec2Service(this, 'ImageService', {
       serviceName: 'comfy-image',
       cluster: this.cluster,
       taskDefinition: imageTaskDef,
-      desiredCount: 0, // Scaling controlled by capacity provider + service-level policy
+      desiredCount: 0, // Scaling controlled by App Auto Scaling on SQS depth
       capacityProviderStrategies: [
         {
           capacityProvider: imageCapacityProvider.capacityProviderName,
@@ -78,6 +79,14 @@ export class ComputeStack extends Stack {
         ecs.PlacementConstraint.memberOf(`attribute:fleet == image`),
       ],
     });
+    this.attachSqsTargetTracking(
+      'image',
+      imageService,
+      queue.imageJobsQueue,
+      config.scaling.imageMin,
+      config.scaling.imageMax,
+      config,
+    );
 
     // ----- VIDEO fleet -----
     this.videoAsg = this.makeFleetAsg('video', config.fleets.video, {
@@ -96,7 +105,7 @@ export class ComputeStack extends Stack {
     });
     this.grantWorkerPermissions(videoTaskDef.taskRole, queue.videoJobsQueue, storage);
 
-    new ecs.Ec2Service(this, 'VideoService', {
+    const videoService = new ecs.Ec2Service(this, 'VideoService', {
       serviceName: 'comfy-video',
       cluster: this.cluster,
       taskDefinition: videoTaskDef,
@@ -112,6 +121,54 @@ export class ComputeStack extends Stack {
       placementConstraints: [
         ecs.PlacementConstraint.memberOf(`attribute:fleet == video`),
       ],
+    });
+    this.attachSqsTargetTracking(
+      'video',
+      videoService,
+      queue.videoJobsQueue,
+      config.scaling.videoMin,
+      config.scaling.videoMax,
+      config,
+    );
+  }
+
+  /**
+   * Application Auto Scaling target tracking driven by SQS visible-message
+   * count. Scales the ECS service desired count up when messages queue,
+   * down when the queue empties. Capacity provider follows the service
+   * (already wired) so the ASG provisions instances as needed.
+   *
+   * Why target=1 (not BacklogPerTask): for our 1-user scale (max=1 image,
+   * max=3 video), a target of 1 visible message per task means any single
+   * job triggers scale-up. Target tracking caps at maxCapacity so a 50-msg
+   * burst doesn't blow past max. Simpler than metric-math BacklogPerTask
+   * and behaves the same at this scale.
+   *
+   * Cooldowns: aggressive scale-out (60s — boot is the slow part anyway,
+   * no point dawdling), patient scale-in (15 min — keeps worker warm
+   * across short pauses in interactive use).
+   */
+  private attachSqsTargetTracking(
+    fleetName: 'image' | 'video',
+    service: ecs.Ec2Service,
+    queue: import('aws-cdk-lib/aws-sqs').IQueue,
+    minCapacity: number,
+    maxCapacity: number,
+    _config: AppConfig,
+  ): void {
+    const target = service.autoScaleTaskCount({
+      minCapacity,
+      maxCapacity,
+    });
+
+    target.scaleToTrackCustomMetric(`${fleetName}TrackBacklog`, {
+      customMetric: queue.metricApproximateNumberOfMessagesVisible({
+        period: Duration.minutes(1),
+        statistic: 'Maximum',
+      }),
+      targetValue: 1,
+      scaleOutCooldown: Duration.seconds(60),
+      scaleInCooldown: Duration.minutes(15),
     });
   }
 
