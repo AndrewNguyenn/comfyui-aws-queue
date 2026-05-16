@@ -99,8 +99,14 @@
     }
 
     const r = await origFetch(newUrl, opts);
-    if (r.status === 401 || r.status === 403) {
-      console.warn("auth rejected; signing out");
+    // Only sign out on 401 (Cognito authorizer rejected the token).
+    // 403 is NOT a sign-out signal: API Gateway returns 403 for unmatched
+    // routes ("Missing Authentication Token") and per-IP throttling, neither
+    // of which means the user's session is bad. Treating 403 as auth failure
+    // caused immediate post-login bounces because the editor pings endpoints
+    // we don't implement, gets a 403, and the shim signed the user out.
+    if (r.status === 401) {
+      console.warn("auth rejected (401); signing out");
       if (window.comfyAuth) window.comfyAuth.signOut();
     }
     return r;
