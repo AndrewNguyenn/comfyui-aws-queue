@@ -47,7 +47,10 @@ def _get_api_key() -> str:
     if _api_key_cache or not WORKER_API_KEY_ID:
         return _api_key_cache or ""
     try:
-        client = boto3.client("apigateway")
+        # Explicit region — AWS_REGION env var isn't always picked up for
+        # apigateway service client construction, breaks with EndpointResolver.
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-west-2"
+        client = boto3.client("apigateway", region_name=region)
         r = client.get_api_key(apiKey=WORKER_API_KEY_ID, includeValue=True)
         _api_key_cache = r.get("value", "")
     except Exception:  # noqa: BLE001

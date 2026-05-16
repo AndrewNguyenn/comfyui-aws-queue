@@ -33,7 +33,10 @@ def _get_api_key() -> str:
         return _api_key_cache or ""
     try:
         import boto3
-        client = boto3.client("apigateway")
+        # Explicit region — AWS_REGION env not always honored at client
+        # construction for apigateway service (EndpointResolver failure).
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-west-2"
+        client = boto3.client("apigateway", region_name=region)
         r = client.get_api_key(apiKey=WORKER_API_KEY_ID, includeValue=True)
         _api_key_cache = r.get("value", "")
     except Exception:  # noqa: BLE001
