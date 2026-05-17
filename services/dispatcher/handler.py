@@ -546,10 +546,15 @@ def _customnode_install_then_record(event: dict, base: str) -> dict:
     if not 200 <= resp.get("statusCode", 500) < 300:
         return resp
 
-    try:
-        body = json.loads(event.get("body") or "{}")
-    except json.JSONDecodeError:
-        body = {}
+    raw_body = event.get("body") or ""
+    # /customnode/install/git_url posts the URL as a bare string, not JSON
+    if event["path"].endswith("/git_url") and raw_body and not raw_body.lstrip().startswith("{"):
+        body: Any = {"url": raw_body.strip()}
+    else:
+        try:
+            body = json.loads(raw_body or "{}")
+        except json.JSONDecodeError:
+            body = {}
     entry = _normalize_install_body(event["path"], body)
     if entry:
         try:
