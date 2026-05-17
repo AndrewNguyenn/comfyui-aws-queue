@@ -113,13 +113,32 @@ export class MetadataStack extends Stack {
           ${ecrUri}:latest`,
     );
 
+    // Dedicated SG for metadata instance: allow inbound 8188 from anywhere.
+    // Why public: API Gateway HTTP_PROXY integrations can't reach private IPs
+    // without VPC Link (NLB + LCU costs ~$20/mo); 0.0.0.0/0 keeps it free.
+    // Cognito auth at API GW is the primary gate. Direct access to the
+    // metadata instance bypass Cognito, but the only sensitive endpoint is
+    // /customnode/install (could pip-install arbitrary packages on a $15/mo
+    // metadata box — acceptable risk for 1-user personal project).
+    const metadataSg = new ec2.SecurityGroup(this, 'MetadataSg', {
+      vpc: network.vpc,
+      securityGroupName: `${props.config.projectName}-metadata-sg`,
+      description: 'Metadata instance: inbound 8188 from anywhere (for API GW HTTP_PROXY)',
+      allowAllOutbound: true,
+    });
+    metadataSg.addIngressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(8188),
+      'ComfyUI HTTP — API GW HTTP_PROXY for /manager/* and /customnode/*',
+    );
+
     // ----- Instance -----
     this.instance = new ec2.Instance(this, 'MetadataInstance', {
       vpc: network.vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
       instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.SMALL),
       machineImage: ec2.MachineImage.latestAmazonLinux2023(),
-      securityGroup: network.workerSecurityGroup,
+      securityGroup: metadataSg,
       userData,
       role,
       blockDevices: [
@@ -134,13 +153,32 @@ export class MetadataStack extends Stack {
       requireImdsv2: true,
     });
 
+    // Elastic IP — stable URL for API GW HTTP_PROXY (instance public IP
+    // would change on stop/start; EIP attached to running instance is free).
+    const eip = new ec2.CfnEIP(this, 'MetadataEip', {
+      domain: 'vpc',
+      instanceId: this.instance.instanceId,
+    });
+
+    // Publish the EIP via SSM so ApiStack can read it at deploy time.
+    new ssm.StringParameter(this, 'MetadataEipParam', {
+      parameterName: '/comfy/metadata/eip',
+      stringValue: eip.ref,
+      description: 'Metadata instance EIP — used by API GW HTTP_PROXY to proxy Manager endpoints',
+    });
+    new ssm.StringParameter(this, 'MetadataUrlParam', {
+      parameterName: '/comfy/metadata/url',
+      stringValue: `http://${eip.ref}:8188`,
+      description: 'Metadata instance ComfyUI base URL',
+    });
+
     new CfnOutput(this, 'MetadataInstanceId', {
       value: this.instance.instanceId,
       description: 'Metadata EC2 instance ID',
     });
-    new CfnOutput(this, 'MetadataPublicIp', {
-      value: this.instance.instancePublicIp,
-      description: 'Metadata instance public IP (for debugging / future proxy)',
+    new CfnOutput(this, 'MetadataEipOutput', {
+      value: eip.ref,
+      description: 'Metadata instance Elastic IP',
     });
   }
 }

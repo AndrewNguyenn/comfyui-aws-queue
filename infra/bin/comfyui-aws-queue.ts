@@ -89,6 +89,8 @@ const api = new ApiStack(app, 'ComfyApiStack', {
   description: 'API Gateway + Lambda functions (dispatcher, status, catalog, downloader)',
 });
 api.addDependency(websocket);
+// /manager/* /customnode/* HTTP_PROXY routes read /comfy/metadata/url from SSM
+// which is created by MetadataStack — so api must deploy AFTER metadata.
 Tags.of(api).add('Component', 'api');
 
 // Phase 3 — CI (CodeBuild + ECR)

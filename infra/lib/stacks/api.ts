@@ -324,6 +324,74 @@ export class ApiStack extends Stack {
     const downloads = root.addResource('downloads').addResource('{id}');
     downloads.addMethod('GET', downloadKickoffIntegration, authMethodOptions);
 
+    // ----- ComfyUI-Manager passthrough -----
+    // Manager's frontend calls /api/manager/* and /api/customnode/* paths.
+    // Those need to hit a live ComfyUI instance with Manager loaded —
+    // dispatcher Lambda can't synthesize the responses. Proxy them through
+    // API GW HTTP_PROXY integration to the metadata instance's EIP.
+    // Without this, Manager's UI registration aborts on CORS preflight 403.
+    const metadataUrl = ssm.StringParameter.valueForStringParameter(this, '/comfy/metadata/url');
+
+    const proxyMethodOptions: apigw.MethodOptions = {
+      ...authMethodOptions,
+      requestParameters: { 'method.request.path.proxy': true },
+    };
+    const proxyIntegrationOptions: apigw.IntegrationOptions = {
+      requestParameters: { 'integration.request.path.proxy': 'method.request.path.proxy' },
+    };
+
+    const managerRoot = root.addResource('manager');
+    const managerProxy = managerRoot.addResource('{proxy+}');
+    for (const method of ['GET', 'POST']) {
+      managerProxy.addMethod(method,
+        new apigw.HttpIntegration(`${metadataUrl}/manager/{proxy}`, {
+          httpMethod: method,
+          proxy: true,
+          options: proxyIntegrationOptions,
+        }),
+        proxyMethodOptions,
+      );
+    }
+
+    const customnodeRoot = root.addResource('customnode');
+    const customnodeProxy = customnodeRoot.addResource('{proxy+}');
+    for (const method of ['GET', 'POST']) {
+      customnodeProxy.addMethod(method,
+        new apigw.HttpIntegration(`${metadataUrl}/customnode/{proxy}`, {
+          httpMethod: method,
+          proxy: true,
+          options: proxyIntegrationOptions,
+        }),
+        proxyMethodOptions,
+      );
+    }
+
+    const snapshotRoot = root.addResource('snapshot');
+    const snapshotProxy = snapshotRoot.addResource('{proxy+}');
+    for (const method of ['GET', 'POST']) {
+      snapshotProxy.addMethod(method,
+        new apigw.HttpIntegration(`${metadataUrl}/snapshot/{proxy}`, {
+          httpMethod: method,
+          proxy: true,
+          options: proxyIntegrationOptions,
+        }),
+        proxyMethodOptions,
+      );
+    }
+
+    const modelMgrRoot = root.addResource('model-manager');
+    const modelMgrProxy = modelMgrRoot.addResource('{proxy+}');
+    for (const method of ['GET', 'POST']) {
+      modelMgrProxy.addMethod(method,
+        new apigw.HttpIntegration(`${metadataUrl}/model-manager/{proxy}`, {
+          httpMethod: method,
+          proxy: true,
+          options: proxyIntegrationOptions,
+        }),
+        proxyMethodOptions,
+      );
+    }
+
     // ----- Worker-only internal routes (API key auth, not Cognito) -----
     // Used by workers to push their /object_info to the dispatcher on boot.
     // Workers can't easily do Cognito auth (no human user) so we use an API key.
