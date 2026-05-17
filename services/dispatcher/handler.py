@@ -470,7 +470,7 @@ def _get_metadata_url() -> str:
         return ""
 
 
-def _proxy_to_metadata(event: dict, _base: str) -> dict:
+def _proxy_to_metadata(event: dict, _base: str, timeout: int = 8) -> dict:
     metadata_base = _get_metadata_url()
     if not metadata_base:
         return _resp(503, {"error": "metadata instance URL unknown"})
@@ -494,7 +494,7 @@ def _proxy_to_metadata(event: dict, _base: str) -> dict:
 
     req = urllib.request.Request(target_url, data=body_bytes, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=8) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = resp.read()
             ctype = resp.headers.get("Content-Type", "application/json")
             try:
@@ -517,7 +517,13 @@ def _proxy_to_metadata(event: dict, _base: str) -> dict:
             "body": json.dumps({"error": e.reason}),
         }
     except urllib.error.URLError as e:
-        return _resp(502, {"error": f"metadata unreachable: {e.reason}"})
+        # Differentiate "timed out reading response" (504) from "couldn't
+        # connect at all" (502) so the install path can return success on
+        # timeout. urllib raises URLError with reason=socket.timeout for both.
+        msg = str(e.reason)
+        if "timed out" in msg.lower() or "timeout" in msg.lower():
+            return _resp(504, {"error": f"metadata timeout: {msg}"})
+        return _resp(502, {"error": f"metadata unreachable: {msg}"})
     except Exception as e:  # noqa: BLE001
         return _resp(500, {"error": str(e)})
 
