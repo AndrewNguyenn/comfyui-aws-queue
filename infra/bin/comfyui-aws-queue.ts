@@ -89,8 +89,10 @@ const api = new ApiStack(app, 'ComfyApiStack', {
   description: 'API Gateway + Lambda functions (dispatcher, status, catalog, downloader)',
 });
 api.addDependency(websocket);
-// /manager/* /customnode/* HTTP_PROXY routes read /comfy/metadata/url from SSM
-// which is created by MetadataStack — so api must deploy AFTER metadata.
+// Note: dispatcher proxies /manager/* and /customnode/* to the metadata
+// instance by reading /comfy/metadata/url from SSM at *runtime* (not synth).
+// So api no longer depends on metadata's SSM at deploy time — avoids the
+// circular dep where metadata also reads api's SSM (DISPATCHER_API_URL).
 Tags.of(api).add('Component', 'api');
 
 // Phase 3 — CI (CodeBuild + ECR)

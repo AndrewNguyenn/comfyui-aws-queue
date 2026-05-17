@@ -324,72 +324,29 @@ export class ApiStack extends Stack {
     const downloads = root.addResource('downloads').addResource('{id}');
     downloads.addMethod('GET', downloadKickoffIntegration, authMethodOptions);
 
-    // ----- ComfyUI-Manager passthrough -----
+    // ----- ComfyUI-Manager passthrough (via dispatcher Lambda) -----
     // Manager's frontend calls /api/manager/* and /api/customnode/* paths.
-    // Those need to hit a live ComfyUI instance with Manager loaded —
-    // dispatcher Lambda can't synthesize the responses. Proxy them through
-    // API GW HTTP_PROXY integration to the metadata instance's EIP.
-    // Without this, Manager's UI registration aborts on CORS preflight 403.
-    const metadataUrl = ssm.StringParameter.valueForStringParameter(this, '/comfy/metadata/url');
+    // Those need to hit a live ComfyUI instance with Manager loaded.
+    // Dispatcher Lambda reads /comfy/metadata/url from SSM at *runtime* and
+    // forwards the request to the metadata instance. This avoids a circular
+    // synth-time dependency between ApiStack and MetadataStack (each reads
+    // SSM parameters created by the other).
+    this.dispatcherFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ssm:GetParameter'],
+      resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/comfy/metadata/*`],
+    }));
 
     const proxyMethodOptions: apigw.MethodOptions = {
       ...authMethodOptions,
       requestParameters: { 'method.request.path.proxy': true },
     };
-    const proxyIntegrationOptions: apigw.IntegrationOptions = {
-      requestParameters: { 'integration.request.path.proxy': 'method.request.path.proxy' },
-    };
 
-    const managerRoot = root.addResource('manager');
-    const managerProxy = managerRoot.addResource('{proxy+}');
-    for (const method of ['GET', 'POST']) {
-      managerProxy.addMethod(method,
-        new apigw.HttpIntegration(`${metadataUrl}/manager/{proxy}`, {
-          httpMethod: method,
-          proxy: true,
-          options: proxyIntegrationOptions,
-        }),
-        proxyMethodOptions,
-      );
-    }
-
-    const customnodeRoot = root.addResource('customnode');
-    const customnodeProxy = customnodeRoot.addResource('{proxy+}');
-    for (const method of ['GET', 'POST']) {
-      customnodeProxy.addMethod(method,
-        new apigw.HttpIntegration(`${metadataUrl}/customnode/{proxy}`, {
-          httpMethod: method,
-          proxy: true,
-          options: proxyIntegrationOptions,
-        }),
-        proxyMethodOptions,
-      );
-    }
-
-    const snapshotRoot = root.addResource('snapshot');
-    const snapshotProxy = snapshotRoot.addResource('{proxy+}');
-    for (const method of ['GET', 'POST']) {
-      snapshotProxy.addMethod(method,
-        new apigw.HttpIntegration(`${metadataUrl}/snapshot/{proxy}`, {
-          httpMethod: method,
-          proxy: true,
-          options: proxyIntegrationOptions,
-        }),
-        proxyMethodOptions,
-      );
-    }
-
-    const modelMgrRoot = root.addResource('model-manager');
-    const modelMgrProxy = modelMgrRoot.addResource('{proxy+}');
-    for (const method of ['GET', 'POST']) {
-      modelMgrProxy.addMethod(method,
-        new apigw.HttpIntegration(`${metadataUrl}/model-manager/{proxy}`, {
-          httpMethod: method,
-          proxy: true,
-          options: proxyIntegrationOptions,
-        }),
-        proxyMethodOptions,
-      );
+    for (const base of ['manager', 'customnode', 'snapshot', 'model-manager']) {
+      const baseRes = root.addResource(base);
+      const proxyRes = baseRes.addResource('{proxy+}');
+      for (const method of ['GET', 'POST']) {
+        proxyRes.addMethod(method, dispatcherIntegration, proxyMethodOptions);
+      }
     }
 
     // ----- Worker-only internal routes (API key auth, not Cognito) -----

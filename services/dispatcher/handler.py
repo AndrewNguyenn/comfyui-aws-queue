@@ -76,6 +76,12 @@ def lambda_handler(event: dict, context: Any) -> dict:
         if method == "GET" and path == "/ws-ticket":
             return _get_ws_ticket(event)
 
+        # Proxy ComfyUI-Manager runtime endpoints to the metadata instance.
+        # API GW resources for these are configured in ApiStack.
+        for proxy_base in ("/manager/", "/customnode/", "/snapshot/", "/model-manager/"):
+            if path.startswith(proxy_base) and method in ("GET", "POST"):
+                return _proxy_to_metadata(event, proxy_base)
+
         # Stub endpoints that ComfyUI's frontend polls but we don't need full impl
         if method == "GET" and path == "/queue":
             return _resp(200, {"queue_running": [], "queue_pending": []})
@@ -421,6 +427,82 @@ def _scan_catalog_by_type() -> dict[str, list[str]]:
             if t and n:
                 grouped.setdefault(t, []).append(n)
     return grouped
+
+
+# ----- Manager passthrough proxy -----
+# Forwards /manager/* /customnode/* /snapshot/* /model-manager/* HTTP requests
+# to the metadata instance's ComfyUI process (which has Manager installed).
+# Without this, Manager's frontend init aborts on CORS preflight 403.
+import urllib.request
+import urllib.error
+
+_metadata_url_cache: Optional[str] = None  # type: ignore[name-defined]
+
+
+def _get_metadata_url() -> str:
+    global _metadata_url_cache
+    if _metadata_url_cache:
+        return _metadata_url_cache
+    try:
+        ssm = boto3.client("ssm")
+        r = ssm.get_parameter(Name="/comfy/metadata/url")
+        _metadata_url_cache = r["Parameter"]["Value"]
+        return _metadata_url_cache
+    except Exception as e:  # noqa: BLE001
+        print(f"failed to fetch /comfy/metadata/url: {e!r}")
+        return ""
+
+
+def _proxy_to_metadata(event: dict, _base: str) -> dict:
+    metadata_base = _get_metadata_url()
+    if not metadata_base:
+        return _resp(503, {"error": "metadata instance URL unknown"})
+
+    # event["resource"] = "/manager/{proxy+}"; pathParameters['proxy'] has actual path
+    pp = event.get("pathParameters") or {}
+    proxy_path = pp.get("proxy", "")
+    # event["path"] is the actual matched URL (e.g. "/manager/version")
+    full_path = event.get("path", "")
+    qs = event.get("queryStringParameters") or {}
+    qs_str = ""
+    if qs:
+        from urllib.parse import urlencode
+        qs_str = "?" + urlencode(qs)
+
+    target_url = f"{metadata_base.rstrip('/')}{full_path}{qs_str}"
+    method = event["httpMethod"]
+    body = event.get("body") or ""
+    body_bytes = body.encode() if body else None
+    headers = {"Content-Type": event.get("headers", {}).get("Content-Type", "application/json")}
+
+    req = urllib.request.Request(target_url, data=body_bytes, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = resp.read()
+            ctype = resp.headers.get("Content-Type", "application/json")
+            try:
+                body_str = data.decode("utf-8")
+            except UnicodeDecodeError:
+                body_str = ""
+            return {
+                "statusCode": resp.status,
+                "headers": {
+                    "Content-Type": ctype,
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Headers": "Content-Type,Authorization,Comfy-User",
+                },
+                "body": body_str,
+            }
+    except urllib.error.HTTPError as e:
+        return {
+            "statusCode": e.code,
+            "headers": {"Access-Control-Allow-Origin": "*", "Content-Type": "application/json"},
+            "body": json.dumps({"error": e.reason}),
+        }
+    except urllib.error.URLError as e:
+        return _resp(502, {"error": f"metadata unreachable: {e.reason}"})
+    except Exception as e:  # noqa: BLE001
+        return _resp(500, {"error": str(e)})
 
 
 # ----- GET /ws-ticket (Cognito-authed) -----
