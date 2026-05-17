@@ -35,8 +35,12 @@ RUN git clone --depth 1 --branch ${COMFYUI_TAG} \
 # import. Same reasoning applies in the video-worker Dockerfile.
 
 # ---------- xformers (image fleet attention backend) ----------
-# xformers ships pre-built wheels matching torch + CUDA versions in the NGC base.
-RUN pip install xformers
+# Pin to the xformers wheel built against torch 2.5.x (what NGC 24.10 ships)
+# and install --no-deps so pip does NOT upgrade torch + torchvision out from
+# under us. Without --no-deps, `pip install xformers` pulls torch 2.12+cu130
+# which then makes the NGC-bundled torchvision C++ ops (torchvision::nms)
+# unregistrable — every ComfyUI/Manager startup dies on first node import.
+RUN pip install --no-deps xformers==0.0.28.post3
 
 # ---------- ComfyUI-Manager (custom node manager UI) ----------
 # Install order matches AndrewNguyenn/aws-deployment-of-comfyui pattern:
