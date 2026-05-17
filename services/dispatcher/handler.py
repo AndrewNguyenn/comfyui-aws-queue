@@ -439,15 +439,28 @@ def _guess_model_type_from_input(node_class: str, input_name: str) -> str | None
 
 
 def _scan_catalog_by_type() -> dict[str, list[str]]:
-    """Pull all models from DDB catalog grouped by type."""
+    """Pull all models from DDB catalog grouped by type.
+
+    Returns filenames AS THEY APPEAR ON DISK (i.e., with .safetensors / .ckpt
+    extension), because ComfyUI's prompt validator compares ckpt_name against
+    folder_paths.get_filename_list() which returns full filenames. If we
+    returned the bare catalog name, the editor's workflow stores it bare,
+    worker submits, ComfyUI rejects ("value_not_in_list").
+
+    Filename = basename of the S3 key (which always carries the extension).
+    Falls back to the catalog name if no s3_key (shouldn't happen).
+    """
     grouped: dict[str, list[str]] = {}
     paginator = ddb.get_paginator("scan")
     for page in paginator.paginate(TableName=MODELS_TABLE):
         for item in page.get("Items", []):
             t = item.get("type", {}).get("S", "")
             n = item.get("name", {}).get("S", "")
-            if t and n:
-                grouped.setdefault(t, []).append(n)
+            s3_key = item.get("s3_key", {}).get("S", "")
+            if not t or not n:
+                continue
+            filename = s3_key.rsplit("/", 1)[-1] if s3_key else n
+            grouped.setdefault(t, []).append(filename)
     return grouped
 
 
