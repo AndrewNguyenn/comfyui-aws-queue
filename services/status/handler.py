@@ -2,6 +2,7 @@
 Status Lambda — read-only job lookup + presigned S3 URL generation.
 
 Routes:
+  GET  /jobs             → list jobs filtered by status (editor queue/history)
   GET  /jobs/{id}        → job record from DDB
   GET  /view?key=<s3>    → 302 redirect to presigned GET URL on outputs bucket
   POST /upload/image     → returns presigned PUT URL for direct browser upload
@@ -36,6 +37,8 @@ def lambda_handler(event: dict, _context: Any) -> dict:
     path = event["resource"]
 
     try:
+        if method == "GET" and path == "/jobs":
+            return _list_jobs(event)
         if method == "GET" and path == "/jobs/{id}":
             return _get_job(event)
         if method == "GET" and path == "/view":
@@ -46,6 +49,60 @@ def lambda_handler(event: dict, _context: Any) -> dict:
     except Exception as e:  # noqa: BLE001
         print(f"ERROR {method} {path}: {e!r}")
         return _resp(500, {"error": "internal error"})
+
+
+def _list_jobs(event: dict) -> dict:
+    """GET /jobs?status=completed,failed,cancelled&limit=64&offset=0
+
+    Editor's new queue/history menu paginates by status. We Query the
+    status-index GSI once per requested status, merge results, sort by
+    created_at desc, then apply offset/limit in Python. Volume is small
+    (1 user, ~120 jobs/day) so the per-status Query is fine.
+    """
+    qs = event.get("queryStringParameters") or {}
+    statuses = [s.strip() for s in (qs.get("status") or "").split(",") if s.strip()]
+    if not statuses:
+        statuses = ["completed", "failed", "cancelled", "in_progress", "pending"]
+
+    try:
+        limit = max(1, min(int(qs.get("limit") or 64), 500))
+    except ValueError:
+        limit = 64
+    try:
+        offset = max(0, int(qs.get("offset") or 0))
+    except ValueError:
+        offset = 0
+
+    items: list[dict] = []
+    for status in statuses:
+        r = ddb.query(
+            TableName=JOBS_TABLE,
+            IndexName="status-index",
+            KeyConditionExpression="#s = :s",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":s": {"S": status}},
+            ScanIndexForward=False,  # newest first
+            Limit=offset + limit,
+        )
+        items.extend(r.get("Items", []))
+
+    items.sort(key=lambda it: it.get("created_at", {}).get("S", ""), reverse=True)
+    page = items[offset : offset + limit]
+
+    jobs = [
+        {
+            "job_id": it["job_id"]["S"],
+            "type": it.get("type", {"S": ""})["S"],
+            "status": it.get("status", {"S": ""})["S"],
+            "created_at": it.get("created_at", {"S": ""})["S"],
+            "started_at": it.get("started_at", {"S": ""})["S"],
+            "completed_at": it.get("completed_at", {"S": ""})["S"],
+            "output_keys": json.loads(it.get("output_keys", {"S": "[]"})["S"]),
+            "error": it.get("error", {"S": ""})["S"],
+        }
+        for it in page
+    ]
+    return _resp(200, {"jobs": jobs, "limit": limit, "offset": offset, "total": len(items)})
 
 
 def _get_job(event: dict) -> dict:

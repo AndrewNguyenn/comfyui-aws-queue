@@ -295,8 +295,10 @@ export class ApiStack extends Stack {
     const objectInfo = root.addResource('object_info');
     objectInfo.addMethod('GET', dispatcherIntegration, authMethodOptions);
 
-    // /jobs/{id}
-    const jobs = root.addResource('jobs').addResource('{id}');
+    // /jobs (list — editor queue/history) + /jobs/{id} (single)
+    const jobsRoot = root.addResource('jobs');
+    jobsRoot.addMethod('GET', statusIntegration, authMethodOptions);
+    const jobs = jobsRoot.addResource('{id}');
     jobs.addMethod('GET', statusIntegration, authMethodOptions);
 
     // /view

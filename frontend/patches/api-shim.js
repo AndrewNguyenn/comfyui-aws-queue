@@ -117,6 +117,56 @@
     return r;
   };
 
+  // ----- XMLHttpRequest interception -----
+  //
+  // The editor's newer queue/history menu uses axios, which uses XHR — not
+  // fetch. Without this wrapper, /api/userdata/*, /api/i18n, etc. resolve
+  // against the S3 frontend origin and 404. We patch XMLHttpRequest.prototype
+  // to apply the same rewriteUrl + Authorization header logic as fetch above.
+  //
+  // We DON'T attempt sign-out on 401 here: XHR can race in ways fetch can't
+  // (multiple in-flight axios calls firing on page load), and treating any of
+  // them as auth failure would bounce the user to login. The fetch path
+  // already handles sign-out for the primary signal.
+  const XHRProto = XMLHttpRequest.prototype;
+  const origOpen = XHRProto.open;
+  const origSend = XHRProto.send;
+  const origSetHeader = XHRProto.setRequestHeader;
+
+  XHRProto.open = function (method, url, async, user, password) {
+    const newUrl = rewriteUrl(url);
+    this.__comfyRewritten = newUrl !== url;
+    return origOpen.call(
+      this,
+      method,
+      newUrl,
+      async !== undefined ? async : true,
+      user,
+      password
+    );
+  };
+
+  XHRProto.setRequestHeader = function (name, value) {
+    // Drop Comfy-User on rewritten requests (API GW CORS doesn't permit it).
+    if (this.__comfyRewritten && /^comfy-user$/i.test(name)) return;
+    return origSetHeader.call(this, name, value);
+  };
+
+  XHRProto.send = function (body) {
+    if (this.__comfyRewritten) {
+      const token = window.comfyAuth ? window.comfyAuth.getIdToken() : null;
+      if (token) {
+        try {
+          origSetHeader.call(this, "Authorization", token);
+        } catch (_e) {
+          // setRequestHeader can only be called after open() and before send();
+          // we're between them so this should always work, but swallow defensively.
+        }
+      }
+    }
+    return origSend.call(this, body);
+  };
+
   // ----- WebSocket interception -----
   //
   // The editor opens `ws(s)://<origin>/api/ws?...` (or sometimes `/ws`). We
