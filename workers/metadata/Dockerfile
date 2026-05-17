@@ -31,13 +31,17 @@ RUN git clone --depth 1 --branch ${COMFYUI_TAG} \
         https://github.com/comfyanonymous/ComfyUI.git . \
     && pip install -r requirements.txt
 
-# ComfyUI-Manager (same as worker images, so editor sees the same Manager UI)
+# ComfyUI-Manager — install order matches AndrewNguyenn/aws-deployment-of-comfyui
+# (the user's previously-working deployment). GitPython MUST be installed
+# explicitly before Manager's requirements.txt because Manager's __init__.py
+# imports git at module-load time; a missing GitPython silently disables the
+# whole extension including its JS routes.
 WORKDIR /opt/comfy/custom_nodes
 ARG COMFYUI_MANAGER_REF=main
-RUN git clone https://github.com/Comfy-Org/ComfyUI-Manager.git \
-    && cd ComfyUI-Manager \
-    && git checkout ${COMFYUI_MANAGER_REF} \
-    && pip install -r requirements.txt
+RUN mkdir -p ComfyUI-Manager && \
+    git clone --depth 1 https://github.com/ltdrdata/ComfyUI-Manager ComfyUI-Manager && \
+    pip install --no-cache-dir GitPython && \
+    pip install --no-cache-dir -r ComfyUI-Manager/requirements.txt
 
 # AWS SDK + worker shared deps (we reuse the publishers from worker.py).
 COPY workers/shared/requirements.txt /tmp/req.txt

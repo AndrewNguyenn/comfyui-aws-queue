@@ -72,11 +72,14 @@ RUN git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.
     && pip install -r requirements.txt
 
 # ComfyUI-Manager — custom node manager UI (install/update nodes from editor).
+# GitPython explicitly installed BEFORE Manager's requirements.txt because
+# Manager's __init__.py imports git at module-load time (matches the working
+# AndrewNguyenn/aws-deployment-of-comfyui Dockerfile pattern).
 ARG COMFYUI_MANAGER_REF=main
-RUN git clone https://github.com/Comfy-Org/ComfyUI-Manager.git \
-    && cd ComfyUI-Manager \
-    && git checkout ${COMFYUI_MANAGER_REF} \
-    && pip install -r requirements.txt
+RUN mkdir -p ComfyUI-Manager && \
+    git clone --depth 1 https://github.com/ltdrdata/ComfyUI-Manager ComfyUI-Manager && \
+    pip install --no-cache-dir GitPython && \
+    pip install --no-cache-dir -r ComfyUI-Manager/requirements.txt
 
 # ---------- AWS + worker shared deps ----------
 COPY workers/shared/requirements.txt /tmp/req.txt
