@@ -58,6 +58,12 @@
     "/models",
     "/jobs",
     "/downloads",
+    // ComfyUI-Manager UI fetches these as bare paths (no /api prefix).
+    // Routed through dispatcher Lambda → metadata instance.
+    "/manager",
+    "/customnode",
+    "/snapshot",
+    "/model-manager",
   ];
 
   function rewriteUrl(url) {

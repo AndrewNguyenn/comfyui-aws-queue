@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 import os
+import pathlib
 from typing import Optional
 
 import boto3
@@ -40,6 +42,55 @@ WORKER_API_KEY_ID = os.environ.get("WORKER_API_KEY_ID", "")
 COMFY_BASE = "http://127.0.0.1:8188"
 
 _api_key_cache: Optional[str] = None
+
+# Asset extensions that custom-node JS commonly imports. We upload these from
+# each custom_nodes/<name>/<web_dir>/ directory alongside the .js list.
+_COMPANION_EXTS = {".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".woff", ".woff2", ".ttf", ".html"}
+
+# Conventional web-directory names ComfyUI custom nodes use to expose static
+# assets. Manager uses "js", others use "web" or "static". We probe each.
+_WEB_DIR_NAMES = ("js", "web", "static", "dist")
+
+
+def _publish_companion_assets() -> None:
+    """Walk /opt/comfy/custom_nodes/*/{js,web,static,dist}/** and upload
+    every CSS/image/font found to s3://<frontend>/extensions/<node>/<relpath>.
+    Best-effort: a missing custom_nodes dir or read failure just yields zero.
+    """
+    root = pathlib.Path("/opt/comfy/custom_nodes")
+    if not root.is_dir():
+        log.warning("custom_nodes dir missing at %s; skipping companion assets", root)
+        return
+    n = 0
+    for node_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        for web_name in _WEB_DIR_NAMES:
+            web_dir = node_dir / web_name
+            if not web_dir.is_dir():
+                continue
+            for path in web_dir.rglob("*"):
+                if not path.is_file():
+                    continue
+                if path.suffix.lower() not in _COMPANION_EXTS:
+                    continue
+                rel = path.relative_to(web_dir).as_posix()
+                key = f"extensions/{node_dir.name}/{rel}"
+                ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+                try:
+                    with path.open("rb") as fh:
+                        _s3.put_object(
+                            Bucket=FRONTEND_BUCKET,
+                            Key=key,
+                            Body=fh.read(),
+                            ContentType=ctype,
+                            CacheControl="public, max-age=300",
+                        )
+                    n += 1
+                except Exception:  # noqa: BLE001
+                    log.exception("companion upload %s failed", key)
+            # Stop at first web dir found for this node so we don't
+            # double-publish when nodes ship both js/ and web/.
+            break
+    log.info("uploaded %d custom-node companion assets", n)
 
 
 def _get_api_key() -> str:
@@ -115,8 +166,16 @@ def publish_extensions(fleet: str) -> bool:
             log.exception("upload %s failed", clean)
             continue
 
-    log.info("uploaded %d/%d extension files to s3://%s/extensions/",
+    log.info("uploaded %d/%d extension JS files to s3://%s/extensions/",
              len(uploaded), len(extensions), FRONTEND_BUCKET)
+
+    # Step 3b: companion assets (CSS, images) that custom-node JS imports.
+    # ComfyUI's /extensions endpoint only enumerates .js files, but Manager
+    # and friends ship sibling .css/.png/.svg/.woff files. We walk the
+    # custom_nodes filesystem and upload anything with a known web-asset
+    # extension to the same /extensions/<node>/<relpath> URL ComfyUI would
+    # serve it at.
+    _publish_companion_assets()
 
     # Step 4: POST the list to dispatcher
     try:
