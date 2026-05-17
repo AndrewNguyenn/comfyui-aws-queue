@@ -76,19 +76,24 @@ def lambda_handler(event: dict, context: Any) -> dict:
         if method == "GET" and path == "/ws-ticket":
             return _get_ws_ticket(event)
 
+        # `path` above is event["resource"] (the API GW route pattern, e.g.
+        # "/customnode/{proxy+}"). For routing decisions below we want the
+        # actual URL the client hit ("/customnode/install/git_url"), which
+        # API GW puts in event["path"].
+        url_path = event.get("path", "")
+
         # ComfyUI-Manager: model installs through Manager UI use a different
         # path than custom-node installs. Translate to our /models/download
         # Lambda so the file lands in S3 + DDB + editor dropdown.
-        if method == "POST" and path == "/manager/queue/install_model":
+        if method == "POST" and url_path == "/manager/queue/install_model":
             return _manager_install_model(event)
 
         # Proxy ComfyUI-Manager runtime endpoints to the metadata instance.
         # API GW resources for these are configured in ApiStack.
         for proxy_base in ("/manager/", "/customnode/", "/snapshot/", "/model-manager/"):
-            if path.startswith(proxy_base) and method in ("GET", "POST"):
-                # For install routes: after the metadata-side install succeeds,
-                # append to the S3 manifest so future workers pick it up too.
-                if path in ("/customnode/install", "/customnode/install/git_url"):
+            if url_path.startswith(proxy_base) and method in ("GET", "POST"):
+                # For install routes: write manifest first, then proxy.
+                if url_path in ("/customnode/install", "/customnode/install/git_url"):
                     return _customnode_install_then_record(event, proxy_base)
                 return _proxy_to_metadata(event, proxy_base)
 
