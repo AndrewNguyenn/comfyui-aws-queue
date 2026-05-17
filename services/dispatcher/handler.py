@@ -546,14 +546,14 @@ MANIFEST_KEY = "manifests/custom-nodes.json"
 
 
 def _customnode_install_then_record(event: dict, base: str) -> dict:
-    """Proxy the install to the metadata instance, then if it succeeded,
-    append to the S3 manifest so workers see the new node on next boot."""
-    resp = _proxy_to_metadata(event, base)
-    if not 200 <= resp.get("statusCode", 500) < 300:
-        return resp
+    """Append entry to S3 manifest FIRST, then proxy to metadata.
 
+    Order matters: heavy installs (pip-installing scipy, etc.) can run for
+    minutes on the metadata container — longer than API GW's 29-sec limit.
+    By writing the manifest first, the install is durable even when our
+    proxy times out: workers will git-clone + pip-install it on next boot.
+    """
     raw_body = event.get("body") or ""
-    # /customnode/install/git_url posts the URL as a bare string, not JSON
     if event["path"].endswith("/git_url") and raw_body and not raw_body.lstrip().startswith("{"):
         body: Any = {"url": raw_body.strip()}
     else:
@@ -566,9 +566,13 @@ def _customnode_install_then_record(event: dict, base: str) -> dict:
         try:
             _append_to_manifest(entry)
         except Exception:  # noqa: BLE001
-            # Don't fail the install just because the manifest update failed —
-            # metadata-side install already worked. Log and continue.
-            print(f"WARN: failed to append to manifest: {entry!r}")
+            print(f"WARN: failed to append to manifest before proxy: {entry!r}")
+
+    resp = _proxy_to_metadata(event, base, timeout=25)
+    # If the metadata-side install timed out, still report success — the
+    # manifest entry is in place so workers will install it on next boot.
+    if resp.get("statusCode") == 504 and entry:
+        return _resp(200, {"status": "queued-via-manifest"})
     return resp
 
 
