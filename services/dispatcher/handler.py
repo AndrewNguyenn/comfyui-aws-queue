@@ -675,9 +675,18 @@ def _userdata_prefix(event: dict, suffix: str = "") -> str:
 
 # ----- /users -----
 def _users_response(event: dict) -> dict:
-    """Single-user-per-account model. Editor expects {storage, users}."""
-    user = _claim_username(event)
-    return {"storage": "server", "users": {user: user}}
+    """Single-user-per-account model. Editor expects {storage, users}.
+
+    Why "browser": Comfy-Org/ComfyUI_frontend's multi-user picker triggers
+    when storage="server" with one-or-more users — the editor redirects to
+    /user-select on load, blocking the canvas. For a one-Cognito-user
+    deployment that's pure friction. "browser" tells the editor to skip the
+    picker entirely; per-user *settings* end up in localStorage rather than
+    server-side, but our /userdata routes still work for actual file storage
+    (workflows, custom CSS).
+    """
+    del event
+    return {"storage": "browser"}
 
 
 # ----- /settings -----
