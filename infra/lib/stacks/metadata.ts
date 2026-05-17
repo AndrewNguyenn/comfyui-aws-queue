@@ -129,7 +129,7 @@ export class MetadataStack extends Stack {
     metadataSg.addIngressRule(
       ec2.Peer.anyIpv4(),
       ec2.Port.tcp(8188),
-      'ComfyUI HTTP — API GW HTTP_PROXY for /manager/* and /customnode/*',
+      'ComfyUI HTTP for dispatcher Lambda Manager proxy',
     );
 
     // ----- Instance -----
