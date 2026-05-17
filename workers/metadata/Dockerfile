@@ -7,7 +7,10 @@
 # Same ComfyUI version + Manager as the image worker so the node menu
 # the editor sees matches what the GPU workers will actually run.
 
-FROM python:3.12-slim
+# Pull from AWS's ECR Public mirror — same upstream image, but bypasses
+# Docker Hub's 100-pulls-per-6h unauthenticated cap that CodeBuild's NAT
+# IP shares with every other AWS account.
+FROM public.ecr.aws/docker/library/python:3.12-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
