@@ -23,16 +23,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ---------- ComfyUI ----------
 WORKDIR /opt/comfy
 ARG COMFYUI_TAG=v0.20.1
+# Three layered constraints to keep NGC's torch ecosystem intact:
+#   1. Strip torch + torchvision from ComfyUI's requirements.txt (NGC ships
+#      custom-built versions whose torchvision C++ ops only register if torch's
+#      ABI matches; pip install would replace them with mismatched PyPI wheels).
+#   2. KEEP torchaudio in the install — ComfyUI v0.20.1's lightricks audio_vae
+#      hard-imports torchaudio. If we strip it, pip never installs the matching
+#      torchaudio for NGC's torch and the worker dies at import time.
+#   3. Pin numpy<2 — NGC's torch was built against numpy 1.x ABI. Anything that
+#      pip-resolves numpy>=2 surfaces "Failed to initialize NumPy: _ARRAY_API
+#      not found" warnings and eventually crashes on tensor ops.
 RUN git clone --depth 1 --branch ${COMFYUI_TAG} \
         https://github.com/comfyanonymous/ComfyUI.git . \
-    && sed -i '/^torch\b/d;/^torchvision\b/d;/^torchaudio\b/d' requirements.txt \
-    && pip install -r requirements.txt
-# torch / torchvision / torchaudio stripped from ComfyUI requirements above
-# because the NGC pytorch:24.10-py3 base image ships custom-built versions
-# of those with matching C++ ops (torchvision::nms etc.). A vanilla pip
-# install would overwrite them with PyPI wheels that don't match torch's
-# ABI, causing "operator torchvision::nms does not exist" at every node
-# import. Same reasoning applies in the video-worker Dockerfile.
+    && sed -i '/^torch\b/d;/^torchvision\b/d' requirements.txt \
+    && pip install "numpy<2" \
+    && pip install -r requirements.txt \
+    && pip install "numpy<2"  # re-pin in case a transitive dep upgraded it
 
 # ---------- xformers (image fleet attention backend) ----------
 # Pin to the xformers wheel built against torch 2.5.x (what NGC 24.10 ships)
