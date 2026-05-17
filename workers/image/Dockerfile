@@ -25,7 +25,14 @@ WORKDIR /opt/comfy
 ARG COMFYUI_TAG=v0.20.1
 RUN git clone --depth 1 --branch ${COMFYUI_TAG} \
         https://github.com/comfyanonymous/ComfyUI.git . \
+    && sed -i '/^torch\b/d;/^torchvision\b/d;/^torchaudio\b/d' requirements.txt \
     && pip install -r requirements.txt
+# torch / torchvision / torchaudio stripped from ComfyUI requirements above
+# because the NGC pytorch:24.10-py3 base image ships custom-built versions
+# of those with matching C++ ops (torchvision::nms etc.). A vanilla pip
+# install would overwrite them with PyPI wheels that don't match torch's
+# ABI, causing "operator torchvision::nms does not exist" at every node
+# import. Same reasoning applies in the video-worker Dockerfile.
 
 # ---------- xformers (image fleet attention backend) ----------
 # xformers ships pre-built wheels matching torch + CUDA versions in the NGC base.
