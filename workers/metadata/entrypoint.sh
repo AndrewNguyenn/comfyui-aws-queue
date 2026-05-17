@@ -16,6 +16,35 @@ echo "  FRONTEND_BUCKET=${FRONTEND_BUCKET:-unset}"
 export TQDM_DISABLE=1
 export PYTHONUNBUFFERED=1
 
+# Set ComfyUI-Manager security_level=weak so /customnode/install accepts
+# requests from non-loopback callers (our dispatcher Lambda proxy). The
+# Cognito authorizer at API GW is the real gate; Manager's built-in check
+# would otherwise block every install with HTTP 403.
+mkdir -p /opt/comfy/user/__manager
+if [ ! -f /opt/comfy/user/__manager/config.ini ] || \
+   ! grep -q '^security_level = weak$' /opt/comfy/user/__manager/config.ini; then
+  cat > /opt/comfy/user/__manager/config.ini <<'INI'
+[default]
+preview_method = none
+git_exe =
+use_uv = True
+channel_url = https://raw.githubusercontent.com/ltdrdata/ComfyUI-Manager/main
+share_option = all
+bypass_ssl = False
+file_logging = True
+component_policy = workflow
+update_policy = stable-comfyui
+windows_selector_event_loop_policy = False
+model_download_by_agent = False
+downgrade_blacklist =
+security_level = weak
+always_lazy_install = False
+network_mode = public
+db_mode = cache
+INI
+  echo "  wrote Manager config (security_level=weak)"
+fi
+
 # Sync custom nodes from the S3 manifest BEFORE starting ComfyUI so the node
 # defs surface in /object_info on first publish. Best-effort: a failing node
 # logs and we continue with the rest. See workers/shared/manifest_installer.py.
