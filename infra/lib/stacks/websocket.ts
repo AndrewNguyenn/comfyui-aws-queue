@@ -89,7 +89,17 @@ export class WebSocketStack extends Stack {
           this.controlFn,
         ),
       },
-      // No $default — clients don't send anything (server push only).
+      // $default no-op: Comfy-Org/ComfyUI_frontend sends a feature_flags
+      // message on WS connect. Without a default route, API GW returns
+      // "Forbidden" to the client and it surfaces as a console error.
+      // We don't actually use any client-sent messages — the same control
+      // Lambda just acknowledges and ignores.
+      defaultRouteOptions: {
+        integration: new integrations.WebSocketLambdaIntegration(
+          'DefaultIntegration',
+          this.controlFn,
+        ),
+      },
     });
 
     this.wsStage = new apigwv2.WebSocketStage(this, 'WsStage', {

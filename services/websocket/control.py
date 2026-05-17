@@ -86,8 +86,11 @@ def lambda_handler(event: dict, _context: Any) -> dict:
         return _on_connect(event, connection_id)
     if route == "$disconnect":
         return _on_disconnect(connection_id)
-    # We don't define other routes (server-side push only); reject any
-    # unexpected client-sent message politely.
+    if route == "$default":
+        # Comfy-Org/ComfyUI_frontend sends a feature_flags message on connect.
+        # We don't act on anything the client sends (server-push only), but
+        # need to ACK so API GW doesn't surface "Forbidden" to the client.
+        return {"statusCode": 200, "body": ""}
     return {"statusCode": 400, "body": json.dumps({"error": "unsupported route"})}
 
 
