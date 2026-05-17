@@ -23,22 +23,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ---------- ComfyUI ----------
 WORKDIR /opt/comfy
 ARG COMFYUI_TAG=v0.20.1
-# Three layered constraints to keep NGC's torch ecosystem intact:
-#   1. Strip torch + torchvision from ComfyUI's requirements.txt (NGC ships
-#      custom-built versions whose torchvision C++ ops only register if torch's
-#      ABI matches; pip install would replace them with mismatched PyPI wheels).
-#   2. KEEP torchaudio in the install — ComfyUI v0.20.1's lightricks audio_vae
-#      hard-imports torchaudio. If we strip it, pip never installs the matching
-#      torchaudio for NGC's torch and the worker dies at import time.
+# Four layered constraints to keep NGC's torch ecosystem intact:
+#   1. Strip torch + torchvision + torchaudio from ComfyUI's requirements.txt
+#      (NGC ships custom-built versions whose C++ ops only register if torch's
+#      ABI matches; pip install would replace them with mismatched PyPI wheels
+#      built for cu13 / different ABI).
+#   2. After the rest of the requirements install, reinstall torchaudio from
+#      PyTorch's cu124 index pinned to 2.5.1 with --no-deps. ComfyUI v0.20.1's
+#      lightricks audio_vae hard-imports torchaudio, and the cu124 build links
+#      against libcudart.so.12 (NGC has cu12.6 — fine; vanilla PyPI ships cu13
+#      which expects libcudart.so.13 and crashes).
 #   3. Pin numpy<2 — NGC's torch was built against numpy 1.x ABI. Anything that
 #      pip-resolves numpy>=2 surfaces "Failed to initialize NumPy: _ARRAY_API
 #      not found" warnings and eventually crashes on tensor ops.
 RUN git clone --depth 1 --branch ${COMFYUI_TAG} \
         https://github.com/comfyanonymous/ComfyUI.git . \
-    && sed -i '/^torch\b/d;/^torchvision\b/d' requirements.txt \
+    && sed -i '/^torch\b/d;/^torchvision\b/d;/^torchaudio\b/d' requirements.txt \
     && pip install "numpy<2" \
     && pip install -r requirements.txt \
-    && pip install "numpy<2"  # re-pin in case a transitive dep upgraded it
+    && pip install "numpy<2" \
+    && pip install --no-deps torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124
 
 # ---------- xformers (image fleet attention backend) ----------
 # Pin to the xformers wheel built against torch 2.5.x (what NGC 24.10 ships)
