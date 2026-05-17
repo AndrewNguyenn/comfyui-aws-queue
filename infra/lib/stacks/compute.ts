@@ -318,9 +318,13 @@ export class ComputeStack extends Stack {
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: fleetName,
         logGroup,
-        // v3 N1: multiline pattern collapses tqdm progress bars into single events
+        // Multiline pattern alone — docker rejects both multilinePattern AND
+        // datetimeFormat in the same log driver config:
+        //   "you cannot configure log opt 'awslogs-datetime-format' and
+        //    'awslogs-multiline-pattern' at the same time"
+        // multilinePattern is the more general option (matches any line that
+        // starts a new event), so we keep that and drop datetimeFormat.
         multilinePattern: '^[A-Z]{3,}|^Traceback|^\\d{4}-\\d{2}-\\d{2}',
-        datetimeFormat: '%Y-%m-%d %H:%M:%S',
       }),
       environment: {
         FLEET: fleetName,
