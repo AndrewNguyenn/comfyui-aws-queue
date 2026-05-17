@@ -16,9 +16,13 @@ echo "  FRONTEND_BUCKET=${FRONTEND_BUCKET:-unset}"
 export TQDM_DISABLE=1
 export PYTHONUNBUFFERED=1
 
-# Start ComfyUI in the background, CPU mode, listening on 127.0.0.1:8188.
+# Start ComfyUI in the background, CPU mode, listening on 0.0.0.0 so that
+# external traffic DNAT'd through docker's iptables PREROUTING rules
+# (host:8188 -> container 172.17.0.2:8188) is actually accepted. With
+# --listen 127.0.0.1 ComfyUI only accepts container loopback, breaking
+# API GW HTTP_PROXY proxying.
 cd /opt/comfy
-python main.py --listen 127.0.0.1 --port 8188 --cpu &
+python main.py --listen 0.0.0.0 --port 8188 --cpu &
 COMFY_PID=$!
 echo "  comfy pid=$COMFY_PID"
 
