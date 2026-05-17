@@ -11,8 +11,11 @@ export interface NetworkStackProps extends StackProps {
  * Network primitives for the project.
  *
  * Design choices (per IMPLEMENTATION_PLAN.md sections 4.1, 16, 20):
- * - Single AZ. AZ outage = full outage. Acceptable for personal-project scope and
- *   saves ~$7/mo from VPC interface endpoints not needed across multiple AZs.
+ * - Multi-AZ public subnets (us-west-2a/b/c/d). Each AZ has independent spot
+ *   pools, so spanning four gives 3-4× more chances of fulfilling a GPU spot
+ *   request. Cost-neutral in our setup: no NAT GW, no interface endpoints,
+ *   S3+DDB gateway endpoints are free across all AZs, and EBS caches are
+ *   per-spot-instance ephemeral anyway.
  * - Public subnets only. No NAT gateway ($32/mo saved). Workers get public IPs
  *   (~$0.005/hr per IPv4 in use); they only initiate outbound, never accept inbound.
  * - S3 gateway endpoint (free). Eliminates internet round-trip for model downloads.
@@ -31,7 +34,13 @@ export class NetworkStack extends Stack {
     this.vpc = new ec2.Vpc(this, 'Vpc', {
       vpcName: `${config.projectName}-vpc`,
       ipAddresses: ec2.IpAddresses.cidr('10.0.0.0/16'),
-      availabilityZones: [config.availabilityZone],
+      // List the primary AZ first so its existing /24 subnet keeps its
+      // logical ID and CIDR (avoids a destructive replacement on first
+      // multi-AZ deploy). New AZs get appended.
+      availabilityZones: [
+        config.availabilityZone,
+        ...config.additionalAvailabilityZones.filter((az) => az !== config.availabilityZone),
+      ],
       natGateways: 0, // Critical: no NAT (saves $32/mo). Workers in public subnets.
       subnetConfiguration: [
         {

@@ -10,6 +10,10 @@ export interface AppConfig {
   readonly projectName: string;
   readonly region: string;
   readonly availabilityZone: string;
+  // Extra AZs to add as public subnets so the ASGs have more spot pools to
+  // pull from. The primary `availabilityZone` is always included; these are
+  // appended. Free in our setup (no NAT GW, no interface endpoints).
+  readonly additionalAvailabilityZones: string[];
   readonly tags: Record<string, string>;
 
   readonly fleets: {
@@ -76,6 +80,7 @@ export const APP_CONFIG: AppConfig = {
   projectName: 'comfyui-aws-queue',
   region: 'us-west-2',
   availabilityZone: 'us-west-2a',
+  additionalAvailabilityZones: ['us-west-2b', 'us-west-2c', 'us-west-2d'],
   tags: {
     Project: 'comfyui-aws-queue',
     Environment: 'prod',
