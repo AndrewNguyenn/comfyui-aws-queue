@@ -682,8 +682,17 @@ def _manager_install_model(event: dict) -> dict:
     # POST /models/download uses by constructing the equivalent body and
     # invoking the worker.
     download_fn = os.environ.get("DOWNLOAD_KICKOFF_FN")
+    # Our kickoff Lambda expects 'civitai_url' and only validates civitai.com /
+    # civitai.red. Manager may send HuggingFace or direct .safetensors URLs;
+    # for now we forward as civitai_url and let kickoff reject non-civitai
+    # cleanly (returns 400 invalid_civitai_url). Direct-URL support is a
+    # follow-up — needs a generic streaming branch in services/downloader/worker.py.
     payload = {
-        "body": json.dumps({"url": url, "model_type": model_type, "name": name}),
+        "body": json.dumps({
+            "civitai_url": url,
+            "model_type": model_type,
+            "name": name,
+        }),
         "httpMethod": "POST",
         "resource": "/models/download",
         "headers": event.get("headers", {}),
