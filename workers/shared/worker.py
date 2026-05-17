@@ -185,12 +185,27 @@ def main() -> int:
                             extra={"started_at": datetime.now(timezone.utc).isoformat()})
 
             # Pre-fetch any models referenced by name (best-effort).
-            for model_name in _extract_model_names(workflow):
+            # FileNotFoundError just means the name didn't match a catalog
+            # entry (e.g. a custom-node input that isn't actually a model);
+            # log and continue. If the model genuinely IS needed and missing,
+            # ComfyUI's own validation will reject the prompt with a clearer
+            # "value_not_in_list" error.
+            extracted = _extract_model_names(workflow)
+            log.info("workflow references %d candidate models: %s", len(extracted), sorted(extracted))
+            for model_name in extracted:
                 try:
                     cache.ensure(model_name)
                 except FileNotFoundError as e:
-                    log.error("missing model: %s", e)
-                    raise
+                    log.info("skipping non-catalog ref: %s", e)
+
+            # Force ComfyUI to refresh its folder_paths cache so the symlinks
+            # we just created show up in the per-node dropdown lists. Without
+            # this, the /prompt validator rejects newly-cached models with
+            # "value_not_in_list". GET /object_info triggers a rescan.
+            try:
+                client.fetch_object_info()
+            except Exception:  # noqa: BLE001
+                log.exception("object_info refresh failed (non-fatal)")
 
             # Snapshot output dir BEFORE starting the job so we can scan for
             # new files after (handles custom nodes that bypass standard outputs).
@@ -304,19 +319,39 @@ def _heartbeat_loop(receipt_handle: str, job_id: str, stop_event: threading.Even
             log.exception("heartbeat failed for %s", job_id)
 
 
+_MODEL_INPUT_KEYS = {
+    "ckpt_name", "lora_name", "vae_name", "control_net_name", "controlnet_name",
+    "clip_name", "clip_name1", "clip_name2", "clip_name3", "clip_vision_name",
+    "text_encoder_name", "embedding_name", "unet_name", "diffusion_model_name",
+    "style_model_name", "gligen_name", "hypernetwork_name", "photomaker_name",
+    "upscale_model_name", "model_name",
+}
+_MODEL_EXTENSIONS = (".safetensors", ".ckpt", ".gguf", ".pt", ".bin", ".pth")
+
+
 def _extract_model_names(workflow: dict) -> set[str]:
-    """Walk the workflow, collect any string-valued input that looks like a
-    model filename (ends in .safetensors/.ckpt/.gguf/.pt). The cache layer
-    will only fetch them if they're in the catalog."""
+    """Walk the workflow, collect any string-valued input that's likely a
+    model reference. Two heuristics:
+      1. Input key matches a known model-input-name (ckpt_name, lora_name,
+         clip_name, etc.). ComfyUI stores these WITHOUT file extension —
+         the catalog stores names the same way.
+      2. Value ends in a known model extension (.safetensors/.ckpt/.gguf/...).
+         Catches anything we missed in #1 (custom nodes with custom field names).
+    Cache layer is best-effort: anything not in the DDB catalog raises
+    FileNotFoundError which the worker swallows for non-fatal lookups.
+    """
     found: set[str] = set()
-    extensions = (".safetensors", ".ckpt", ".gguf", ".pt", ".bin")
     for _node_id, node in workflow.items():
         if not isinstance(node, dict):
             continue
         inputs = node.get("inputs", {})
-        for v in inputs.values():
-            if isinstance(v, str) and v.lower().endswith(extensions):
-                # Strip extension to match catalog 'name' format.
+        for k, v in inputs.items():
+            if not isinstance(v, str) or not v:
+                continue
+            if k in _MODEL_INPUT_KEYS:
+                # Catalog names are stored without extension.
+                found.add(v.rsplit(".", 1)[0] if v.lower().endswith(_MODEL_EXTENSIONS) else v)
+            elif v.lower().endswith(_MODEL_EXTENSIONS):
                 found.add(v.rsplit(".", 1)[0])
     return found
 
