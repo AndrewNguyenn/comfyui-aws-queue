@@ -16,6 +16,13 @@ echo "  FRONTEND_BUCKET=${FRONTEND_BUCKET:-unset}"
 export TQDM_DISABLE=1
 export PYTHONUNBUFFERED=1
 
+# Sync custom nodes from the S3 manifest BEFORE starting ComfyUI so the node
+# defs surface in /object_info on first publish. Best-effort: a failing node
+# logs and we continue with the rest. See workers/shared/manifest_installer.py.
+echo "  syncing custom nodes from manifest..."
+( cd /opt/worker && python -m manifest_installer 2>&1 ) || \
+  echo "  WARN: manifest_installer exited non-zero (continuing)"
+
 # Start ComfyUI in the background, CPU mode, listening on 0.0.0.0 so that
 # external traffic DNAT'd through docker's iptables PREROUTING rules
 # (host:8188 -> container 172.17.0.2:8188) is actually accepted. With

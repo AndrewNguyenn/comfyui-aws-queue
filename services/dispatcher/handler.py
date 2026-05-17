@@ -76,10 +76,20 @@ def lambda_handler(event: dict, context: Any) -> dict:
         if method == "GET" and path == "/ws-ticket":
             return _get_ws_ticket(event)
 
+        # ComfyUI-Manager: model installs through Manager UI use a different
+        # path than custom-node installs. Translate to our /models/download
+        # Lambda so the file lands in S3 + DDB + editor dropdown.
+        if method == "POST" and path == "/manager/queue/install_model":
+            return _manager_install_model(event)
+
         # Proxy ComfyUI-Manager runtime endpoints to the metadata instance.
         # API GW resources for these are configured in ApiStack.
         for proxy_base in ("/manager/", "/customnode/", "/snapshot/", "/model-manager/"):
             if path.startswith(proxy_base) and method in ("GET", "POST"):
+                # For install routes: after the metadata-side install succeeds,
+                # append to the S3 manifest so future workers pick it up too.
+                if path in ("/customnode/install", "/customnode/install/git_url"):
+                    return _customnode_install_then_record(event, proxy_base)
                 return _proxy_to_metadata(event, proxy_base)
 
         # Stub endpoints that ComfyUI's frontend polls but we don't need full impl
@@ -510,6 +520,197 @@ def _proxy_to_metadata(event: dict, _base: str) -> dict:
         return _resp(502, {"error": f"metadata unreachable: {e.reason}"})
     except Exception as e:  # noqa: BLE001
         return _resp(500, {"error": str(e)})
+
+
+# ----- Manager UI installers (intercepts that update the S3 manifest) -----
+#
+# Architecture:
+#   1. User clicks Install in Manager UI → POST /customnode/install (or /install/git_url)
+#   2. We forward to the metadata instance so Manager actually clones the repo
+#      and the new node shows up in the editor's /object_info ASAP.
+#   3. If the metadata-side install succeeds, append an entry to the S3 manifest
+#      so any GPU worker launched after this also installs the node on boot.
+#
+# Models work differently — Manager's downloader writes to local disk which is
+# useless to us. We translate /manager/queue/install_model to our existing
+# /models/download Lambda flow which streams CivitAI → S3 → DDB → dropdowns.
+
+MANIFEST_BUCKET = OUTPUTS_BUCKET  # use the same bucket as object_info storage
+MANIFEST_KEY = "manifests/custom-nodes.json"
+
+
+def _customnode_install_then_record(event: dict, base: str) -> dict:
+    """Proxy the install to the metadata instance, then if it succeeded,
+    append to the S3 manifest so workers see the new node on next boot."""
+    resp = _proxy_to_metadata(event, base)
+    if not 200 <= resp.get("statusCode", 500) < 300:
+        return resp
+
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        body = {}
+    entry = _normalize_install_body(event["path"], body)
+    if entry:
+        try:
+            _append_to_manifest(entry)
+        except Exception:  # noqa: BLE001
+            # Don't fail the install just because the manifest update failed —
+            # metadata-side install already worked. Log and continue.
+            print(f"WARN: failed to append to manifest: {entry!r}")
+    return resp
+
+
+def _normalize_install_body(path: str, body: dict) -> Optional[dict]:
+    """Coerce the various Manager install request shapes into our manifest entry."""
+    now = datetime.now(timezone.utc).isoformat()
+    # /customnode/install/git_url: body = {"url": "<git url>"}
+    if path.endswith("/git_url"):
+        url = body.get("url") or body.get("git_url")
+        if not url:
+            return None
+        return {
+            "name": _name_from_git_url(url),
+            "url": url,
+            "commit": None,
+            "added_at": now,
+            "source": "manager-git-url",
+        }
+    # /customnode/install: body = {title, files: ["<git_url>", ...], install_type, ...}
+    title = body.get("title") or body.get("name")
+    files = body.get("files") or []
+    url = files[0] if files else body.get("reference") or body.get("url")
+    if not url:
+        return None
+    return {
+        "name": title or _name_from_git_url(url),
+        "url": url,
+        "commit": body.get("commit") or None,
+        "added_at": now,
+        "source": "manager-install",
+    }
+
+
+def _name_from_git_url(url: str) -> str:
+    last = url.rstrip("/").rsplit("/", 1)[-1]
+    return last[:-4] if last.endswith(".git") else last
+
+
+def _append_to_manifest(entry: dict) -> None:
+    """Read-modify-write the manifest. Idempotent: if an entry with the same
+    name+url already exists, update its added_at + source rather than dupe."""
+    if not MANIFEST_BUCKET:
+        return
+    try:
+        r = s3.get_object(Bucket=MANIFEST_BUCKET, Key=MANIFEST_KEY)
+        manifest = json.loads(r["Body"].read().decode())
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+            manifest = {"version": 1, "nodes": []}
+        else:
+            raise
+    nodes = manifest.setdefault("nodes", [])
+    existing = next(
+        (n for n in nodes if n.get("name") == entry["name"] and n.get("url") == entry["url"]),
+        None,
+    )
+    if existing:
+        existing.update(entry)
+    else:
+        nodes.append(entry)
+    manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
+    s3.put_object(
+        Bucket=MANIFEST_BUCKET,
+        Key=MANIFEST_KEY,
+        Body=json.dumps(manifest, indent=2).encode(),
+        ContentType="application/json",
+    )
+    print(f"manifest updated: {entry['name']} from {entry['url']}")
+
+
+def _manager_install_model(event: dict) -> dict:
+    """Adapt Manager's model-install request to our /models/download Lambda.
+
+    Manager body shape (varies; tolerate both):
+      {name, type, url, save_path, filename?, base?, description?}
+    Our /models/download body:
+      {url, model_type, name?, force?}
+    """
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        body = {}
+    url = body.get("url")
+    if not url:
+        return _resp(400, {"error": "missing url"})
+
+    model_type = (
+        body.get("type")
+        or body.get("model_type")
+        or _guess_model_type_from_save_path(body.get("save_path", ""))
+        or "checkpoint"
+    )
+    name = (
+        body.get("filename")
+        or body.get("name")
+        or url.rstrip("/").rsplit("/", 1)[-1]
+    )
+
+    # Invoke the download-kickoff Lambda asynchronously via API GW path is
+    # simpler than direct lambda invoke (keeps cred handling out of dispatcher).
+    # We're already inside the API; just call the same code path that
+    # POST /models/download uses by constructing the equivalent body and
+    # invoking the worker.
+    download_fn = os.environ.get("DOWNLOAD_KICKOFF_FN")
+    payload = {
+        "body": json.dumps({"url": url, "model_type": model_type, "name": name}),
+        "httpMethod": "POST",
+        "resource": "/models/download",
+        "headers": event.get("headers", {}),
+        "requestContext": event.get("requestContext", {}),
+    }
+    if download_fn:
+        try:
+            lam = boto3.client("lambda")
+            r = lam.invoke(
+                FunctionName=download_fn,
+                InvocationType="RequestResponse",
+                Payload=json.dumps(payload).encode(),
+            )
+            data = json.loads(r["Payload"].read().decode())
+            # Translate to Manager's expected shape: it just cares that it's a
+            # 200 with a non-error body, so passing through is fine.
+            return data
+        except Exception as e:  # noqa: BLE001
+            return _resp(500, {"error": f"download invoke failed: {e!r}"})
+    return _resp(503, {"error": "DOWNLOAD_KICKOFF_FN env not configured"})
+
+
+_SAVE_PATH_TO_MODEL_TYPE = {
+    "checkpoints": "checkpoint",
+    "loras": "lora",
+    "vae": "vae",
+    "controlnet": "controlnet",
+    "clip": "clip",
+    "clip_vision": "clip_vision",
+    "embeddings": "embedding",
+    "diffusion_models": "diffusion_models",
+    "text_encoders": "text_encoders",
+    "upscale_models": "upscale",
+    "unet": "diffusion_models",
+}
+
+
+def _guess_model_type_from_save_path(save_path: str) -> Optional[str]:
+    """save_path looks like 'custom_nodes/.../models/checkpoints/' or just
+    'checkpoints/'. Find the last segment that maps to a model type."""
+    if not save_path:
+        return None
+    parts = [p for p in save_path.strip("/").split("/") if p]
+    for p in reversed(parts):
+        if p in _SAVE_PATH_TO_MODEL_TYPE:
+            return _SAVE_PATH_TO_MODEL_TYPE[p]
+    return None
 
 
 # ----- GET /ws-ticket (Cognito-authed) -----

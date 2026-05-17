@@ -182,6 +182,13 @@ export class ApiStack extends Stack {
     this.downloadWorkerFn.grantInvoke(this.downloadKickoffFn);
     this.downloadKickoffFn.addEnvironment('DOWNLOAD_WORKER_FN', this.downloadWorkerFn.functionName);
 
+    // Manager's Model Manager UI → /manager/queue/install_model is handled by
+    // the dispatcher Lambda, which translates the request into a synchronous
+    // RequestResponse invoke of the download-kickoff Lambda (same code path
+    // as POST /models/download). Grant + wire.
+    this.downloadKickoffFn.grantInvoke(this.dispatcherFn);
+    this.dispatcherFn.addEnvironment('DOWNLOAD_KICKOFF_FN', this.downloadKickoffFn.functionName);
+
     // ----- Lambda: WebSocket Forward (REST endpoint /internal/ws-event) -----
     // Workers POST events here; Lambda pushes them to the right WS connection.
     const wsForwardFn = new lambda.Function(this, 'WsForwardFn', {

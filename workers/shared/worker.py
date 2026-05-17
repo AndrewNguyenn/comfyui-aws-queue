@@ -69,6 +69,18 @@ ddb = boto3.client("dynamodb", region_name=REGION)
 def main() -> int:
     log.info("worker starting: fleet=%s, queue=%s", FLEET, QUEUE_URL)
 
+    # Install custom nodes from the S3 manifest BEFORE starting ComfyUI so
+    # they register on the first /object_info publish. This is what makes
+    # Manager-installed nodes actually work on GPU workers (otherwise the
+    # node only lives on the metadata container).
+    try:
+        from manifest_installer import sync as sync_custom_nodes
+        results = sync_custom_nodes()
+        for name, status in results.items():
+            log.info("custom node %s: %s", name, status)
+    except Exception:  # noqa: BLE001
+        log.exception("manifest sync failed (non-fatal; continuing without custom nodes)")
+
     # Cache manager: warm pinned models in parallel.
     cache = CacheManager(MODELS_BUCKET, MODELS_TABLE, CACHE_GB, REGION)
 
