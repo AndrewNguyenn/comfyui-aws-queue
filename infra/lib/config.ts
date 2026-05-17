@@ -86,13 +86,11 @@ export const APP_CONFIG: AppConfig = {
     image: {
       fleetName: 'image',
       primaryInstanceType: 'g4dn.xlarge',
-      // Fallbacks let the ASG try alternate instance types when the primary
-      // spot pool is empty in our AZ. All listed types have GPUs that can run
-      // SDXL/SD1.5 with xformers (T4, A10G, L4 — sm_75, sm_86, sm_89).
-      // Cost (us-west-2 spot): g4dn.xlarge ≤ g4dn.2xlarge ≤ g6.xlarge ≤ g5.xlarge.
-      // 8 vCPU quota fits any of: 1×g4dn.xlarge (4) | 1×g4dn.2xlarge (8) |
-      // 1×g5.xlarge (4) | 1×g6.xlarge (4).
-      fallbackInstanceTypes: ['g4dn.2xlarge', 'g6.xlarge', 'g5.xlarge'],
+      // g4 only. g5/g6 are explicitly excluded — the image fleet is for cheap
+      // SDXL/SD1.5 work and g4dn T4 GPUs are sufficient. Higher tiers cost
+      // more and have worse spot availability in our AZ.
+      // 8 vCPU quota fits 1×g4dn.xlarge (4) or 1×g4dn.2xlarge (8).
+      fallbackInstanceTypes: ['g4dn.2xlarge'],
       rootVolumeGb: 150,
       cacheGb: 100,
     },
