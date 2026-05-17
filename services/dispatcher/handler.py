@@ -343,22 +343,29 @@ def _build_object_info() -> dict:
         except ClientError:
             pass
 
-    # Replace model dropdowns with current catalog
+    # Replace model dropdowns with current catalog.
+    #
+    # The metadata instance has no model files on disk, so ComfyUI reports
+    # empty lists ([]) for every model-name dropdown. We swap whenever the
+    # input *spec* is a list (the ComfyUI signature for a dropdown) AND the
+    # input name maps to a known model type — including the empty case, so
+    # the editor sees the real catalog instead of "no choices".
     catalog_by_type = _scan_catalog_by_type()
     for node_class, schema in merged.items():
         inputs = schema.get("input", {}).get("required", {})
         for input_name, spec in inputs.items():
-            # ComfyUI input spec format: [<type_or_choices>, <metadata>]
             if not isinstance(spec, list) or not spec:
                 continue
             choices_or_type = spec[0]
-            # If it's a list of strings, it's a dropdown — possibly a model list.
-            if isinstance(choices_or_type, list) and choices_or_type and all(
-                isinstance(x, str) for x in choices_or_type
-            ):
-                model_type = _guess_model_type_from_input(node_class, input_name)
-                if model_type and model_type in catalog_by_type:
-                    spec[0] = sorted(catalog_by_type[model_type])
+            if not isinstance(choices_or_type, list):
+                continue
+            # If non-empty, require all-strings (a real dropdown, not e.g.
+            # a tuple type like ["INT", {...}]).
+            if choices_or_type and not all(isinstance(x, str) for x in choices_or_type):
+                continue
+            model_type = _guess_model_type_from_input(node_class, input_name)
+            if model_type and model_type in catalog_by_type:
+                spec[0] = sorted(catalog_by_type[model_type])
 
     return merged
 
