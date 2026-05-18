@@ -1,4 +1,0 @@
-{
-  "_comment": "Pinned model names (must exist in DDB models catalog). Worker downloads these in parallel on boot. Add models via the /models/download UI; they populate the catalog automatically.",
-  "pinned": []
-}

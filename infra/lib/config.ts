@@ -69,7 +69,9 @@ export interface FleetConfig {
   readonly primaryInstanceType: string;
   readonly fallbackInstanceTypes: readonly string[];
   readonly rootVolumeGb: number;
-  readonly cacheGb: number;
+  // (cacheGb removed — model cache lives on the included NVMe instance store,
+  // mounted by workers/image/entrypoint.sh. Was never wired into a separate
+  // EBS volume in compute.ts anyway.)
 }
 
 /**
@@ -103,14 +105,12 @@ export const APP_CONFIG: AppConfig = {
       // 8 vCPU quota fits 1×g4dn.2xlarge (8) or 1×g4dn.xlarge (4).
       fallbackInstanceTypes: ['g4dn.xlarge'],
       rootVolumeGb: 150,
-      cacheGb: 100,
     },
     video: {
       fleetName: 'video',
       primaryInstanceType: 'g5.xlarge',
       fallbackInstanceTypes: ['g5.2xlarge', 'g6e.xlarge'],
       rootVolumeGb: 250,
-      cacheGb: 200,
     },
   },
 

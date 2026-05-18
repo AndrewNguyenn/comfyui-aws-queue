@@ -21,7 +21,8 @@ from pathlib import Path
 
 import boto3
 
-from cache_manager import CacheManager
+# Model files appear under /opt/comfy/models/<type>/ via mount-s3 (see
+# workers/image/entrypoint.sh). No download path needed here.
 from comfy_client import ComfyClient
 from comfy_supervisor import ComfySupervisor
 from object_info_publisher import publish_object_info
@@ -57,10 +58,8 @@ JOBS_TABLE = os.environ["JOBS_TABLE"]
 MODELS_TABLE = os.environ["MODELS_TABLE"]
 REGION = os.environ["AWS_REGION"]
 VISIBILITY_TIMEOUT_SEC = int(os.environ.get("VISIBILITY_TIMEOUT_SECONDS", "900"))
-CACHE_GB = int(os.environ.get("CACHE_GB", "200" if FLEET == "video" else "100"))
 HEARTBEAT_INTERVAL_SEC = 60
 COMFY_OUTPUT_DIR = Path("/opt/comfy/output")
-EXTRA_MODELS_PATH = Path("/opt/worker/extra_models.json")
 
 sqs = boto3.client("sqs", region_name=REGION)
 ddb = boto3.client("dynamodb", region_name=REGION)
@@ -81,8 +80,9 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         log.exception("manifest sync failed (non-fatal; continuing without custom nodes)")
 
-    # Cache manager: warm pinned models in parallel.
-    cache = CacheManager(MODELS_BUCKET, MODELS_TABLE, CACHE_GB, REGION)
+    # NOTE: model files appear under /opt/comfy/models/<type>/ via mount-s3,
+    # mounted in workers/image/entrypoint.sh. No download-on-demand needed here.
+    # Pinned-model warmup runs in background, also kicked off by the entrypoint.
 
     # ComfyUI subprocess.
     extra_args = ["--use-sage-attention"] if FLEET == "video" else []
@@ -113,9 +113,6 @@ def main() -> int:
     # Start ComfyUI and wait for ready.
     comfy.start()
     comfy.wait_for_ready(timeout_seconds=180)
-
-    # Warm pinned models (parallel; runs in this thread).
-    cache.warm_pinned(EXTRA_MODELS_PATH)
 
     # Publish /object_info to dispatcher so the frontend gets accurate node info.
     client = ComfyClient(comfy.base_url)
@@ -184,28 +181,13 @@ def main() -> int:
             _set_job_status(job_id, "running",
                             extra={"started_at": datetime.now(timezone.utc).isoformat()})
 
-            # Pre-fetch any models referenced by name (best-effort).
-            # FileNotFoundError just means the name didn't match a catalog
-            # entry (e.g. a custom-node input that isn't actually a model);
-            # log and continue. If the model genuinely IS needed and missing,
-            # ComfyUI's own validation will reject the prompt with a clearer
-            # "value_not_in_list" error.
-            extracted = _extract_model_names(workflow)
-            log.info("workflow references %d candidate models: %s", len(extracted), sorted(extracted))
-            for model_name in extracted:
-                try:
-                    cache.ensure(model_name)
-                except FileNotFoundError as e:
-                    log.info("skipping non-catalog ref: %s", e)
-
-            # Force ComfyUI to refresh its folder_paths cache so the symlinks
-            # we just created show up in the per-node dropdown lists. Without
-            # this, the /prompt validator rejects newly-cached models with
-            # "value_not_in_list". GET /object_info triggers a rescan.
-            try:
-                client.fetch_object_info()
-            except Exception:  # noqa: BLE001
-                log.exception("object_info refresh failed (non-fatal)")
+            # Background-fetch every referenced model so mount-s3 starts
+            # streaming it from S3 while ComfyUI is still parsing the workflow.
+            # Without this, the first read of an uncached model blocks the
+            # whole sampling pipeline on the S3 download. cat-to-/dev/null is
+            # the same trick warm_pinned uses; threading just parallelizes the
+            # I/O for multi-LoRA workflows.
+            _prefetch_referenced_models(workflow)
 
             # Snapshot output dir BEFORE starting the job so we can scan for
             # new files after (handles custom nodes that bypass standard outputs).
@@ -329,31 +311,62 @@ _MODEL_INPUT_KEYS = {
 _MODEL_EXTENSIONS = (".safetensors", ".ckpt", ".gguf", ".pt", ".bin", ".pth")
 
 
-def _extract_model_names(workflow: dict) -> set[str]:
-    """Walk the workflow, collect any string-valued input that's likely a
-    model reference. Two heuristics:
-      1. Input key matches a known model-input-name (ckpt_name, lora_name,
-         clip_name, etc.). ComfyUI stores these WITHOUT file extension —
-         the catalog stores names the same way.
-      2. Value ends in a known model extension (.safetensors/.ckpt/.gguf/...).
-         Catches anything we missed in #1 (custom nodes with custom field names).
-    Cache layer is best-effort: anything not in the DDB catalog raises
-    FileNotFoundError which the worker swallows for non-fatal lookups.
-    """
+def _extract_model_filenames(workflow: dict) -> set[str]:
+    """Return the set of model filenames the workflow references. We pick up
+    values whose input key matches a model-input name (ckpt_name, lora_name,
+    ...) — those carry the on-disk filename verbatim, matching what mount-s3
+    surfaces under /opt/comfy/models/<type>/."""
     found: set[str] = set()
     for _node_id, node in workflow.items():
         if not isinstance(node, dict):
             continue
-        inputs = node.get("inputs", {})
-        for k, v in inputs.items():
+        for k, v in node.get("inputs", {}).items():
             if not isinstance(v, str) or not v:
                 continue
-            if k in _MODEL_INPUT_KEYS:
-                # Catalog names are stored without extension.
-                found.add(v.rsplit(".", 1)[0] if v.lower().endswith(_MODEL_EXTENSIONS) else v)
-            elif v.lower().endswith(_MODEL_EXTENSIONS):
-                found.add(v.rsplit(".", 1)[0])
+            if k in _MODEL_INPUT_KEYS or v.lower().endswith(_MODEL_EXTENSIONS):
+                found.add(v)
     return found
+
+
+_COMFY_MODELS_ROOT = Path("/opt/comfy/models")
+
+
+def _prefetch_referenced_models(workflow: dict) -> None:
+    """Kick off background reads of every referenced model file so mount-s3
+    starts streaming from S3 in parallel with ComfyUI's workflow parsing.
+    The cat-to-/dev/null trick is the same one warm_pinned uses to seed the
+    mount-s3 disk cache. Best-effort: anything that doesn't resolve to a
+    real file (custom-node input that isn't actually a model) is skipped."""
+    import threading
+
+    filenames = _extract_model_filenames(workflow)
+    if not filenames:
+        return
+
+    def _stream(path: str) -> None:
+        try:
+            with open(path, "rb") as f:
+                while f.read(16 * 1024 * 1024):
+                    pass
+        except FileNotFoundError:
+            pass
+        except Exception:  # noqa: BLE001
+            log.exception("prefetch failed for %s", path)
+
+    started = 0
+    for filename in filenames:
+        # Catalog type is unknown without a DDB lookup, so check each models/*/
+        # dir. Cheap — mount-s3 caches readdir results, and we stop at first hit.
+        for type_dir in _COMFY_MODELS_ROOT.iterdir() if _COMFY_MODELS_ROOT.is_dir() else []:
+            if not type_dir.is_dir():
+                continue
+            candidate = type_dir / filename
+            if candidate.exists():
+                threading.Thread(target=_stream, args=(str(candidate),), daemon=True).start()
+                started += 1
+                break
+    if started:
+        log.info("prefetching %d referenced models in background", started)
 
 
 if __name__ == "__main__":

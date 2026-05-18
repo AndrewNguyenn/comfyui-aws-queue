@@ -204,6 +204,36 @@ export class ComputeStack extends Stack {
       `echo ECS_IMAGE_MINIMUM_CLEANUP_AGE=30m >> /etc/ecs/ecs.config`
     );
 
+    // ---- NVMe instance store → /opt/cache (host) ----
+    // Image fleet only: g4dn ships local NVMe (225 GB on .2xlarge, 125 GB on
+    // .xlarge) free with the instance. Format it on the host so the container
+    // can bind-mount /opt/cache without needing block-device access. Video
+    // fleet doesn't use mount-s3 yet, so it doesn't need this setup.
+    if (fleetName === 'image') {
+      userData.addCommands(
+        'set -ex',
+        'dnf install -y xfsprogs',
+        'mkdir -p /opt/cache',
+        'ROOT_SRC=$(findmnt -no SOURCE /)',
+        'NVME_DEV=""',
+        'for dev in /dev/nvme*n1; do',
+        '  [ -b "$dev" ] || continue',
+        '  if grep -q "^$dev " /proc/mounts; then continue; fi',
+        '  if [ "$dev" = "$ROOT_SRC" ]; then continue; fi',
+        '  if lsblk -no MOUNTPOINTS "$dev" 2>/dev/null | grep -q "^/$"; then continue; fi',
+        '  NVME_DEV="$dev"; break',
+        'done',
+        'if [ -n "$NVME_DEV" ]; then',
+        '  if ! blkid "$NVME_DEV" >/dev/null 2>&1; then mkfs.xfs -f "$NVME_DEV"; fi',
+        '  mount "$NVME_DEV" /opt/cache',
+        '  chmod 1777 /opt/cache',
+        '  echo "instance store $NVME_DEV mounted at /opt/cache"',
+        'else',
+        '  echo "no instance store; /opt/cache stays on root volume"',
+        'fi'
+      );
+    }
+
     const launchTemplate = new ec2.LaunchTemplate(this, `${fleetName}LaunchTemplate`, {
       launchTemplateName: `comfy-${fleetName}-lt`,
       machineImage,
@@ -289,9 +319,17 @@ export class ComputeStack extends Stack {
   ): ecs.Ec2TaskDefinition {
     const { ecrRepository, queueUrl, storage, config } = deps;
 
+    // Image fleet uses mount-s3 inside the container + NVMe cache; needs the
+    // host's /opt/cache bind-mounted. Video fleet doesn't (yet) use mount-s3,
+    // so doesn't need the volume — keeps that task def's attack surface
+    // smaller (no FUSE caps or device pass-through either, see below).
     const taskDef = new ecs.Ec2TaskDefinition(this, `${fleetName}TaskDef`, {
       family: `comfy-${fleetName}`,
       networkMode: ecs.NetworkMode.HOST,
+      volumes:
+        fleetName === 'image'
+          ? [{ name: 'host-cache', host: { sourcePath: '/opt/cache' } }]
+          : undefined,
     });
 
     const logGroup = new logs.LogGroup(this, `${fleetName}WorkerLogs`, {
@@ -308,18 +346,27 @@ export class ComputeStack extends Stack {
     const workerApiKeyId = require('aws-cdk-lib/aws-ssm').StringParameter
       .valueForStringParameter(this, '/comfy/api/worker-key-id');
 
-    taskDef.addContainer(`${fleetName}Container`, {
+    const container = taskDef.addContainer(`${fleetName}Container`, {
       containerName: `comfy-${fleetName}-worker`,
       image: ecs.ContainerImage.fromEcrRepository(ecrRepository, 'latest'),
       gpuCount: 1,
-      // image fleet now primarily runs on g4dn.2xlarge (32GB sys RAM).
-      // Bumped soft + hard limits — the 20GB redcraft checkpoint pushed
-      // past the previous 13GB hard cap during sampling and ECS sent
-      // SIGKILL. 28GB hard / 24GB soft leaves ~4GB headroom on 2xlarge
-      // and uses the .xlarge instance to its limit when falling back
-      // (which means redcraft-sized loads will still OOM on .xlarge —
-      // expected trade-off given user wants g4-only).
-      memoryReservationMiB: fleetName === 'image' ? 24576 : 24576,
+      // Image fleet: needs FUSE access for mount-s3 (see addCapabilities/
+      // addDevices below). Video fleet doesn't, so no LinuxParameters at all.
+      // TODO: investigate unprivileged FUSE fd handoff (mount-s3 CONFIGURATION.md)
+      // if we ever need to drop CAP_SYS_ADMIN — currently requires a host-side
+      // helper we don't have.
+      ...(fleetName === 'image'
+        ? { linuxParameters: new ecs.LinuxParameters(this, `${fleetName}LinuxParams`, {}) }
+        : {}),
+      // Memory caps:
+      //   - memoryReservationMiB (soft / placement): 11264 fits both .xlarge
+      //     (16 GB) and .2xlarge (32 GB) with ECS agent + OS headroom.
+      //   - memoryLimitMiB (hard cap): bounded so the container can't compete
+      //     with the OS or with mount-s3's host-side RSS for sys RAM. On the
+      //     .xlarge fallback this means big checkpoints OOM mid-load (known
+      //     trade-off — better than being unschedulable). On .2xlarge we leave
+      //     some headroom for mount-s3's page cache + writeback buffers.
+      memoryReservationMiB: fleetName === 'image' ? 11264 : 24576,
       memoryLimitMiB: fleetName === 'image' ? 28672 : 28672,
       essential: true,
       logging: ecs.LogDrivers.awsLogs({
@@ -350,6 +397,26 @@ export class ComputeStack extends Stack {
         WORKER_API_KEY_ID: workerApiKeyId,
       },
     });
+
+    // FUSE capability + device + host-cache bind-mount: image fleet only.
+    // Video fleet doesn't use mount-s3, so no need to grant SYS_ADMIN.
+    if (fleetName === 'image') {
+      container.linuxParameters!.addCapabilities(ecs.Capability.SYS_ADMIN);
+      container.linuxParameters!.addDevices({
+        hostPath: '/dev/fuse',
+        containerPath: '/dev/fuse',
+        permissions: [
+          ecs.DevicePermission.READ,
+          ecs.DevicePermission.WRITE,
+          ecs.DevicePermission.MKNOD,
+        ],
+      });
+      container.addMountPoints({
+        sourceVolume: 'host-cache',
+        containerPath: '/opt/cache',
+        readOnly: false,
+      });
+    }
 
     return taskDef;
   }
