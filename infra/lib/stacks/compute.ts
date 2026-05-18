@@ -312,8 +312,15 @@ export class ComputeStack extends Stack {
       containerName: `comfy-${fleetName}-worker`,
       image: ecs.ContainerImage.fromEcrRepository(ecrRepository, 'latest'),
       gpuCount: 1,
-      memoryReservationMiB: fleetName === 'image' ? 11264 : 24576,
-      memoryLimitMiB: fleetName === 'image' ? 13312 : 28672,
+      // image fleet now primarily runs on g4dn.2xlarge (32GB sys RAM).
+      // Bumped soft + hard limits — the 20GB redcraft checkpoint pushed
+      // past the previous 13GB hard cap during sampling and ECS sent
+      // SIGKILL. 28GB hard / 24GB soft leaves ~4GB headroom on 2xlarge
+      // and uses the .xlarge instance to its limit when falling back
+      // (which means redcraft-sized loads will still OOM on .xlarge —
+      // expected trade-off given user wants g4-only).
+      memoryReservationMiB: fleetName === 'image' ? 24576 : 24576,
+      memoryLimitMiB: fleetName === 'image' ? 28672 : 28672,
       essential: true,
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: fleetName,

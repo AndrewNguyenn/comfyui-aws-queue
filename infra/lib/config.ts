@@ -80,7 +80,10 @@ export const APP_CONFIG: AppConfig = {
   projectName: 'comfyui-aws-queue',
   region: 'us-west-2',
   availabilityZone: 'us-west-2a',
-  additionalAvailabilityZones: ['us-west-2b', 'us-west-2c', 'us-west-2d'],
+  // 2d excluded: g4dn / g5 / g5.2 instance types are not offered there.
+  // Keeping it would trigger InvalidFleetConfiguration errors on every
+  // launch attempt that lands in 2d. 2a/2b/2c all support our full type set.
+  additionalAvailabilityZones: ['us-west-2b', 'us-west-2c'],
   tags: {
     Project: 'comfyui-aws-queue',
     Environment: 'prod',
@@ -90,12 +93,15 @@ export const APP_CONFIG: AppConfig = {
   fleets: {
     image: {
       fleetName: 'image',
-      primaryInstanceType: 'g4dn.xlarge',
-      // g4 only. g5/g6 are explicitly excluded — the image fleet is for cheap
-      // SDXL/SD1.5 work and g4dn T4 GPUs are sufficient. Higher tiers cost
-      // more and have worse spot availability in our AZ.
-      // 8 vCPU quota fits 1×g4dn.xlarge (4) or 1×g4dn.2xlarge (8).
-      fallbackInstanceTypes: ['g4dn.2xlarge'],
+      // g4dn.2xlarge primary (32GB sys RAM, 16GB T4 GPU). Big checkpoints like
+      // the 20GB redcraft model OOM-killed ComfyUI on .xlarge (16GB sys RAM)
+      // mid-sampling. .2xlarge fits comfortably; ~2x spot price (~$0.40/hr)
+      // but still well under the personal-project budget.
+      primaryInstanceType: 'g4dn.2xlarge',
+      // .xlarge fallback when .2xlarge spot is unavailable — accepts smaller
+      // model failures over total unavailability. g4 only (no g5/g6).
+      // 8 vCPU quota fits 1×g4dn.2xlarge (8) or 1×g4dn.xlarge (4).
+      fallbackInstanceTypes: ['g4dn.xlarge'],
       rootVolumeGb: 150,
       cacheGb: 100,
     },
