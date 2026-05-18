@@ -205,12 +205,10 @@ export class ComputeStack extends Stack {
     );
 
     // ---- NVMe instance store → /opt/cache (host) ----
-    // Image fleet only: g4dn ships local NVMe (225 GB on .2xlarge, 125 GB on
-    // .xlarge) free with the instance. Format it on the host so the container
-    // can bind-mount /opt/cache without needing block-device access. Video
-    // fleet doesn't use mount-s3 yet, so it doesn't need this setup.
-    if (fleetName === 'image') {
-      userData.addCommands(
+    // Both fleets use mount-s3 with NVMe-backed disk cache. g4dn/g5/g6e all
+    // ship local NVMe free with the instance. Format on the host so the
+    // container can bind-mount /opt/cache without needing block-device access.
+    userData.addCommands(
         'set -ex',
         'dnf install -y xfsprogs',
         'mkdir -p /opt/cache',
@@ -231,8 +229,7 @@ export class ComputeStack extends Stack {
         'else',
         '  echo "no instance store; /opt/cache stays on root volume"',
         'fi'
-      );
-    }
+    );
 
     const launchTemplate = new ec2.LaunchTemplate(this, `${fleetName}LaunchTemplate`, {
       launchTemplateName: `comfy-${fleetName}-lt`,
@@ -273,9 +270,21 @@ export class ComputeStack extends Stack {
           })),
         ],
         instancesDistribution: {
-          // Pure spot — never on-demand. User accepts spot capacity risk.
+          // Spot mix controlled by CDK context: `-c useOnDemand=true` flips to
+          // 100% on-demand (no spot wait, ~2.5x cost — useful when spot has
+          // been unfulfillable for hours and you want to force progress).
+          // Default is pure spot.
+          //
+          // ASG capacity-optimized within a single instance type can switch
+          // between fallback types (g4dn.2xlarge → g4dn.xlarge) automatically
+          // when the primary's spot pool is empty. There is NO automatic
+          // spot→on-demand failover in ASG mixed-instances — the only knobs
+          // are base capacity (fixed on-demand minimum) and percentage above
+          // base (mix ratio). For a max=1 fleet, a 20% on-demand allocation
+          // rounds to 0; the only way to actually get on-demand is 100%.
           onDemandBaseCapacity: 0,
-          onDemandPercentageAboveBaseCapacity: 0,
+          onDemandPercentageAboveBaseCapacity:
+            this.node.tryGetContext('useOnDemand') === 'true' ? 100 : 0,
           spotAllocationStrategy: autoscaling.SpotAllocationStrategy.CAPACITY_OPTIMIZED,
         },
       },
@@ -319,17 +328,12 @@ export class ComputeStack extends Stack {
   ): ecs.Ec2TaskDefinition {
     const { ecrRepository, queueUrl, storage, config } = deps;
 
-    // Image fleet uses mount-s3 inside the container + NVMe cache; needs the
-    // host's /opt/cache bind-mounted. Video fleet doesn't (yet) use mount-s3,
-    // so doesn't need the volume — keeps that task def's attack surface
-    // smaller (no FUSE caps or device pass-through either, see below).
+    // Both fleets use mount-s3 + NVMe cache. host-cache bind-mount + FUSE
+    // capability + /dev/fuse device are uniform across image and video.
     const taskDef = new ecs.Ec2TaskDefinition(this, `${fleetName}TaskDef`, {
       family: `comfy-${fleetName}`,
       networkMode: ecs.NetworkMode.HOST,
-      volumes:
-        fleetName === 'image'
-          ? [{ name: 'host-cache', host: { sourcePath: '/opt/cache' } }]
-          : undefined,
+      volumes: [{ name: 'host-cache', host: { sourcePath: '/opt/cache' } }],
     });
 
     const logGroup = new logs.LogGroup(this, `${fleetName}WorkerLogs`, {
@@ -350,14 +354,11 @@ export class ComputeStack extends Stack {
       containerName: `comfy-${fleetName}-worker`,
       image: ecs.ContainerImage.fromEcrRepository(ecrRepository, 'latest'),
       gpuCount: 1,
-      // Image fleet: needs FUSE access for mount-s3 (see addCapabilities/
-      // addDevices below). Video fleet doesn't, so no LinuxParameters at all.
+      // FUSE access for mount-s3 — uniform across image + video.
       // TODO: investigate unprivileged FUSE fd handoff (mount-s3 CONFIGURATION.md)
       // if we ever need to drop CAP_SYS_ADMIN — currently requires a host-side
       // helper we don't have.
-      ...(fleetName === 'image'
-        ? { linuxParameters: new ecs.LinuxParameters(this, `${fleetName}LinuxParams`, {}) }
-        : {}),
+      linuxParameters: new ecs.LinuxParameters(this, `${fleetName}LinuxParams`, {}),
       // Memory caps:
       //   - memoryReservationMiB (soft / placement): 11264 fits both .xlarge
       //     (16 GB) and .2xlarge (32 GB) with ECS agent + OS headroom.
@@ -398,25 +399,22 @@ export class ComputeStack extends Stack {
       },
     });
 
-    // FUSE capability + device + host-cache bind-mount: image fleet only.
-    // Video fleet doesn't use mount-s3, so no need to grant SYS_ADMIN.
-    if (fleetName === 'image') {
-      container.linuxParameters!.addCapabilities(ecs.Capability.SYS_ADMIN);
-      container.linuxParameters!.addDevices({
-        hostPath: '/dev/fuse',
-        containerPath: '/dev/fuse',
-        permissions: [
-          ecs.DevicePermission.READ,
-          ecs.DevicePermission.WRITE,
-          ecs.DevicePermission.MKNOD,
-        ],
-      });
-      container.addMountPoints({
-        sourceVolume: 'host-cache',
-        containerPath: '/opt/cache',
-        readOnly: false,
-      });
-    }
+    // FUSE capability + device + host-cache bind-mount for mount-s3.
+    container.linuxParameters!.addCapabilities(ecs.Capability.SYS_ADMIN);
+    container.linuxParameters!.addDevices({
+      hostPath: '/dev/fuse',
+      containerPath: '/dev/fuse',
+      permissions: [
+        ecs.DevicePermission.READ,
+        ecs.DevicePermission.WRITE,
+        ecs.DevicePermission.MKNOD,
+      ],
+    });
+    container.addMountPoints({
+      sourceVolume: 'host-cache',
+      containerPath: '/opt/cache',
+      readOnly: false,
+    });
 
     return taskDef;
   }
@@ -446,6 +444,13 @@ export class ComputeStack extends Stack {
     queue.grantConsumeMessages(role);
     storage.modelsBucket.grantRead(role); // GetObject + ListBucket only — NO put/delete
     storage.outputsBucket.grantWrite(role); // PutObject + GetObject (verify); no Delete
+    // manifest_installer reads s3://<outputs>/manifests/custom-nodes.json on
+    // worker boot to know which custom nodes to git-clone. grantWrite doesn't
+    // include GetObject so we add it explicitly here, scoped to manifests/*.
+    role.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: ['s3:GetObject'],
+      resources: [`${storage.outputsBucket.bucketArn}/manifests/*`],
+    }));
     storage.uploadsBucket.grantRead(role);
     storage.jobsTable.grantReadWriteData(role);
     storage.modelsTable.grantReadData(role);

@@ -33,7 +33,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git wget curl ca-certificates build-essential \
         ffmpeg libgl1 libglib2.0-0 \
+        fuse libfuse2 xfsprogs \
     && rm -rf /var/lib/apt/lists/*
+
+# Mountpoint for Amazon S3 — same role as in image worker. Each catalog type
+# is mounted at /opt/comfy/models/<type>/ by entrypoint.sh; first read
+# streams from S3 and caches on the NVMe instance store.
+ARG MOUNT_S3_VERSION=1.10.0
+RUN curl -fsSL -o /tmp/mount-s3.deb \
+        "https://s3.amazonaws.com/mountpoint-s3-release/${MOUNT_S3_VERSION}/x86_64/mount-s3-${MOUNT_S3_VERSION}-x86_64.deb" \
+    && apt-get update && apt-get install -y --no-install-recommends /tmp/mount-s3.deb \
+    && rm -rf /var/lib/apt/lists/* /tmp/mount-s3.deb \
+    && mount-s3 --version
 
 # ---------- ComfyUI ----------
 WORKDIR /opt/comfy
@@ -88,7 +99,6 @@ RUN pip install -r /tmp/req.txt && rm /tmp/req.txt
 # ---------- Worker code ----------
 WORKDIR /opt/worker
 COPY workers/shared/ /opt/worker/
-COPY workers/video/extra_models.json /opt/worker/extra_models.json
 COPY workers/video/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
