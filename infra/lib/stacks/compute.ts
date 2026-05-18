@@ -270,21 +270,13 @@ export class ComputeStack extends Stack {
           })),
         ],
         instancesDistribution: {
-          // Spot mix controlled by CDK context: `-c useOnDemand=true` flips to
-          // 100% on-demand (no spot wait, ~2.5x cost — useful when spot has
-          // been unfulfillable for hours and you want to force progress).
-          // Default is pure spot.
-          //
-          // ASG capacity-optimized within a single instance type can switch
-          // between fallback types (g4dn.2xlarge → g4dn.xlarge) automatically
-          // when the primary's spot pool is empty. There is NO automatic
-          // spot→on-demand failover in ASG mixed-instances — the only knobs
-          // are base capacity (fixed on-demand minimum) and percentage above
-          // base (mix ratio). For a max=1 fleet, a 20% on-demand allocation
-          // rounds to 0; the only way to actually get on-demand is 100%.
+          // Pure spot — user explicitly never wants on-demand. ASG falls
+          // through between fallback instance types within a fleet
+          // (g4dn.2xlarge → g4dn.xlarge) using capacity-optimized; if every
+          // type's spot pool is unfulfillable in every AZ, jobs queue until
+          // capacity returns.
           onDemandBaseCapacity: 0,
-          onDemandPercentageAboveBaseCapacity:
-            this.node.tryGetContext('useOnDemand') === 'true' ? 100 : 0,
+          onDemandPercentageAboveBaseCapacity: 0,
           spotAllocationStrategy: autoscaling.SpotAllocationStrategy.CAPACITY_OPTIMIZED,
         },
       },
