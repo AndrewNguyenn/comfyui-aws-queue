@@ -55,7 +55,7 @@ else
     while IFS='=' read -r key val; do
         key=${key#[}; key=${key%]}
         TYPES[$key]=$val
-    done < <(cd /opt/worker && python -m model_types --bash)
+    done < <(cd /opt/worker && python3 -m model_types --bash)
 
     # Per-mount cache size = (NVMe_MiB - 10 GiB reserve) / num_mounts, floored
     # so the sum stays bounded. mount-s3 LRU-evicts within each per-mount cap.
@@ -111,7 +111,7 @@ echo "  ${#MOUNTS[@]} mounts visible"
 # After the barrier so warm_pinned doesn't see "not visible in mount" for
 # freshly-mounted paths.
 if [ -n "$MODELS_BUCKET" ] && [ "${#MOUNTS[@]}" -gt 0 ]; then
-    (cd /opt/worker && python -u -m warm_pinned 2>&1 | sed 's/^/warm: /' &)
+    (cd /opt/worker && python3 -u -m warm_pinned 2>&1 | sed 's/^/warm: /' &)
 fi
 
 # ----- 4. Sentinel: kill the container if any mount-s3 daemon dies -----
@@ -136,4 +136,4 @@ fi
 
 # ----- 5. Hand off to the main worker loop -----
 cd /opt/worker
-exec python -u worker.py
+exec python3 -u worker.py

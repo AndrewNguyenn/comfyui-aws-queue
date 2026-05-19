@@ -31,7 +31,7 @@ else
     while IFS='=' read -r key val; do
         key=${key#[}; key=${key%]}
         TYPES[$key]=$val
-    done < <(cd /opt/worker && python -m model_types --bash)
+    done < <(cd /opt/worker && python3 -m model_types --bash)
 
     NVME_MIB=$(df -m --output=avail "$CACHE_ROOT" | tail -1 | tr -d ' ')
     NUM_MOUNTS=${#TYPES[@]}
@@ -77,7 +77,7 @@ done
 echo "  ${#MOUNTS[@]} mounts visible"
 
 if [ -n "$MODELS_BUCKET" ] && [ "${#MOUNTS[@]}" -gt 0 ]; then
-    (cd /opt/worker && python -u -m warm_pinned 2>&1 | sed 's/^/warm: /' &)
+    (cd /opt/worker && python3 -u -m warm_pinned 2>&1 | sed 's/^/warm: /' &)
 fi
 
 # Sentinel: kill the container if any mount-s3 daemon dies.
@@ -96,4 +96,4 @@ if [ "${#MOUNTS[@]}" -gt 0 ]; then
 fi
 
 cd /opt/worker
-exec python -u worker.py
+exec python3 -u worker.py
