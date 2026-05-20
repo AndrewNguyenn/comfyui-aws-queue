@@ -189,6 +189,14 @@ export class MetadataStack extends Stack {
       stringValue: `http://${eip.ref}:8188`,
       description: 'Metadata instance ComfyUI base URL',
     });
+    // Instance ID — the dispatcher reads this to target an SSM SendCommand
+    // (`docker restart comfy-metadata`) when the editor's Manager Restart
+    // button is pressed.
+    new ssm.StringParameter(this, 'MetadataInstanceIdParam', {
+      parameterName: '/comfy/metadata/instance-id',
+      stringValue: this.instance.instanceId,
+      description: 'Metadata EC2 instance ID — used by the dispatcher to restart it',
+    });
 
     new CfnOutput(this, 'MetadataInstanceId', {
       value: this.instance.instanceId,

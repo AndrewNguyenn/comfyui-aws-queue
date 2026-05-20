@@ -344,6 +344,21 @@ export class ApiStack extends Stack {
       actions: ['ssm:GetParameter'],
       resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/comfy/metadata/*`],
     }));
+    // The editor's Manager "Restart" button → dispatcher → SSM RunShellScript
+    // (`docker restart comfy-metadata`) on the metadata instance. Scoped to
+    // that instance via a Name-tag condition so the dispatcher can't run
+    // shell on anything else.
+    this.dispatcherFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ssm:SendCommand'],
+      resources: [`arn:aws:ssm:${this.region}::document/AWS-RunShellScript`],
+    }));
+    this.dispatcherFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ssm:SendCommand'],
+      resources: [`arn:aws:ec2:${this.region}:${this.account}:instance/*`],
+      conditions: {
+        StringEquals: { 'ssm:resourceTag/Name': 'ComfyMetadataStack/MetadataInstance' },
+      },
+    }));
 
     const proxyMethodOptions: apigw.MethodOptions = {
       ...authMethodOptions,

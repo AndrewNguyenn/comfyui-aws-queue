@@ -95,6 +95,13 @@ def lambda_handler(event: dict, context: Any) -> dict:
         if method == "POST" and url_path == "/civitai/download":
             return _civicomfy_download(event)
 
+        # Editor Manager "Restart" button. Manager's /manager/reboot just
+        # exit(0)s the ComfyUI process; proxying it drops the connection
+        # mid-request so the editor sees a failure. Instead, restart the
+        # metadata container via SSM and return a clean 200.
+        if method == "POST" and url_path == "/manager/reboot":
+            return _manager_reboot()
+
         # Editor LOGS panel → ComfyUI's /internal/logs/raw. The static editor
         # has no live ComfyUI of its own; proxy to the metadata instance,
         # which runs ComfyUI full-time (and is where Manager installs happen,
@@ -513,6 +520,37 @@ def _get_metadata_url() -> str:
     except Exception as e:  # noqa: BLE001
         print(f"failed to fetch /comfy/metadata/url: {e!r}")
         return ""
+
+
+def _manager_reboot() -> dict:
+    """Restart the metadata container in response to the editor's Manager
+    'Restart' button (POST /manager/reboot).
+
+    Manager's own handler just exit(0)s the ComfyUI process and relies on a
+    supervisor to respawn it. Here we fire an SSM RunShellScript command to
+    `docker restart comfy-metadata` — Docker's `--restart unless-stopped`
+    policy brings ComfyUI back, freshly importing every custom node — then
+    return 200 immediately (the command runs asynchronously)."""
+    try:
+        ssm = boto3.client("ssm")
+        instance_id = ssm.get_parameter(
+            Name="/comfy/metadata/instance-id"
+        )["Parameter"]["Value"]
+    except Exception as e:  # noqa: BLE001
+        print(f"reboot: metadata instance-id unavailable: {e!r}")
+        return _resp(503, {"error": "metadata instance id unknown"})
+    try:
+        ssm.send_command(
+            InstanceIds=[instance_id],
+            DocumentName="AWS-RunShellScript",
+            Parameters={"commands": ["docker restart comfy-metadata"]},
+            TimeoutSeconds=120,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"reboot: send_command failed: {e!r}")
+        return _resp(500, {"error": f"restart command failed: {e!r}"})
+    print(f"reboot: docker restart comfy-metadata dispatched to {instance_id}")
+    return _resp(200, {"status": "restarting"})
 
 
 def _proxy_to_metadata(event: dict, _base: str, timeout: int = 8) -> dict:
