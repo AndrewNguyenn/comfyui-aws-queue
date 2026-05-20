@@ -143,65 +143,112 @@ def _pick_primary_file(meta: dict) -> dict:
     files = meta.get("files", [])
     if not files:
         raise RuntimeError("no files in CivitAI metadata")
-    # Prefer .safetensors, then largest by size
+    # CivitAI flags one file `primary: true` — the canonical download (e.g.
+    # the pruned fp16 checkpoint). Honour it; picking "largest" instead grabs
+    # the heavier full/fp32 sibling, which is bigger, slower, and not what the
+    # editor's file picker defaults to.
+    primary = [f for f in files if f.get("primary")]
+    if primary:
+        return primary[0]
+    # No primary flag: prefer .safetensors, then largest.
     safetensors = [f for f in files if f.get("name", "").endswith(".safetensors")]
     candidates = safetensors or files
     return max(candidates, key=lambda f: f.get("sizeKB", 0))
 
 
+_STREAM_MAX_ATTEMPTS = 6
+
+
 def _stream_to_s3(
     url: str, token: str, s3_key: str, total_bytes: int, download_id: str
 ) -> int:
-    headers = {"User-Agent": "comfyui-aws-queue/1.0"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    """Stream a CivitAI download into an S3 multipart upload.
 
-    # CivitAI redirects to a signed CDN URL — follow.
-    r = http.request("GET", url, headers=headers, preload_content=False, redirect=True)
-    if r.status >= 400:
-        raise RuntimeError(f"download GET {r.status}")
+    Resilient to mid-stream connection drops: CivitAI's CDN closes long
+    connections on multi-GB files (seen as IncompleteRead / ProtocolError).
+    On a break we re-request with an HTTP Range header and resume from the
+    byte we got to, rather than failing the whole download.
+    """
+    base_headers = {"User-Agent": "comfyui-aws-queue/1.0"}
+    if token:
+        base_headers["Authorization"] = f"Bearer {token}"
 
     # S3 multipart upload, 8 MB parts. Min part size is 5 MB except for last.
     mpu = s3.create_multipart_upload(Bucket=MODELS_BUCKET, Key=s3_key)
     upload_id = mpu["UploadId"]
     parts: list[dict] = []
     part_number = 1
-    bytes_done = 0
+    bytes_done = 0  # bytes committed to completed S3 parts
     last_progress_at_bytes = 0
-    buffer = bytearray()
+    buffer = bytearray()  # accumulates between part flushes; survives retries
+
+    def _flush_full_parts() -> None:
+        nonlocal part_number, bytes_done, last_progress_at_bytes
+        while len(buffer) >= CHUNK_SIZE:
+            part_bytes = bytes(buffer[:CHUNK_SIZE])
+            del buffer[:CHUNK_SIZE]
+            resp = s3.upload_part(
+                Bucket=MODELS_BUCKET, Key=s3_key, PartNumber=part_number,
+                UploadId=upload_id, Body=part_bytes,
+            )
+            parts.append({"PartNumber": part_number, "ETag": resp["ETag"]})
+            part_number += 1
+            bytes_done += len(part_bytes)
+            if bytes_done - last_progress_at_bytes >= PROGRESS_UPDATE_BYTES:
+                _set_bytes_done(download_id, bytes_done)
+                last_progress_at_bytes = bytes_done
 
     try:
-        for chunk in r.stream(CHUNK_SIZE):
-            buffer.extend(chunk)
-            # Upload when buffer is at least one S3 part size
-            while len(buffer) >= CHUNK_SIZE:
-                part_bytes = bytes(buffer[:CHUNK_SIZE])
-                del buffer[:CHUNK_SIZE]
-                upload_resp = s3.upload_part(
-                    Bucket=MODELS_BUCKET,
-                    Key=s3_key,
-                    PartNumber=part_number,
-                    UploadId=upload_id,
-                    Body=part_bytes,
+        attempt = 0
+        while True:
+            resume_at = bytes_done + len(buffer)
+            headers = dict(base_headers)
+            if resume_at:
+                headers["Range"] = f"bytes={resume_at}-"
+            r = None
+            try:
+                # CivitAI redirects to a signed CDN URL — follow.
+                r = http.request(
+                    "GET", url, headers=headers, preload_content=False, redirect=True
                 )
-                parts.append({"PartNumber": part_number, "ETag": upload_resp["ETag"]})
-                part_number += 1
-                bytes_done += len(part_bytes)
-                if bytes_done - last_progress_at_bytes >= PROGRESS_UPDATE_BYTES:
-                    _set_bytes_done(download_id, bytes_done)
-                    last_progress_at_bytes = bytes_done
+                if resume_at and r.status == 200:
+                    # CDN ignored Range and is resending from byte 0 — splicing
+                    # that onto our existing parts would corrupt the file.
+                    raise RuntimeError("CDN ignored Range header; cannot resume")
+                if r.status >= 400:
+                    raise RuntimeError(f"download GET {r.status}")
+                for chunk in r.stream(CHUNK_SIZE):
+                    buffer.extend(chunk)
+                    _flush_full_parts()
+                break  # stream drained cleanly
+            except Exception as e:  # noqa: BLE001
+                got = bytes_done + len(buffer)
+                if total_bytes and got >= total_bytes:
+                    break  # connection dropped but we already have every byte
+                attempt += 1
+                if attempt >= _STREAM_MAX_ATTEMPTS:
+                    raise
+                print(
+                    f"stream interrupted at {got}/{total_bytes} ({e!r}); "
+                    f"retry {attempt}/{_STREAM_MAX_ATTEMPTS} with Range resume"
+                )
+                time.sleep(min(2 ** attempt, 30))
+            finally:
+                if r is not None:
+                    try:
+                        r.release_conn()
+                    except Exception:  # noqa: BLE001
+                        pass
 
-        # Flush remaining buffer as the last part
+        # Flush remaining buffer as the last part.
         if buffer:
-            upload_resp = s3.upload_part(
-                Bucket=MODELS_BUCKET,
-                Key=s3_key,
-                PartNumber=part_number,
-                UploadId=upload_id,
-                Body=bytes(buffer),
+            resp = s3.upload_part(
+                Bucket=MODELS_BUCKET, Key=s3_key, PartNumber=part_number,
+                UploadId=upload_id, Body=bytes(buffer),
             )
-            parts.append({"PartNumber": part_number, "ETag": upload_resp["ETag"]})
+            parts.append({"PartNumber": part_number, "ETag": resp["ETag"]})
             bytes_done += len(buffer)
+            buffer.clear()
 
         s3.complete_multipart_upload(
             Bucket=MODELS_BUCKET,
@@ -218,11 +265,6 @@ def _stream_to_s3(
         except Exception:  # noqa: BLE001
             pass
         raise
-    finally:
-        try:
-            r.release_conn()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def _add_to_catalog(
