@@ -393,6 +393,16 @@ export class ApiStack extends Stack {
       new apigw.LambdaIntegration(this.dispatcherFn),
       { apiKeyRequired: true }
     );
+    // Editor LOGS panel → ComfyUI's /internal/logs/raw. Unlike the sibling
+    // /internal routes above (worker-only, API-key auth), this is called by
+    // the browser editor, so it's Cognito-authed. The dispatcher proxies it
+    // to the metadata instance (the only full-time ComfyUI), whose log buffer
+    // also shows custom-node install activity.
+    const internalLogs = internal.addResource('logs');
+    const internalLogsProxy = internalLogs.addResource('{proxy+}');
+    for (const method of ['GET', 'POST']) {
+      internalLogsProxy.addMethod(method, dispatcherIntegration, proxyMethodOptions);
+    }
 
     // ----- /ws-ticket (Cognito-authed) -----
     // Browser fetches this before opening a WebSocket; response includes the

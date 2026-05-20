@@ -88,6 +88,13 @@ def lambda_handler(event: dict, context: Any) -> dict:
         if method == "POST" and url_path == "/manager/queue/install_model":
             return _manager_install_model(event)
 
+        # Editor LOGS panel → ComfyUI's /internal/logs/raw. The static editor
+        # has no live ComfyUI of its own; proxy to the metadata instance,
+        # which runs ComfyUI full-time (and is where Manager installs happen,
+        # so its log buffer shows custom-node install progress).
+        if url_path.startswith("/internal/logs") and method in ("GET", "POST"):
+            return _proxy_to_metadata(event, "/internal/logs")
+
         # Proxy ComfyUI-Manager runtime endpoints to the metadata instance.
         # API GW resources for these are configured in ApiStack.
         for proxy_base in ("/manager/", "/customnode/", "/snapshot/", "/model-manager/"):
