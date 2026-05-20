@@ -100,10 +100,13 @@ export const APP_CONFIG: AppConfig = {
       // mid-sampling. .2xlarge fits comfortably; ~2x spot price (~$0.40/hr)
       // but still well under the personal-project budget.
       primaryInstanceType: 'g4dn.2xlarge',
-      // .xlarge fallback when .2xlarge spot is unavailable — accepts smaller
-      // model failures over total unavailability. g4 only (no g5/g6).
-      // 8 vCPU quota fits 1×g4dn.2xlarge (8) or 1×g4dn.xlarge (4).
-      fallbackInstanceTypes: ['g4dn.xlarge'],
+      // No fallback. g4dn.xlarge (16 GB RAM) cannot mmap the 20 GB+ catalog
+      // checkpoints — the kernel overcommit heuristic refuses a mapping
+      // larger than physical RAM, so every job that lands on .xlarge fails
+      // outright. A fallback that's guaranteed to fail is worse than waiting:
+      // it burns a spot launch + ~15 min before erroring. g4dn.2xlarge only
+      // (32 GB RAM). If 2xlarge spot is unavailable, the job waits in SQS.
+      fallbackInstanceTypes: [],
       rootVolumeGb: 150,
     },
     video: {

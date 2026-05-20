@@ -270,11 +270,11 @@ export class ComputeStack extends Stack {
           })),
         ],
         instancesDistribution: {
-          // Pure spot — user explicitly never wants on-demand. ASG falls
-          // through between fallback instance types within a fleet
-          // (g4dn.2xlarge → g4dn.xlarge) using capacity-optimized; if every
-          // type's spot pool is unfulfillable in every AZ, jobs queue until
-          // capacity returns.
+          // Pure spot — user explicitly never wants on-demand. The ASG
+          // spreads across AZs (and any fallback instance types a fleet
+          // defines) using capacity-optimized; if every pool is
+          // unfulfillable in every AZ, jobs queue until capacity returns.
+          // The image fleet has no fallback type (g4dn.2xlarge only).
           onDemandBaseCapacity: 0,
           onDemandPercentageAboveBaseCapacity: 0,
           spotAllocationStrategy: autoscaling.SpotAllocationStrategy.CAPACITY_OPTIMIZED,
