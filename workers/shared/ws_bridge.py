@@ -88,6 +88,7 @@ class WsBridge:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._last_progress_write = 0.0
+        self._progress_logged = False
 
     def start(self) -> None:
         if not DISPATCHER_API_URL:
@@ -128,9 +129,11 @@ class WsBridge:
             msg = json.loads(raw_message)
         except json.JSONDecodeError:
             return
-        # Record sampling progress to the job record (best effort).
-        if msg.get("type") == "progress" and self.job_id and JOBS_TABLE:
-            self._record_progress(msg.get("data") or {})
+        # Record sampling progress to the job record (best effort). ComfyUI
+        # v0.20+ emits 'progress_state' (a per-node map); older builds emit
+        # the flat 'progress' event — handle both.
+        if msg.get("type") in ("progress", "progress_state") and self.job_id and JOBS_TABLE:
+            self._record_progress(msg.get("type"), msg.get("data") or {})
         # Forward to /internal/ws-event with our client_id wrapping
         body = json.dumps({"client_id": self.client_id, **msg}).encode("utf-8")
         try:
@@ -151,28 +154,50 @@ class WsBridge:
         except Exception:  # noqa: BLE001
             log.debug("ws forward failed (network)", exc_info=True)
 
-    def _record_progress(self, data: dict) -> None:
-        """Throttled write of ComfyUI sampling progress (value/max for the
-        current node) to the job's DDB record, so the viewer's pending strip
-        can show a real bar. Best effort — a failure here must never disturb
-        event forwarding or the job."""
+    def _record_progress(self, mtype: str, data: dict) -> None:
+        """Throttled write of ComfyUI sampling progress (value/max) to the
+        job's DDB record, so the viewer's pending strip can show a real bar.
+        Best effort — a failure here must never disturb event forwarding.
+
+        Two event shapes:
+          progress       → {"value": v, "max": m}              (legacy)
+          progress_state → {"nodes": {id: {value, max, state}}} (v0.20+)
+        For progress_state we pick the running node with the most steps."""
         now = time.monotonic()
         if now - self._last_progress_write < _PROGRESS_MIN_INTERVAL:
             return
-        value, maximum = data.get("value"), data.get("max")
+        value = maximum = None
+        if mtype == "progress":
+            value, maximum = data.get("value"), data.get("max")
+        else:
+            cand = []  # (is_running, max, value)
+            for nd in (data.get("nodes") or {}).values():
+                if not isinstance(nd, dict):
+                    continue
+                v, m = nd.get("value"), nd.get("max")
+                if isinstance(v, (int, float)) and isinstance(m, (int, float)) and m > 0:
+                    running = "run" in str(nd.get("state", "")).lower()
+                    cand.append((running, m, v))
+            if cand:
+                cand.sort()  # running last, then largest max — pick that
+                _, maximum, value = cand[-1]
         if not isinstance(value, (int, float)) or not isinstance(maximum, (int, float)):
             return
         if maximum <= 0:
             return
         self._last_progress_write = now
+        frac = f"{int(value)}/{int(maximum)}"
         try:
             _get_ddb().update_item(
                 TableName=JOBS_TABLE,
                 Key={"job_id": {"S": self.job_id}},
                 UpdateExpression="SET #p = :p",
                 ExpressionAttributeNames={"#p": "progress"},
-                ExpressionAttributeValues={":p": {"S": f"{int(value)}/{int(maximum)}"}},
+                ExpressionAttributeValues={":p": {"S": frac}},
             )
+            if not self._progress_logged:
+                log.info("progress: %s for job %s", frac, self.job_id)
+                self._progress_logged = True
         except Exception:  # noqa: BLE001
             log.debug("progress write failed", exc_info=True)
 
