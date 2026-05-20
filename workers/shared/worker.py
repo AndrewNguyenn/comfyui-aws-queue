@@ -114,22 +114,27 @@ def main() -> int:
     comfy.start()
     comfy.wait_for_ready(timeout_seconds=180)
 
-    # Publish /object_info to dispatcher so the frontend gets accurate node info.
-    client = ComfyClient(comfy.base_url)
-    try:
-        oi = client.fetch_object_info()
-        publish_object_info(FLEET, oi)
-    except Exception:  # noqa: BLE001
-        log.exception("object_info publish failed (non-fatal)")
-
-    # Publish custom-node JS extensions (Manager UI etc.) to S3 frontend bucket.
-    # Editor calls /api/extensions to discover them, then loads each from the
-    # frontend origin. Best-effort; failures don't block job processing.
-    if publish_extensions is not None:
+    # Publish /object_info + JS extensions to the frontend — ONLY for fleets
+    # without a dedicated metadata instance. The image fleet has the always-on
+    # metadata instance as the canonical publisher: it runs full-time with
+    # every custom node loaded. A GPU image worker booting would overwrite
+    # that complete node list with its own — often partial, because on a cold
+    # worker custom nodes can still be importing when wait_for_ready returns —
+    # which makes the editor lose nodes. So image workers skip publishing
+    # (the worker still *installs* every manifest node, so it can run jobs);
+    # video workers (no metadata box) keep publishing.
+    if FLEET != "image":
+        client = ComfyClient(comfy.base_url)
         try:
-            publish_extensions(FLEET)
+            oi = client.fetch_object_info()
+            publish_object_info(FLEET, oi)
         except Exception:  # noqa: BLE001
-            log.exception("extensions publish failed (non-fatal)")
+            log.exception("object_info publish failed (non-fatal)")
+        if publish_extensions is not None:
+            try:
+                publish_extensions(FLEET)
+            except Exception:  # noqa: BLE001
+                log.exception("extensions publish failed (non-fatal)")
 
     uploader = OutputUploader(OUTPUTS_BUCKET, REGION, COMFY_OUTPUT_DIR)
 

@@ -89,6 +89,7 @@ class WsBridge:
         self._stop = threading.Event()
         self._last_progress_write = 0.0
         self._progress_logged = False
+        self._progdiag_logged = False
 
     def start(self) -> None:
         if not DISPATCHER_API_URL:
@@ -132,8 +133,14 @@ class WsBridge:
         # Record sampling progress to the job record (best effort). ComfyUI
         # v0.20+ emits 'progress_state' (a per-node map); older builds emit
         # the flat 'progress' event — handle both.
-        if msg.get("type") in ("progress", "progress_state") and self.job_id and JOBS_TABLE:
-            self._record_progress(msg.get("type"), msg.get("data") or {})
+        mtype = msg.get("type")
+        if mtype in ("progress", "progress_state"):
+            if not self._progdiag_logged:
+                log.info("PROGDIAG progress event seen: type=%s job_id=%r JOBS_TABLE=%r",
+                         mtype, self.job_id, JOBS_TABLE)
+                self._progdiag_logged = True
+            if self.job_id and JOBS_TABLE:
+                self._record_progress(mtype, msg.get("data") or {})
         # Forward to /internal/ws-event with our client_id wrapping
         body = json.dumps({"client_id": self.client_id, **msg}).encode("utf-8")
         try:
@@ -163,31 +170,32 @@ class WsBridge:
           progress       → {"value": v, "max": m}              (legacy)
           progress_state → {"nodes": {id: {value, max, state}}} (v0.20+)
         For progress_state we pick the running node with the most steps."""
-        now = time.monotonic()
-        if now - self._last_progress_write < _PROGRESS_MIN_INTERVAL:
-            return
-        value = maximum = None
-        if mtype == "progress":
-            value, maximum = data.get("value"), data.get("max")
-        else:
-            cand = []  # (is_running, max, value)
-            for nd in (data.get("nodes") or {}).values():
-                if not isinstance(nd, dict):
-                    continue
-                v, m = nd.get("value"), nd.get("max")
-                if isinstance(v, (int, float)) and isinstance(m, (int, float)) and m > 0:
-                    running = "run" in str(nd.get("state", "")).lower()
-                    cand.append((running, m, v))
-            if cand:
-                cand.sort()  # running last, then largest max — pick that
-                _, maximum, value = cand[-1]
-        if not isinstance(value, (int, float)) or not isinstance(maximum, (int, float)):
-            return
-        if maximum <= 0:
-            return
-        self._last_progress_write = now
-        frac = f"{int(value)}/{int(maximum)}"
         try:
+            now = time.monotonic()
+            if now - self._last_progress_write < _PROGRESS_MIN_INTERVAL:
+                return
+            value = maximum = None
+            if mtype == "progress":
+                value, maximum = data.get("value"), data.get("max")
+            else:
+                cand = []  # (is_running, max, value)
+                for nd in (data.get("nodes") or {}).values():
+                    if not isinstance(nd, dict):
+                        continue
+                    v, m = nd.get("value"), nd.get("max")
+                    if isinstance(v, (int, float)) and isinstance(m, (int, float)) and m > 0:
+                        running = "run" in str(nd.get("state", "")).lower()
+                        cand.append((running, m, v))
+                if cand:
+                    cand.sort()  # running last, then largest max — pick that
+                    _, maximum, value = cand[-1]
+            if not isinstance(value, (int, float)) or not isinstance(maximum, (int, float)) or maximum <= 0:
+                if not self._progress_logged:
+                    log.info("PROGDIAG no usable value: mtype=%s value=%r max=%r keys=%s",
+                             mtype, value, maximum, list(data.keys()))
+                return
+            self._last_progress_write = now
+            frac = f"{int(value)}/{int(maximum)}"
             _get_ddb().update_item(
                 TableName=JOBS_TABLE,
                 Key={"job_id": {"S": self.job_id}},
@@ -196,10 +204,12 @@ class WsBridge:
                 ExpressionAttributeValues={":p": {"S": frac}},
             )
             if not self._progress_logged:
-                log.info("progress: %s for job %s", frac, self.job_id)
+                log.info("PROGDIAG wrote progress %s for job %s", frac, self.job_id)
                 self._progress_logged = True
-        except Exception:  # noqa: BLE001
-            log.debug("progress write failed", exc_info=True)
+        except Exception as e:  # noqa: BLE001
+            if not self._progress_logged:
+                log.warning("PROGDIAG _record_progress failed: %r", e, exc_info=True)
+                self._progress_logged = True
 
     def _on_error(self, _ws, error) -> None:
         log.warning("ws bridge error for %s: %s", self.client_id, error)
