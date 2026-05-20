@@ -13,20 +13,22 @@
     return h;
   }
 
-  // Resolve a /view 302 → presigned URL and append a thumbnail tile.
+  // Resolve a key → presigned S3 URL and append a thumbnail tile.
   async function renderThumb(key, job) {
     const filename = key.split("/").pop();
     const isVideo = /\.(mp4|webm|mov|gif|mkv)$/i.test(filename);
     const el = document.createElement("div");
     el.className = "thumb";
     try {
-      // Browsers don't send headers on <img>/<video> loads, so resolve the
-      // presigned URL ourselves (Authorization on the fetch) and use that.
-      const resp = await fetch(`${API}/view?key=${encodeURIComponent(key)}`, {
-        headers: authHeaders(),
-        redirect: "manual",
-      });
-      const presigned = resp.headers.get("Location") || resp.url;
+      // /view?json=1 returns {url: <presigned>} (a plain 302 can't be read
+      // cross-origin from fetch). The presigned URL needs no auth header, so
+      // it works directly as an <img>/<video> src.
+      const resp = await fetch(
+        `${API}/view?key=${encodeURIComponent(key)}&json=1`,
+        { headers: authHeaders() }
+      );
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const presigned = (await resp.json()).url;
       const when = job?.created_at ? job.created_at.replace("T", " ").slice(0, 16) : "";
       if (isVideo) {
         el.innerHTML = `

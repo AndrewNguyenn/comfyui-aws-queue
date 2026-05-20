@@ -127,8 +127,16 @@ def _get_job(event: dict) -> dict:
 
 
 def _view(event: dict) -> dict:
-    """Return a presigned URL for an output S3 key. Use 302 redirect for
-    direct download/display in browser."""
+    """Return a presigned URL for an output S3 key.
+
+    Default: 302 redirect — an <img>/<video> whose src points here follows it
+    straight to S3.
+    With ?json=1: 200 + {"url": ...}. A cross-origin fetch() cannot read a
+    302's Location (opaque-redirect responses hide headers, and the 302
+    carries no CORS header), so JS callers that fetch this — e.g. the
+    standalone viewer page — must use the JSON form and set the <img> src
+    to the returned URL themselves.
+    """
     qs = event.get("queryStringParameters") or {}
     key = qs.get("key")
     if not key:
@@ -145,6 +153,8 @@ def _view(event: dict) -> dict:
     except ClientError as e:
         print(f"presign error: {e}")
         return _resp(500, {})
+    if qs.get("json") in ("1", "true"):
+        return _resp(200, {"url": url})
     return {
         "statusCode": 302,
         "headers": {"Location": url, "Cache-Control": "no-store"},
