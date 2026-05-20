@@ -64,6 +64,8 @@
     "/customnode",
     "/snapshot",
     "/model-manager",
+    "/externalmodel",
+    "/civitai",
     // Editor LOGS panel: getRawLogs()/subscribeLogs() build internalURL()
     // paths — bare `/internal/logs/raw` and `/internal/logs/subscribe` (no
     // /api prefix). Route them through the dispatcher → metadata instance.

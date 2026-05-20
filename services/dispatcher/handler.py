@@ -114,7 +114,8 @@ def lambda_handler(event: dict, context: Any) -> dict:
         # egress for the CivitAI API). API GW resources are configured in
         # ApiStack. Note: POST /civitai/download is intercepted above — only
         # Civicomfy's search / browse / status routes reach this proxy.
-        for proxy_base in ("/manager/", "/customnode/", "/snapshot/", "/model-manager/", "/civitai/"):
+        for proxy_base in ("/manager/", "/customnode/", "/snapshot/", "/model-manager/",
+                           "/civitai/", "/externalmodel/"):
             if url_path.startswith(proxy_base) and method in ("GET", "POST"):
                 # For install routes: write manifest first, then proxy.
                 # /customnode/install* is the legacy Manager install path;

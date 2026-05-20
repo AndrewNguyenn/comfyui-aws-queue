@@ -371,7 +371,8 @@ export class ApiStack extends Stack {
     // 'civitai' = the Civicomfy custom node's routes (search/browse/download/
     // status). Dispatcher proxies them to the metadata instance; POST
     // /civitai/download is intercepted there and redirected to /models/download.
-    for (const base of ['manager', 'customnode', 'snapshot', 'model-manager', 'civitai']) {
+    // 'externalmodel' = ComfyUI-Manager's Model Manager list (/externalmodel/getlist).
+    for (const base of ['manager', 'customnode', 'snapshot', 'model-manager', 'civitai', 'externalmodel']) {
       const baseRes = root.addResource(base);
       const proxyRes = baseRes.addResource('{proxy+}');
       for (const method of ['GET', 'POST']) {
