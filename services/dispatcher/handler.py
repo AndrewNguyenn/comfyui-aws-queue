@@ -1246,12 +1246,19 @@ def _list_userdata(event: dict) -> dict:
         prefix += "/"
     paginator = s3.get_paginator("list_objects_v2")
     files: list[dict] = []
-    user_prefix = _userdata_prefix(event)
     for page in paginator.paginate(Bucket=OUTPUTS_BUCKET, Prefix=prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
-            relative = key[len(user_prefix):] if key.startswith(user_prefix) else key
-            if not recurse and "/" in relative.lstrip("/"):
+            # Paths are returned relative to the requested `dir`, not the user
+            # root. The editor re-prepends `dir` itself (syncEntities builds
+            # `${dir}/${path}`), so a root-relative path here would double the
+            # prefix — e.g. `workflows/workflows/foo.json` — and every attempt
+            # to open a saved workflow would 404 (the listing still renders,
+            # which is why saving/persisting looked fine but clicking did not).
+            relative = key[len(prefix):] if key.startswith(prefix) else key
+            if not relative:
+                continue  # the directory placeholder object itself, if any
+            if not recurse and "/" in relative:
                 continue
             files.append({
                 "path": relative,
