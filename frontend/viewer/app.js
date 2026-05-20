@@ -12,7 +12,7 @@
   const searchEl = document.getElementById("search");
   const hdrCount = document.getElementById("hdr-count");
 
-  const PER_PAGE = 105; // 7 across × 15 rows
+  const PER_PAGE = 75; // 5 across × 15 rows
   const URL_CACHE_KEY = "viewer.urlcache";
   const URL_CACHE_TTL = 3300 * 1000; // ~55 min (presign lives 1 h)
 
@@ -178,7 +178,7 @@
       `</div>`;
     el.querySelector(".thumb-actions .danger").addEventListener("click", (e) => {
       e.stopPropagation();
-      askDelete(job.job_id);
+      doDelete(job.job_id);
     });
     el.addEventListener("click", () => openModal(filteredIdx));
     presignedUrl(key)
@@ -298,7 +298,7 @@
     scrim.querySelector(".close").onclick = closeModal;
     scrim.querySelector(".nav.prev").onclick = () => { if (modalIdx > 0) { modalIdx--; drawModal(); } };
     scrim.querySelector(".nav.next").onclick = () => { if (modalIdx < items.length - 1) { modalIdx++; drawModal(); } };
-    scrim.querySelector(".del").onclick = () => askDelete(job.job_id);
+    scrim.querySelector(".del").onclick = () => doDelete(job.job_id);
     presignedUrl(key).then((url) => {
       const slot = scrim.querySelector(".media-slot");
       if (slot) {
@@ -311,24 +311,7 @@
     });
   }
 
-  /* ---------- delete ---------- */
-  function askDelete(jobId) {
-    const scrim = document.createElement("div");
-    scrim.className = "confirm-scrim";
-    scrim.innerHTML =
-      `<div class="confirm">` +
-        `<div class="eyebrow">Delete permanently</div>` +
-        `<h3>Delete this generation?</h3>` +
-        `<p>The image/video is removed from S3 and the gallery. The output bucket ` +
-        `is versioned, so it's technically recoverable — but treat this as permanent.</p>` +
-        `<div class="cf-foot"><button class="cancel">Cancel</button>` +
-        `<button class="danger ok">Delete</button></div>` +
-      `</div>`;
-    scrim.addEventListener("click", (e) => { if (e.target === scrim) scrim.remove(); });
-    scrim.querySelector(".cancel").onclick = () => scrim.remove();
-    scrim.querySelector(".ok").onclick = () => { scrim.remove(); doDelete(jobId); };
-    document.body.appendChild(scrim);
-  }
+  /* ---------- delete (no confirm — one click) ---------- */
   async function doDelete(jobId) {
     try {
       const r = await authedFetch(`/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
