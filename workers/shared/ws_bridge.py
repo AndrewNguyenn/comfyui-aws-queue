@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import threading
+import time
 from typing import Optional
 
 import urllib3
@@ -33,6 +34,20 @@ _http = urllib3.PoolManager(timeout=urllib3.Timeout(connect=5.0, read=10.0))
 DISPATCHER_API_URL = os.environ.get("DISPATCHER_API_URL", "").rstrip("/")
 WORKER_API_KEY_ID = os.environ.get("WORKER_API_KEY_ID", "")
 COMFY_WS_HOST = os.environ.get("COMFY_WS_HOST", "127.0.0.1:8188")
+JOBS_TABLE = os.environ.get("JOBS_TABLE", "")
+
+# Live sampling progress is written to the job's DDB record so the viewer
+# can show a real bar. Throttled so a 20-step job is a couple of writes.
+_PROGRESS_MIN_INTERVAL = 1.2  # seconds
+_ddb = None
+
+
+def _get_ddb():
+    global _ddb
+    if _ddb is None:
+        import boto3
+        _ddb = boto3.client("dynamodb")
+    return _ddb
 
 # Lazy cache: actual API key value (looked up from API GW once on first use).
 _api_key_cache: Optional[str] = None
@@ -66,11 +81,13 @@ class WsBridge:
     bridge per job (the cost is just a Python thread + WS connection).
     """
 
-    def __init__(self, client_id: str):
+    def __init__(self, client_id: str, job_id: Optional[str] = None):
         self.client_id = client_id
+        self.job_id = job_id  # set → progress events are written to DDB
         self._ws: Optional[websocket.WebSocketApp] = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self._last_progress_write = 0.0
 
     def start(self) -> None:
         if not DISPATCHER_API_URL:
@@ -111,6 +128,9 @@ class WsBridge:
             msg = json.loads(raw_message)
         except json.JSONDecodeError:
             return
+        # Record sampling progress to the job record (best effort).
+        if msg.get("type") == "progress" and self.job_id and JOBS_TABLE:
+            self._record_progress(msg.get("data") or {})
         # Forward to /internal/ws-event with our client_id wrapping
         body = json.dumps({"client_id": self.client_id, **msg}).encode("utf-8")
         try:
@@ -130,6 +150,31 @@ class WsBridge:
                     log.debug("ws forward %s for type=%s", r.status, msg.get("type"))
         except Exception:  # noqa: BLE001
             log.debug("ws forward failed (network)", exc_info=True)
+
+    def _record_progress(self, data: dict) -> None:
+        """Throttled write of ComfyUI sampling progress (value/max for the
+        current node) to the job's DDB record, so the viewer's pending strip
+        can show a real bar. Best effort — a failure here must never disturb
+        event forwarding or the job."""
+        now = time.monotonic()
+        if now - self._last_progress_write < _PROGRESS_MIN_INTERVAL:
+            return
+        value, maximum = data.get("value"), data.get("max")
+        if not isinstance(value, (int, float)) or not isinstance(maximum, (int, float)):
+            return
+        if maximum <= 0:
+            return
+        self._last_progress_write = now
+        try:
+            _get_ddb().update_item(
+                TableName=JOBS_TABLE,
+                Key={"job_id": {"S": self.job_id}},
+                UpdateExpression="SET #p = :p",
+                ExpressionAttributeNames={"#p": "progress"},
+                ExpressionAttributeValues={":p": {"S": f"{int(value)}/{int(maximum)}"}},
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("progress write failed", exc_info=True)
 
     def _on_error(self, _ws, error) -> None:
         log.warning("ws bridge error for %s: %s", self.client_id, error)

@@ -140,6 +140,7 @@ def _list_jobs(event: dict) -> dict:
             "output_keys": json.loads(it.get("output_keys", {"S": "[]"})["S"]),
             "error": it.get("error", {"S": ""})["S"],
             "model": _extract_model(it.get("workflow_json", {}).get("S", "")),
+            "progress": it.get("progress", {}).get("S", ""),
         }
         for it in page
     ]
@@ -164,6 +165,7 @@ def _get_job(event: dict) -> dict:
         "output_keys": json.loads(item.get("output_keys", {"S": "[]"})["S"]),
         "error": item.get("error", {"S": ""})["S"],
         "model": _extract_model(item.get("workflow_json", {}).get("S", "")),
+        "progress": item.get("progress", {}).get("S", ""),
     }
     return _resp(200, output)
 

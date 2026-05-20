@@ -217,11 +217,24 @@
       rows = jobs.map((j) => {
         const running = j.status === "running";
         const since = running ? (j.started_at || j.created_at) : j.created_at;
-        const right = running ? elapsed(since) : `waiting ${agoShort(j.created_at)}`;
+        // Live sampling progress — j.progress is "value/max" (e.g. "7/20").
+        let pct = null, frac = "";
+        if (running && j.progress && j.progress.includes("/")) {
+          const [v, m] = j.progress.split("/").map(Number);
+          if (m > 0) { pct = Math.min(100, Math.round((v / m) * 100)); frac = `${v}/${m}`; }
+        }
+        const right = running
+          ? elapsed(since) + (frac ? ` · ${frac}` : "")
+          : `waiting ${agoShort(j.created_at)}`;
+        const bar = !running
+          ? `<div class="pend-bar queued"><i></i></div>`
+          : pct != null
+          ? `<div class="pend-bar det"><i style="width:${pct}%"></i></div>`
+          : `<div class="pend-bar"><i></i></div>`; // indeterminate until 1st progress event
         return `<div class="pend-row">` +
           `<span class="pend-stamp ${running ? "running" : "queued"}">${running ? "running" : "queued"}</span>` +
           `<div><div class="pend-kind">${esc(j.type || "job")}${j.model ? " · " + esc(j.model) : ""}</div>` +
-          `<div class="pend-bar ${running ? "" : "queued"}"><i></i></div></div>` +
+          `${bar}</div>` +
           `<div class="pend-elapsed">${esc(right)}</div></div>`;
       }).join("");
     }
@@ -363,6 +376,6 @@
   (async () => {
     await loadJobs();
     await renderPending();
-    setInterval(renderPending, 6000);
+    setInterval(renderPending, 4000);
   })();
 })();

@@ -198,7 +198,9 @@ def main() -> int:
             # (older clients that didn't send one — events get dropped at
             # the forward Lambda since no WS connection matches).
             ws_client_id = job_record.get("client_id") or f"worker-{FLEET}-{job_id[:8]}"
-            ws_bridge = WsBridge(client_id=ws_client_id)
+            # Pass job_id so the bridge also records sampling progress to the
+            # job's DDB record — drives the viewer's live progress bar.
+            ws_bridge = WsBridge(client_id=ws_client_id, job_id=job_id)
             ws_bridge.start()
 
             try:
