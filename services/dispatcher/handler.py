@@ -1158,7 +1158,12 @@ def _delete_setting(event: dict) -> dict:
 # {file+} proxy. ComfyUI saves workflow JSON, default workflow, etc. here.
 def _userdata_filepath(event: dict) -> str:
     raw = event["pathParameters"].get("file") or event["pathParameters"].get("file+", "")
-    return _userdata_prefix(event, raw)
+    # API Gateway leaves %2F encoded in greedy {file+} path params. ComfyUI
+    # saves workflows under `workflows/<name>.json`; without decoding, the
+    # object lands at the literal key `workflows%2F<name>.json` and the
+    # workflow listing (which filters on the `workflows/` prefix) never
+    # finds it — the editor shows "No workflows found".
+    return _userdata_prefix(event, _unquote_path(raw))
 
 
 def _get_userdata(event: dict) -> dict:
@@ -1203,10 +1208,17 @@ def _delete_userdata(event: dict) -> dict:
     return _resp(200, {})
 
 
+def _unquote_path(raw: str) -> str:
+    """Decode %2F (and other percent-escapes) API Gateway leaves in greedy
+    path params, so nested userdata paths map to real `/`-separated keys."""
+    from urllib.parse import unquote
+    return unquote(raw)
+
+
 def _move_userdata(event: dict) -> dict:
     src_key = _userdata_filepath(event)
     dest_raw = event["pathParameters"].get("dest") or event["pathParameters"].get("dest+", "")
-    dest_key = _userdata_prefix(event, dest_raw)
+    dest_key = _userdata_prefix(event, _unquote_path(dest_raw))
     try:
         s3.copy_object(
             Bucket=OUTPUTS_BUCKET,
