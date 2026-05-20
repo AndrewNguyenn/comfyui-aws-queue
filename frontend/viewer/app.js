@@ -47,13 +47,40 @@
     grid.appendChild(el);
   }
 
+  // The ID token lives in sessionStorage (per-tab); a freshly opened viewer
+  // tab has none. auth.js recovers it from the localStorage refresh token,
+  // but that's async — so wait for a usable token before the first API call,
+  // or it races ahead of the refresh and 401s.
+  async function ensureAuth() {
+    if (window.comfyAuth?.isSignedIn()) return true;
+    if (window.comfyAuth?.refreshToken) {
+      try {
+        return await window.comfyAuth.refreshToken();
+      } catch (_e) {
+        return false;
+      }
+    }
+    return false;
+  }
+
   // List all completed jobs and render every output image/video.
   async function load() {
     grid.innerHTML = '<p class="loading">loading…</p>';
+    if (!(await ensureAuth())) {
+      grid.innerHTML =
+        '<p class="error">Not signed in — <a href="/login.html">log in</a> and reopen.</p>';
+      return;
+    }
     try {
-      const r = await fetch(`${API}/jobs?status=complete&limit=100`, {
+      let r = await fetch(`${API}/jobs?status=complete&limit=100`, {
         headers: authHeaders(),
       });
+      // A token can expire mid-session — refresh once and retry on 401.
+      if (r.status === 401 && (await ensureAuth())) {
+        r = await fetch(`${API}/jobs?status=complete&limit=100`, {
+          headers: authHeaders(),
+        });
+      }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
       const jobs = (data.jobs || []).filter((j) => (j.output_keys || []).length);
