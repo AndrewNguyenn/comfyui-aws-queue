@@ -99,7 +99,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
         # has no live ComfyUI of its own; proxy to the metadata instance,
         # which runs ComfyUI full-time (and is where Manager installs happen,
         # so its log buffer shows custom-node install progress).
-        if url_path.startswith("/internal/logs") and method in ("GET", "POST"):
+        if url_path.startswith("/internal/logs") and method in ("GET", "POST", "PATCH"):
             return _proxy_to_metadata(event, "/internal/logs")
 
         # Proxy ComfyUI-Manager + Civicomfy runtime endpoints to the metadata

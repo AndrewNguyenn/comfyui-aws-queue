@@ -403,7 +403,9 @@ export class ApiStack extends Stack {
     // also shows custom-node install activity.
     const internalLogs = internal.addResource('logs');
     const internalLogsProxy = internalLogs.addResource('{proxy+}');
-    for (const method of ['GET', 'POST']) {
+    // GET /internal/logs/raw (initial fetch) + PATCH /internal/logs/subscribe
+    // (the editor's live-log toggle).
+    for (const method of ['GET', 'POST', 'PATCH']) {
       internalLogsProxy.addMethod(method, dispatcherIntegration, proxyMethodOptions);
     }
 
