@@ -54,6 +54,43 @@ def lambda_handler(event: dict, _context: Any) -> dict:
         return _resp(500, {"error": "internal error"})
 
 
+def _extract_model(workflow_json: str) -> str:
+    """Best-effort: the primary model a workflow used — the *biggest* one.
+
+    A workflow loads many models (LoRA, VAE, CLIP, ControlNet…). The main
+    model is either a checkpoint (CheckpointLoaderSimple → ckpt_name) or, for
+    Flux/Wan-style graphs, a standalone diffusion model (UNETLoader /
+    UnetLoaderGGUF / a 'Load Diffusion Model' node → unet_name). We scan for
+    either, skipping the auxiliary loaders, and prefer a checkpoint."""
+    if not workflow_json:
+        return ""
+    try:
+        wf = json.loads(workflow_json)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(wf, dict):
+        return ""
+    ckpt = diffusion = None
+    for node in wf.values():
+        if not isinstance(node, dict):
+            continue
+        ct = (node.get("class_type") or "").lower()
+        inp = node.get("inputs", {}) or {}
+        # Skip auxiliary loaders — none of these is "the model".
+        if any(x in ct for x in ("lora", "vae", "clip", "controlnet",
+                                 "upscale", "ipadapter", "style", "embedding")):
+            continue
+        if "checkpoint" in ct and ckpt is None:
+            ckpt = inp.get("ckpt_name") or inp.get("model_name")
+        elif ("unet" in ct or "diffusion" in ct) and diffusion is None:
+            diffusion = inp.get("unet_name") or inp.get("model_name") or inp.get("model")
+    name = ckpt or diffusion
+    if not name or not isinstance(name, str):
+        return ""
+    # strip directory + extension for a clean display name
+    return name.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+
+
 def _list_jobs(event: dict) -> dict:
     """GET /jobs?status=completed,failed,cancelled&limit=64&offset=0
 
@@ -102,6 +139,7 @@ def _list_jobs(event: dict) -> dict:
             "completed_at": it.get("completed_at", {"S": ""})["S"],
             "output_keys": json.loads(it.get("output_keys", {"S": "[]"})["S"]),
             "error": it.get("error", {"S": ""})["S"],
+            "model": _extract_model(it.get("workflow_json", {}).get("S", "")),
         }
         for it in page
     ]
@@ -125,6 +163,7 @@ def _get_job(event: dict) -> dict:
         "attempt_count": int(item.get("attempt_count", {"N": "0"})["N"]),
         "output_keys": json.loads(item.get("output_keys", {"S": "[]"})["S"]),
         "error": item.get("error", {"S": ""})["S"],
+        "model": _extract_model(item.get("workflow_json", {}).get("S", "")),
     }
     return _resp(200, output)
 
