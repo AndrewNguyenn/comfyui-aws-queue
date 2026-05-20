@@ -5,6 +5,34 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Outputs — ComfyUI AWS Queue</title>
     <link rel="stylesheet" href="comfy-aws-queue.css" />
+    <style>
+      /* Live queue strip — jobs waiting / generating, polled every few sec. */
+      #queue-strip {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        padding: 10px 4px;
+        margin-bottom: 8px;
+        border-bottom: 1px solid #2a2a2a;
+        background: #161616;
+        min-height: 20px;
+      }
+      #queue-strip .q-label { font-size: 12px; color: #888; margin-right: 4px; }
+      #queue-strip .q-chip {
+        display: flex; gap: 6px; align-items: center;
+        padding: 4px 10px; border-radius: 12px;
+        font-size: 12px; background: #242424; border: 1px solid #383838;
+      }
+      #queue-strip .q-chip.running { border-color: #3b6ea5; background: #1d2a38; }
+      #queue-strip .q-dot { width: 7px; height: 7px; border-radius: 50%; background: #c8a13a; }
+      #queue-strip .q-chip.running .q-dot { background: #4a9eff; animation: qpulse 1.2s ease-in-out infinite; }
+      @keyframes qpulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+      #queue-strip .q-empty { font-size: 12px; color: #5a5a5a; }
+    </style>
     <script src="config.js"></script>
     <script src="auth.js"></script>
   </head>
@@ -16,6 +44,8 @@
     </header>
 
     <section>
+      <!-- Live queue: jobs queued / generating right now. -->
+      <div id="queue-strip"></div>
       <p class="hint">Recent generation outputs. Click any to open the full-size presigned URL.</p>
       <div id="output-grid"></div>
     </section>

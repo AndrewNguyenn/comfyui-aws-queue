@@ -1173,7 +1173,12 @@ def _get_userdata(event: dict) -> dict:
     try:
         r = s3.get_object(Bucket=OUTPUTS_BUCKET, Key=key)
         body = r["Body"].read().decode("utf-8", errors="replace")
-        ctype = r.get("ContentType", "application/octet-stream")
+        # Content-type from the extension — the stored S3 type is unreliable
+        # (older objects were put without ContentType → binary/octet-stream).
+        # The editor needs application/json for workflow files.
+        ctype = "application/json" if key.endswith(".json") else r.get(
+            "ContentType", "application/octet-stream"
+        )
         if not full and ctype == "application/json":
             return _resp(200, json.loads(body))
         return _resp(200, body, content_type=ctype)
@@ -1198,7 +1203,8 @@ def _post_userdata(event: dict) -> dict:
             return _resp(409, {"error": "exists"})
         except ClientError:
             pass
-    s3.put_object(Bucket=OUTPUTS_BUCKET, Key=key, Body=body_bytes)
+    ctype = "application/json" if key.endswith(".json") else "application/octet-stream"
+    s3.put_object(Bucket=OUTPUTS_BUCKET, Key=key, Body=body_bytes, ContentType=ctype)
     return _resp(200, {"path": key})
 
 
