@@ -350,7 +350,10 @@ export class ApiStack extends Stack {
       requestParameters: { 'method.request.path.proxy': true },
     };
 
-    for (const base of ['manager', 'customnode', 'snapshot', 'model-manager']) {
+    // 'civitai' = the Civicomfy custom node's routes (search/browse/download/
+    // status). Dispatcher proxies them to the metadata instance; POST
+    // /civitai/download is intercepted there and redirected to /models/download.
+    for (const base of ['manager', 'customnode', 'snapshot', 'model-manager', 'civitai']) {
       const baseRes = root.addResource(base);
       const proxyRes = baseRes.addResource('{proxy+}');
       for (const method of ['GET', 'POST']) {

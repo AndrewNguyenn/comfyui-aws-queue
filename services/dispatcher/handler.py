@@ -88,6 +88,13 @@ def lambda_handler(event: dict, context: Any) -> dict:
         if method == "POST" and url_path == "/manager/queue/install_model":
             return _manager_install_model(event)
 
+        # Civicomfy custom node: a model download. Civicomfy would save the
+        # file to the metadata instance's local disk, which GPU workers can't
+        # see — they read models from the S3 models bucket via Mountpoint.
+        # Redirect to the same /models/download flow (CivitAI → S3 → DDB).
+        if method == "POST" and url_path == "/civitai/download":
+            return _civicomfy_download(event)
+
         # Editor LOGS panel → ComfyUI's /internal/logs/raw. The static editor
         # has no live ComfyUI of its own; proxy to the metadata instance,
         # which runs ComfyUI full-time (and is where Manager installs happen,
@@ -95,9 +102,12 @@ def lambda_handler(event: dict, context: Any) -> dict:
         if url_path.startswith("/internal/logs") and method in ("GET", "POST"):
             return _proxy_to_metadata(event, "/internal/logs")
 
-        # Proxy ComfyUI-Manager runtime endpoints to the metadata instance.
-        # API GW resources for these are configured in ApiStack.
-        for proxy_base in ("/manager/", "/customnode/", "/snapshot/", "/model-manager/"):
+        # Proxy ComfyUI-Manager + Civicomfy runtime endpoints to the metadata
+        # instance (its full-time ComfyUI has both nodes loaded and internet
+        # egress for the CivitAI API). API GW resources are configured in
+        # ApiStack. Note: POST /civitai/download is intercepted above — only
+        # Civicomfy's search / browse / status routes reach this proxy.
+        for proxy_base in ("/manager/", "/customnode/", "/snapshot/", "/model-manager/", "/civitai/"):
             if url_path.startswith(proxy_base) and method in ("GET", "POST"):
                 # For install routes: write manifest first, then proxy.
                 # /customnode/install* is the legacy Manager install path;
@@ -730,20 +740,25 @@ def _manager_install_model(event: dict) -> dict:
         or url.rstrip("/").rsplit("/", 1)[-1]
     )
 
-    # Invoke the download-kickoff Lambda asynchronously via API GW path is
-    # simpler than direct lambda invoke (keeps cred handling out of dispatcher).
-    # We're already inside the API; just call the same code path that
-    # POST /models/download uses by constructing the equivalent body and
-    # invoking the worker.
+    return _invoke_models_download(event, url, model_type, name)
+
+
+def _invoke_models_download(
+    event: dict, civitai_url: str, model_type: str, name: Optional[str]
+) -> dict:
+    """Invoke the download-kickoff Lambda — the same code path as
+    POST /models/download — by constructing the equivalent API GW event.
+
+    The kickoff Lambda expects 'civitai_url' and only validates civitai.com /
+    civitai.red URLs; a non-CivitAI URL is rejected cleanly (400). It returns
+    a normal HTTP-response dict, which is passed straight back to the caller.
+    """
     download_fn = os.environ.get("DOWNLOAD_KICKOFF_FN")
-    # Our kickoff Lambda expects 'civitai_url' and only validates civitai.com /
-    # civitai.red. Manager may send HuggingFace or direct .safetensors URLs;
-    # for now we forward as civitai_url and let kickoff reject non-civitai
-    # cleanly (returns 400 invalid_civitai_url). Direct-URL support is a
-    # follow-up — needs a generic streaming branch in services/downloader/worker.py.
+    if not download_fn:
+        return _resp(503, {"error": "DOWNLOAD_KICKOFF_FN env not configured"})
     payload = {
         "body": json.dumps({
-            "civitai_url": url,
+            "civitai_url": civitai_url,
             "model_type": model_type,
             "name": name,
         }),
@@ -752,21 +767,76 @@ def _manager_install_model(event: dict) -> dict:
         "headers": event.get("headers", {}),
         "requestContext": event.get("requestContext", {}),
     }
-    if download_fn:
-        try:
-            lam = boto3.client("lambda")
-            r = lam.invoke(
-                FunctionName=download_fn,
-                InvocationType="RequestResponse",
-                Payload=json.dumps(payload).encode(),
-            )
-            data = json.loads(r["Payload"].read().decode())
-            # Translate to Manager's expected shape: it just cares that it's a
-            # 200 with a non-error body, so passing through is fine.
-            return data
-        except Exception as e:  # noqa: BLE001
-            return _resp(500, {"error": f"download invoke failed: {e!r}"})
-    return _resp(503, {"error": "DOWNLOAD_KICKOFF_FN env not configured"})
+    try:
+        lam = boto3.client("lambda")
+        r = lam.invoke(
+            FunctionName=download_fn,
+            InvocationType="RequestResponse",
+            Payload=json.dumps(payload).encode(),
+        )
+        return json.loads(r["Payload"].read().decode())
+    except Exception as e:  # noqa: BLE001
+        return _resp(500, {"error": f"download invoke failed: {e!r}"})
+
+
+# Civicomfy / CivitAI model-type labels → our catalog types (downloader
+# ALLOWED_TYPES). Civicomfy sends lowercased folder-ish names; map the
+# plurals and aliases. Unknown values pass through so the kickoff Lambda
+# validates and rejects them cleanly.
+_CIVITAI_TYPE_ALIASES = {
+    "checkpoint": "checkpoint", "checkpoints": "checkpoint",
+    "lora": "lora", "loras": "lora", "locon": "lora", "lycoris": "lora",
+    "vae": "vae",
+    "controlnet": "controlnet", "controlnets": "controlnet",
+    "embedding": "embedding", "embeddings": "embedding",
+    "textualinversion": "embedding", "textual_inversion": "embedding",
+    "hypernetwork": "hypernetworks", "hypernetworks": "hypernetworks",
+    "upscale": "upscale", "upscaler": "upscale", "upscale_models": "upscale",
+    "clip": "clip", "clip_vision": "clip_vision",
+    "diffusion_models": "diffusion_models", "unet": "diffusion_models",
+    "text_encoders": "text_encoders",
+}
+
+
+def _normalize_civitai_model_type(raw: Optional[str]) -> str:
+    t = (raw or "checkpoint").strip().lower().replace(" ", "_")
+    return _CIVITAI_TYPE_ALIASES.get(t, t)
+
+
+def _civicomfy_download(event: dict) -> dict:
+    """Redirect a Civicomfy POST /civitai/download to our S3-backed
+    /models/download flow.
+
+    Civicomfy's own handler saves the file to the metadata instance's local
+    disk — useless to GPU workers, which read models from the S3 models
+    bucket via Mountpoint. Translating to /models/download streams the file
+    CivitAI → S3 (under the correct <type>/ prefix) → DDB catalog, so the
+    model shows up in the editor dropdowns and on every worker's mount.
+    """
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        body = {}
+    raw = (body.get("model_url_or_id") or "").strip()
+    if not raw:
+        return _resp(400, {"error": "missing model_url_or_id"})
+    # Civicomfy accepts either a full CivitAI URL or a bare numeric model id.
+    if raw.startswith("http://") or raw.startswith("https://"):
+        url = raw
+    elif raw.isdigit():
+        url = f"https://civitai.com/models/{raw}"
+    else:
+        return _resp(400, {"error": f"unrecognized model_url_or_id: {raw!r}"})
+    version_id = body.get("model_version_id")
+    if version_id and "modelVersionId=" not in url:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}modelVersionId={version_id}"
+    model_type = _normalize_civitai_model_type(body.get("model_type"))
+    name = (body.get("custom_filename") or "").strip() or None
+    resp = _invoke_models_download(event, url, model_type, name)
+    # Civicomfy's UI just needs a 200 with JSON; our kickoff returns
+    # {download_id, civitai_url, model_type}. Pass it through.
+    return resp
 
 
 _SAVE_PATH_TO_MODEL_TYPE = {
