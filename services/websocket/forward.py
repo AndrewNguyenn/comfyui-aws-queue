@@ -46,6 +46,12 @@ def lambda_handler(event: dict, _context: Any) -> dict:
     if not client_id:
         return _resp(400, {"error": "client_id required"})
 
+    # TEMP DIAG: log event type + data keys to see what ComfyUI emits
+    # (debugging the viewer progress bar).
+    _et = body.get("type")
+    if _et != "crystools.monitor":
+        print(f"WSEVENT type={_et!r} data_keys={list((body.get('data') or {}).keys())}")
+
     # Find the connection_id(s) for this client. Multiple browsers might be
     # connected with the same client_id (refresh, multiple tabs); fan out.
     try:
