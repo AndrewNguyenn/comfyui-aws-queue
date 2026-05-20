@@ -95,17 +95,21 @@ export const APP_CONFIG: AppConfig = {
   fleets: {
     image: {
       fleetName: 'image',
-      // g4dn.2xlarge primary (32GB sys RAM, 16GB T4 GPU). Big checkpoints like
-      // the 20GB redcraft model OOM-killed ComfyUI on .xlarge (16GB sys RAM)
-      // mid-sampling. .2xlarge fits comfortably; ~2x spot price (~$0.40/hr)
-      // but still well under the personal-project budget.
-      primaryInstanceType: 'g4dn.2xlarge',
-      // No fallback. g4dn.xlarge (16 GB RAM) cannot mmap the 20 GB+ catalog
-      // checkpoints — the kernel overcommit heuristic refuses a mapping
-      // larger than physical RAM, so every job that lands on .xlarge fails
-      // outright. A fallback that's guaranteed to fail is worse than waiting:
-      // it burns a spot launch + ~15 min before erroring. g4dn.2xlarge only
-      // (32 GB RAM). If 2xlarge spot is unavailable, the job waits in SQS.
+      // g5.2xlarge: A10G (24 GB VRAM, native bf16, sm_86) + 32 GB sys RAM.
+      // The catalog now includes Flux-class FLOW checkpoints (e.g. the 20 GB
+      // redcraft model). A T4 (g4dn) has no hardware bf16 — ComfyUI falls
+      // back to fp32 — and a 20 GB model can't fit the T4's 16 GB VRAM, so
+      // it offloads every step: a single generation takes 25-40 min and
+      // blows the worker timeout. On an A10G the same model runs in bf16,
+      // mostly in-VRAM: ~2-3 min/image.
+      primaryInstanceType: 'g5.2xlarge',
+      // No fallback. g5.xlarge / g4dn.xlarge (16 GB sys RAM) can't mmap the
+      // 20 GB+ checkpoints — the kernel overcommit heuristic refuses a
+      // mapping larger than physical RAM. g4dn.2xlarge has the RAM but its
+      // T4 is too slow for Flux (see above). A fallback that's guaranteed to
+      // fail (or take 40 min) is worse than waiting — it burns a spot launch
+      // before erroring. g5.2xlarge only; if A10G spot is unavailable the
+      // job waits in SQS. 8 vCPU = the full us-east-1 G/VT spot quota.
       fallbackInstanceTypes: [],
       rootVolumeGb: 150,
     },

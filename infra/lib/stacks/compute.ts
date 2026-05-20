@@ -274,7 +274,7 @@ export class ComputeStack extends Stack {
           // spreads across AZs (and any fallback instance types a fleet
           // defines) using capacity-optimized; if every pool is
           // unfulfillable in every AZ, jobs queue until capacity returns.
-          // The image fleet has no fallback type (g4dn.2xlarge only).
+          // The image fleet has no fallback type (g5.2xlarge only).
           onDemandBaseCapacity: 0,
           onDemandPercentageAboveBaseCapacity: 0,
           spotAllocationStrategy: autoscaling.SpotAllocationStrategy.CAPACITY_OPTIMIZED,
