@@ -290,8 +290,11 @@ def _set_error(download_id: str, error: str) -> None:
     ddb.update_item(
         TableName=DOWNLOADS_TABLE,
         Key={"download_id": {"S": download_id}},
-        UpdateExpression="SET #s = :s, error = :e",
-        ExpressionAttributeNames={"#s": "status"},
+        # 'error' is a DynamoDB reserved keyword — it must be aliased, or this
+        # UpdateItem itself fails and the failure is never recorded, leaving
+        # the download stuck showing 'downloading' forever.
+        UpdateExpression="SET #s = :s, #e = :e",
+        ExpressionAttributeNames={"#s": "status", "#e": "error"},
         ExpressionAttributeValues={
             ":s": {"S": "failed"},
             ":e": {"S": error[:500]},
