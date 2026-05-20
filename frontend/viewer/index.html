@@ -8,18 +8,10 @@
     <style>
       /* Live queue strip — jobs waiting / generating, polled every few sec. */
       #queue-strip {
-        position: sticky;
-        top: 0;
-        z-index: 5;
-        display: flex;
-        gap: 8px;
-        align-items: center;
-        flex-wrap: wrap;
-        padding: 10px 4px;
-        margin-bottom: 8px;
-        border-bottom: 1px solid #2a2a2a;
-        background: #161616;
-        min-height: 20px;
+        position: sticky; top: 0; z-index: 5;
+        display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+        padding: 10px 4px; margin-bottom: 8px;
+        border-bottom: 1px solid #2a2a2a; background: #161616; min-height: 20px;
       }
       #queue-strip .q-label { font-size: 12px; color: #888; margin-right: 4px; }
       #queue-strip .q-chip {
@@ -32,6 +24,48 @@
       #queue-strip .q-chip.running .q-dot { background: #4a9eff; animation: qpulse 1.2s ease-in-out infinite; }
       @keyframes qpulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
       #queue-strip .q-empty { font-size: 12px; color: #5a5a5a; }
+
+      /* Gallery grid: 7 across. */
+      #output-grid {
+        display: grid;
+        grid-template-columns: repeat(7, 1fr);
+        gap: 10px;
+      }
+      .thumb {
+        position: relative;
+        background: #1c1c1c; border: 1px solid #303030; border-radius: 6px;
+        overflow: hidden; transition: opacity 0.15s;
+      }
+      .thumb.deleting { opacity: 0.35; pointer-events: none; }
+      .thumb .media img, .thumb .media video {
+        width: 100%; aspect-ratio: 1; object-fit: cover; display: block; background: #111;
+      }
+      .thumb p { margin: 4px 6px; font-size: 10px; color: #888;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .thumb p.when { color: #5a5a5a; }
+      /* Delete button — top-right of each tile. */
+      .thumb .del {
+        position: absolute; top: 4px; right: 4px; z-index: 2;
+        width: 22px; height: 22px; line-height: 20px; padding: 0;
+        border-radius: 50%; border: none; cursor: pointer;
+        background: rgba(20,20,20,0.78); color: #ff6b6b;
+        font-size: 15px; font-weight: bold;
+        opacity: 0; transition: opacity 0.12s;
+      }
+      .thumb:hover .del { opacity: 1; }
+      .thumb .del:hover { background: #c0392b; color: #fff; }
+
+      /* Pagination controls. */
+      #pager {
+        display: flex; gap: 14px; align-items: center; justify-content: center;
+        padding: 16px 0; font-size: 13px; color: #999;
+      }
+      #pager button {
+        padding: 6px 14px; border-radius: 5px; cursor: pointer;
+        background: #262626; border: 1px solid #3a3a3a; color: #ddd;
+      }
+      #pager button:disabled { opacity: 0.35; cursor: default; }
+      #pager button:not(:disabled):hover { background: #333; }
     </style>
     <script src="config.js"></script>
     <script src="auth.js"></script>
@@ -46,8 +80,9 @@
     <section>
       <!-- Live queue: jobs queued / generating right now. -->
       <div id="queue-strip"></div>
-      <p class="hint">Recent generation outputs. Click any to open the full-size presigned URL.</p>
+      <p class="hint">Recent generations — hover a tile and click × to delete it (from S3 too).</p>
       <div id="output-grid"></div>
+      <div id="pager"></div>
     </section>
 
     <script src="viewer.js"></script>

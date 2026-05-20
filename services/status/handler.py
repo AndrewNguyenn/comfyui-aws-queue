@@ -28,7 +28,8 @@ JOBS_TABLE = os.environ["JOBS_TABLE"]
 OUTPUTS_BUCKET = os.environ["OUTPUTS_BUCKET"]
 UPLOADS_BUCKET = os.environ["UPLOADS_BUCKET"]
 
-PRESIGNED_GET_TTL = 300  # 5 min — long enough to download, short enough to limit replay
+PRESIGNED_GET_TTL = 3600  # 1 h — lets the viewer reuse a URL (browser image
+# cache stays warm) across reloads instead of re-presigning every render.
 PRESIGNED_PUT_TTL = 600  # 10 min for upload
 
 
@@ -41,6 +42,8 @@ def lambda_handler(event: dict, _context: Any) -> dict:
             return _list_jobs(event)
         if method == "GET" and path == "/jobs/{id}":
             return _get_job(event)
+        if method == "DELETE" and path == "/jobs/{id}":
+            return _delete_job(event)
         if method == "GET" and path == "/view":
             return _view(event)
         if method == "POST" and path == "/upload/image":
@@ -124,6 +127,26 @@ def _get_job(event: dict) -> dict:
         "error": item.get("error", {"S": ""})["S"],
     }
     return _resp(200, output)
+
+
+def _delete_job(event: dict) -> dict:
+    """DELETE /jobs/{id} — delete a generation: its output objects from the
+    outputs bucket, then the job record from DynamoDB so it drops out of the
+    viewer. Used by the viewer's per-tile delete button."""
+    job_id = event["pathParameters"]["id"]
+    r = ddb.get_item(TableName=JOBS_TABLE, Key={"job_id": {"S": job_id}})
+    if "Item" not in r:
+        return _resp(404, {"error": "job not found"})
+    keys = json.loads(r["Item"].get("output_keys", {"S": "[]"})["S"])
+    deleted = 0
+    for key in keys:
+        try:
+            s3.delete_object(Bucket=OUTPUTS_BUCKET, Key=key)
+            deleted += 1
+        except ClientError as e:  # noqa: PERF203
+            print(f"delete object {key} failed: {e!r}")
+    ddb.delete_item(TableName=JOBS_TABLE, Key={"job_id": {"S": job_id}})
+    return _resp(200, {"deleted": job_id, "objects": deleted})
 
 
 def _view(event: dict) -> dict:

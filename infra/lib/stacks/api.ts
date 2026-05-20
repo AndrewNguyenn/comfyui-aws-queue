@@ -130,8 +130,10 @@ export class ApiStack extends Stack {
       handler: 'handler.lambda_handler',
       description: 'Job status reads, presigned URL generation for view/upload',
     });
-    storage.jobsTable.grantReadData(this.statusFn);
-    storage.outputsBucket.grantRead(this.statusFn);
+    // Read+write: DELETE /jobs/{id} removes the job record and its output
+    // objects (the viewer's per-tile delete button).
+    storage.jobsTable.grantReadWriteData(this.statusFn);
+    storage.outputsBucket.grantReadWrite(this.statusFn);
     storage.uploadsBucket.grantPut(this.statusFn);
 
     // ----- Lambda: Catalog -----
@@ -307,6 +309,7 @@ export class ApiStack extends Stack {
     jobsRoot.addMethod('GET', statusIntegration, authMethodOptions);
     const jobs = jobsRoot.addResource('{id}');
     jobs.addMethod('GET', statusIntegration, authMethodOptions);
+    jobs.addMethod('DELETE', statusIntegration, authMethodOptions);
 
     // /view
     const view = root.addResource('view');
