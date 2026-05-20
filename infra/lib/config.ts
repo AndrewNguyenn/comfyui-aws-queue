@@ -82,10 +82,13 @@ export const APP_CONFIG: AppConfig = {
   projectName: 'comfyui-aws-queue',
   region: 'us-east-1',
   availabilityZone: 'us-east-1a',
-  // us-east-1 a/b/c/d/f all offer g4dn; we use a/b/c (3 AZs is plenty of
-  // spot-pool spread). 1e is excluded — it lacks g4dn — and we stop at 3
-  // so the VPC stays small.
-  additionalAvailabilityZones: ['us-east-1b', 'us-east-1c'],
+  // Span all five GPU-capable us-east-1 AZs for the widest spot-pool spread.
+  // a/b/c/d/f all offer g5.xlarge/g5.2xlarge (image fleet is g5.2xlarge-only,
+  // so pool depth directly drives how long a job waits during a spot
+  // drought); g6e.xlarge is offered in a/b/c/d — capacity-optimized simply
+  // skips f for that type. 1e is excluded (no GPU capacity). Extra public
+  // subnets are free here — no NAT GW, no interface endpoints.
+  additionalAvailabilityZones: ['us-east-1b', 'us-east-1c', 'us-east-1d', 'us-east-1f'],
   tags: {
     Project: 'comfyui-aws-queue',
     Environment: 'prod',
