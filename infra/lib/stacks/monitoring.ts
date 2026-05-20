@@ -63,7 +63,10 @@ export class MonitoringStack extends Stack {
     // ---------- AWS Budget ----------
     new budgets.CfnBudget(this, 'MonthlyBudget', {
       budget: {
-        budgetName: `${config.projectName}-monthly`,
+        // Budgets are an account-global resource — the name must be unique
+        // across all regions, so suffix with the region (same reasoning as
+        // the S3 bucket names in storage.ts).
+        budgetName: `${config.projectName}-monthly-${this.region}`,
         budgetType: 'COST',
         timeUnit: 'MONTHLY',
         budgetLimit: {
