@@ -80,12 +80,12 @@ export interface FleetConfig {
  */
 export const APP_CONFIG: AppConfig = {
   projectName: 'comfyui-aws-queue',
-  region: 'us-west-2',
-  availabilityZone: 'us-west-2a',
-  // 2d excluded: g4dn / g5 / g5.2 instance types are not offered there.
-  // Keeping it would trigger InvalidFleetConfiguration errors on every
-  // launch attempt that lands in 2d. 2a/2b/2c all support our full type set.
-  additionalAvailabilityZones: ['us-west-2b', 'us-west-2c'],
+  region: 'us-east-1',
+  availabilityZone: 'us-east-1a',
+  // us-east-1 a/b/c/d/f all offer g4dn; we use a/b/c (3 AZs is plenty of
+  // spot-pool spread). 1e is excluded — it lacks g4dn — and we stop at 3
+  // so the VPC stays small.
+  additionalAvailabilityZones: ['us-east-1b', 'us-east-1c'],
   tags: {
     Project: 'comfyui-aws-queue',
     Environment: 'prod',

@@ -40,10 +40,14 @@ export class StorageStack extends Stack {
     super(scope, id, props);
     const { config } = props;
     const acct = Aws.ACCOUNT_ID; // CDK token, resolved at deploy time
+    // S3 bucket names are GLOBALLY unique. Suffix with the region so the same
+    // account can run the stack in more than one region (or migrate between
+    // regions) without name collisions — e.g. comfy-models-<acct>-us-east-1.
+    const sfx = `${acct}-${this.region}`;
 
     // ---------- S3 BUCKETS ----------
     this.modelsBucket = new s3.Bucket(this, 'ModelsBucket', {
-      bucketName: `${config.storage.modelsBucketPrefix}-${acct}`,
+      bucketName: `${config.storage.modelsBucketPrefix}-${sfx}`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       versioned: false, // Models are content-addressed; versioning adds cost without value
@@ -58,7 +62,7 @@ export class StorageStack extends Stack {
     });
 
     this.outputsBucket = new s3.Bucket(this, 'OutputsBucket', {
-      bucketName: `${config.storage.outputsBucketPrefix}-${acct}`,
+      bucketName: `${config.storage.outputsBucketPrefix}-${sfx}`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       versioned: true, // Cheap protection against accidental overwrite of user's work
@@ -86,7 +90,7 @@ export class StorageStack extends Stack {
     });
 
     this.uploadsBucket = new s3.Bucket(this, 'UploadsBucket', {
-      bucketName: `${config.storage.uploadsBucketPrefix}-${acct}`,
+      bucketName: `${config.storage.uploadsBucketPrefix}-${sfx}`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       removalPolicy: RemovalPolicy.DESTROY,
@@ -108,7 +112,7 @@ export class StorageStack extends Stack {
     });
 
     this.frontendBucket = new s3.Bucket(this, 'FrontendBucket', {
-      bucketName: `${config.storage.frontendBucketPrefix}-${acct}`,
+      bucketName: `${config.storage.frontendBucketPrefix}-${sfx}`,
       // Public-read intentional. Frontend is static HTML/JS/CSS only.
       // Operator: NEVER store sensitive config in this bucket.
       // Block-public-access is intentionally relaxed for this bucket only;
