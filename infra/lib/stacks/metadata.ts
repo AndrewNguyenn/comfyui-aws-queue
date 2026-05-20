@@ -121,6 +121,7 @@ export class MetadataStack extends Stack {
           -e WORKER_API_KEY_ID='${workerApiKeyId}' \\
           -e FRONTEND_BUCKET='${storage.frontendBucket.bucketName}' \\
           -e OBJECT_INFO_TABLE='${storage.objectInfoTable.tableName}' \\
+          -e OUTPUTS_BUCKET='${storage.outputsBucket.bucketName}' \\
           -e AWS_REGION='${this.region}' \\
           -e LOG_LEVEL=INFO \\
           --log-driver=awslogs \\
