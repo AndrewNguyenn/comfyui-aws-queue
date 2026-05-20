@@ -285,10 +285,10 @@ export class ApiStack extends Stack {
     };
 
     // ----- Routes -----
-    const dispatcherIntegration = new apigw.LambdaIntegration(this.dispatcherFn);
-    const statusIntegration = new apigw.LambdaIntegration(this.statusFn);
-    const catalogIntegration = new apigw.LambdaIntegration(this.catalogFn);
-    const downloadKickoffIntegration = new apigw.LambdaIntegration(this.downloadKickoffFn);
+    const dispatcherIntegration = new apigw.LambdaIntegration(this.dispatcherFn, { allowTestInvoke: false });
+    const statusIntegration = new apigw.LambdaIntegration(this.statusFn, { allowTestInvoke: false });
+    const catalogIntegration = new apigw.LambdaIntegration(this.catalogFn, { allowTestInvoke: false });
+    const downloadKickoffIntegration = new apigw.LambdaIntegration(this.downloadKickoffFn, { allowTestInvoke: false });
 
     const root = this.api.root;
 
@@ -398,21 +398,21 @@ export class ApiStack extends Stack {
     const internalObjectInfo = internal.addResource('object_info');
     internalObjectInfo.addMethod(
       'POST',
-      new apigw.LambdaIntegration(this.dispatcherFn),
+      new apigw.LambdaIntegration(this.dispatcherFn, { allowTestInvoke: false }),
       { apiKeyRequired: true } // No Cognito; API key only
     );
     // Worker → server WebSocket event push (also API-key authed).
     const internalWsEvent = internal.addResource('ws-event');
     internalWsEvent.addMethod(
       'POST',
-      new apigw.LambdaIntegration(wsForwardFn),
+      new apigw.LambdaIntegration(wsForwardFn, { allowTestInvoke: false }),
       { apiKeyRequired: true }
     );
     // Worker → server custom-node extension publish (api-key authed).
     const internalExtensions = internal.addResource('extensions');
     internalExtensions.addMethod(
       'POST',
-      new apigw.LambdaIntegration(this.dispatcherFn),
+      new apigw.LambdaIntegration(this.dispatcherFn, { allowTestInvoke: false }),
       { apiKeyRequired: true }
     );
     // Editor LOGS panel → ComfyUI's /internal/logs/raw. Unlike the sibling
@@ -445,7 +445,7 @@ export class ApiStack extends Stack {
     // ----- ComfyUI editor (Comfy-Org/ComfyUI_frontend v1.x) compat routes -----
     // Routed to the separate EditorCompatFn Lambda to avoid blowing the 20 KB
     // Lambda resource policy limit on DispatcherFn.
-    const editorIntegration = new apigw.LambdaIntegration(this.editorCompatFn);
+    const editorIntegration = new apigw.LambdaIntegration(this.editorCompatFn, { allowTestInvoke: false });
 
     // GET /history (list mode, no id) — editor polls for queue history
     const historyList = this.api.root.getResource('history')!;
