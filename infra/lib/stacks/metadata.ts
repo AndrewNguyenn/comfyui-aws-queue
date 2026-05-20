@@ -95,8 +95,16 @@ export class MetadataStack extends Stack {
       'mkdir -p /var/log/comfy-metadata',
       // Login to ECR
       `aws ecr get-login-password --region ${this.region} | docker login --username AWS --password-stdin ${this.account}.dkr.ecr.${this.region}.amazonaws.com`,
-      // Pull and run
-      `docker pull ${ecrUri}:latest`,
+      // Pull with retry. On a fresh `cdk deploy` the comfy-metadata image is
+      // built by CodeBuild *after* this instance boots — the image won't
+      // exist for the first ~10-20 min. Retrying (rather than failing the
+      // boot outright) means the metadata instance self-heals once the
+      // build lands, with no manual intervention. ~20 min window.
+      `for i in $(seq 1 40); do docker pull ${ecrUri}:latest && break; ` +
+        `echo "comfy-metadata image not ready (attempt $i/40), retrying in 30s"; sleep 30; done`,
+      // Idempotent: drop any stale container so a re-run of this script
+      // (e.g. cloud-init re-exec) doesn't fail on the --name collision.
+      `docker rm -f comfy-metadata 2>/dev/null || true`,
       `docker run -d --restart unless-stopped --name comfy-metadata \\
           -p 8188:8188 \\
           -e FLEET=image \\
