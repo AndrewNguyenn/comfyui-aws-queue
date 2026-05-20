@@ -93,7 +93,17 @@ def lambda_handler(event: dict, context: Any) -> dict:
         for proxy_base in ("/manager/", "/customnode/", "/snapshot/", "/model-manager/"):
             if url_path.startswith(proxy_base) and method in ("GET", "POST"):
                 # For install routes: write manifest first, then proxy.
-                if url_path in ("/customnode/install", "/customnode/install/git_url"):
+                # /customnode/install* is the legacy Manager install path;
+                # /manager/queue/install is ComfyUI-Manager V3's queue-based
+                # install (what the current editor actually calls). Both must
+                # be recorded to the manifest or the node won't survive a
+                # restart — the metadata container and GPU workers reinstall
+                # custom nodes from the manifest on boot.
+                if url_path in (
+                    "/customnode/install",
+                    "/customnode/install/git_url",
+                    "/manager/queue/install",
+                ):
                     return _customnode_install_then_record(event, proxy_base)
                 return _proxy_to_metadata(event, proxy_base)
 
@@ -608,6 +618,30 @@ def _normalize_install_body(path: str, body: dict) -> Optional[dict]:
             "commit": None,
             "added_at": now,
             "source": "manager-git-url",
+        }
+    # /manager/queue/install: ComfyUI-Manager V3 sends the node-pack object —
+    # {id, title, files: ["<git_url>"], repository, reference, version,
+    #  selected_version, install_type, ...}. `id` is the cnr id and also the
+    # directory name Manager clones into, so it's the correct manifest `name`.
+    if path.endswith("/queue/install"):
+        files = body.get("files") or []
+        url = body.get("repository") or (files[0] if files else None) or body.get("url")
+        if not url:
+            # `reference` may be a registry URL (registry.comfy.org/...) which
+            # is not git-cloneable — only accept it if it's a real git host.
+            ref = body.get("reference") or ""
+            if "github.com" in ref or "gitlab.com" in ref or ref.endswith(".git"):
+                url = ref
+        if not url:
+            return None
+        return {
+            # commit pinned to None: Manager's cnr `selected_version` (e.g.
+            # "1.0.9") is not necessarily a git ref/tag, so track HEAD.
+            "name": body.get("id") or body.get("title") or _name_from_git_url(url),
+            "url": url,
+            "commit": None,
+            "added_at": now,
+            "source": "manager-queue-install",
         }
     # /customnode/install: body = {title, files: ["<git_url>", ...], install_type, ...}
     title = body.get("title") or body.get("name")

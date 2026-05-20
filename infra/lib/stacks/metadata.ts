@@ -65,6 +65,15 @@ export class MetadataStack extends Stack {
       actions: ['s3:PutObject', 's3:PutObjectAcl'],
       resources: [`${storage.frontendBucket.bucketArn}/extensions/*`],
     }));
+    // S3 outputs bucket: read the custom-node manifest on boot. manifest_installer
+    // (run by entrypoint.sh) syncs /opt/comfy/custom_nodes against this file so
+    // nodes installed via Manager persist across container/instance recreation.
+    // Without this grant the read fails AccessDenied and is silently swallowed
+    // as "manifest empty" — i.e. custom nodes would NOT survive a restart.
+    role.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: ['s3:GetObject'],
+      resources: [`${storage.outputsBucket.bucketArn}/manifests/*`],
+    }));
     // DDB object_info table (write our published metadata)
     storage.objectInfoTable.grantReadWriteData(role);
     // API key value lookup for /internal/object_info + /internal/extensions auth
