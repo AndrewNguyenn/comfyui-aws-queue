@@ -4,6 +4,8 @@ Status Lambda — read-only job lookup + presigned S3 URL generation.
 Routes:
   GET  /jobs             → list jobs filtered by status (editor queue/history)
   GET  /jobs/{id}        → job record from DDB
+  DELETE /jobs/{id}      → delete a completed generation (S3 outputs + DDB record)
+  POST /jobs/{id}/cancel → cancel a queued or running job (viewer pending strip)
   GET  /view?key=<s3>    → 302 redirect to presigned GET URL on outputs bucket
   POST /upload/image     → returns presigned PUT URL for direct browser upload
                             to uploads bucket (sidesteps Lambda 6 MB body limit)
@@ -44,6 +46,8 @@ def lambda_handler(event: dict, _context: Any) -> dict:
             return _get_job(event)
         if method == "DELETE" and path == "/jobs/{id}":
             return _delete_job(event)
+        if method == "POST" and path == "/jobs/{id}/cancel":
+            return _cancel_job(event)
         if method == "GET" and path == "/view":
             return _view(event)
         if method == "POST" and path == "/upload/image":
@@ -193,7 +197,10 @@ def _list_jobs(event: dict) -> dict:
     qs = event.get("queryStringParameters") or {}
     statuses = [s.strip() for s in (qs.get("status") or "").split(",") if s.strip()]
     if not statuses:
-        statuses = ["completed", "failed", "cancelled", "in_progress", "pending"]
+        # Match the values the worker actually writes (see worker.py
+        # _set_job_status / _claim_job): complete / failed / cancelled /
+        # running / queued.
+        statuses = ["complete", "failed", "cancelled", "running", "queued"]
 
     try:
         limit = max(1, min(int(qs.get("limit") or 64), 500))
@@ -243,6 +250,10 @@ def _serialize_job(it: dict) -> dict:
         "positive_prompt": positive,
         "negative_prompt": negative,
         "progress": it.get("progress", {}).get("S", ""),
+        # True once a cancel has been requested on a still-running job — lets
+        # the viewer keep the row in a "cancelling" state until the worker
+        # actually stops it (a running cancel is not instantaneous).
+        "cancel_requested": it.get("cancel_requested", {}).get("BOOL", False),
     }
 
 
@@ -276,6 +287,66 @@ def _delete_job(event: dict) -> dict:
             print(f"delete object {key} failed: {e!r}")
     ddb.delete_item(TableName=JOBS_TABLE, Key={"job_id": {"S": job_id}})
     return _resp(200, {"deleted": job_id, "objects": deleted})
+
+
+def _cancel_job(event: dict) -> dict:
+    """POST /jobs/{id}/cancel — cancel a queued or running job.
+
+    Two paths, because the API Lambda has no inbound channel to a busy worker:
+
+      queued  — the job hasn't been picked up. Flip status → "cancelled" so it
+                drops out of the viewer's pending strip immediately; the SQS
+                message lingers but the worker discards it on dequeue (it only
+                runs jobs still in "queued"). The status write is conditional
+                on the job still being "queued" so we don't clobber a worker
+                that grabbed it microseconds ago — if that race is lost we
+                fall through to the running path.
+
+      running — a worker is mid-sampling. We can't reach it, so we set a
+                `cancel_requested` flag; the worker polls it, calls ComfyUI's
+                /interrupt, and writes the final "cancelled" status itself.
+
+    Terminal jobs (complete / failed / already cancelled) → 409.
+    """
+    job_id = event["pathParameters"]["id"]
+    r = ddb.get_item(TableName=JOBS_TABLE, Key={"job_id": {"S": job_id}})
+    if "Item" not in r:
+        return _resp(404, {"error": "job not found"})
+    status = r["Item"].get("status", {"S": ""})["S"]
+
+    if status == "queued":
+        try:
+            ddb.update_item(
+                TableName=JOBS_TABLE,
+                Key={"job_id": {"S": job_id}},
+                UpdateExpression="SET #s = :cancelled, cancelled_at = :t",
+                ConditionExpression="#s = :queued",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":cancelled": {"S": "cancelled"},
+                    ":queued": {"S": "queued"},
+                    ":t": {"S": datetime.now(timezone.utc).isoformat()},
+                },
+            )
+            return _resp(200, {"job_id": job_id, "state": "cancelled"})
+        except ClientError as e:
+            if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+            # A worker claimed the job between our read and write — re-read and
+            # fall through to the running path below.
+            r = ddb.get_item(TableName=JOBS_TABLE, Key={"job_id": {"S": job_id}})
+            status = r.get("Item", {}).get("status", {"S": ""})["S"]
+
+    if status == "running":
+        ddb.update_item(
+            TableName=JOBS_TABLE,
+            Key={"job_id": {"S": job_id}},
+            UpdateExpression="SET cancel_requested = :true",
+            ExpressionAttributeValues={":true": {"BOOL": True}},
+        )
+        return _resp(200, {"job_id": job_id, "state": "cancelling"})
+
+    return _resp(409, {"error": f"job is {status or 'unknown'}, cannot cancel"})
 
 
 def _view(event: dict) -> dict:

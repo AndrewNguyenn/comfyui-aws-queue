@@ -23,7 +23,7 @@ import boto3
 
 # Model files appear under /opt/comfy/models/<type>/ via mount-s3 (see
 # workers/image/entrypoint.sh). No download path needed here.
-from comfy_client import ComfyClient
+from comfy_client import ComfyClient, JobCancelled
 from comfy_supervisor import ComfySupervisor
 from object_info_publisher import publish_object_info
 from output_uploader import OutputUploader
@@ -59,6 +59,7 @@ MODELS_TABLE = os.environ["MODELS_TABLE"]
 REGION = os.environ["AWS_REGION"]
 VISIBILITY_TIMEOUT_SEC = int(os.environ.get("VISIBILITY_TIMEOUT_SECONDS", "900"))
 HEARTBEAT_INTERVAL_SEC = 60
+CANCEL_POLL_INTERVAL_SEC = 5  # how often the cancel-watch thread re-checks DDB
 COMFY_OUTPUT_DIR = Path("/opt/comfy/output")
 
 sqs = boto3.client("sqs", region_name=REGION)
@@ -170,6 +171,10 @@ def main() -> int:
             log.warning("job %s already running on another worker; deleting duplicate delivery", job_id)
             sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=receipt)
             continue
+        if job_record.get("status") == "cancelled":
+            log.info("job %s was cancelled before pickup; discarding message", job_id)
+            sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=receipt)
+            continue
 
         spot.set_in_flight(job_id, receipt)
         heartbeat_stop = threading.Event()
@@ -186,8 +191,13 @@ def main() -> int:
             workflow = json.loads(workflow_str)
 
             # Mark running BEFORE starting work so a duplicate delivery skips.
-            _set_job_status(job_id, "running",
-                            extra={"started_at": datetime.now(timezone.utc).isoformat()})
+            # The transition is conditional on the job still being "queued":
+            # if a cancel landed in the gap between the dequeue check above and
+            # here, the job is "cancelled" and the claim fails — skip it rather
+            # than running (and overwriting) a job the user already cancelled.
+            if not _claim_job(job_id):
+                log.info("job %s no longer queued (cancelled or claimed elsewhere); skipping", job_id)
+                continue
 
             # Background-fetch every referenced model so mount-s3 starts
             # streaming it from S3 while ComfyUI is still parsing the workflow.
@@ -211,11 +221,34 @@ def main() -> int:
             ws_bridge = WsBridge(client_id=ws_client_id, job_id=job_id)
             ws_bridge.start()
 
+            # Cancel watch: poll this job's DDB record for a cancel_requested
+            # flag (set by POST /jobs/{id}/cancel). On cancel it POSTs ComfyUI's
+            # /interrupt and trips cancel_event so wait_for_completion stops —
+            # an interrupted prompt never reports "completed" on its own.
+            cancel_event = threading.Event()
+            cancel_stop = threading.Event()
+            cancel_thread = threading.Thread(
+                target=_cancel_watch_loop,
+                args=(job_id, client, cancel_event, cancel_stop),
+                daemon=True,
+            )
+            cancel_thread.start()
+
             try:
                 # Submit + wait
                 prompt_id = client.submit_prompt(workflow, client_id=ws_client_id)
-                client.wait_for_completion(prompt_id, timeout_seconds=VISIBILITY_TIMEOUT_SEC - 60)
+                client.wait_for_completion(
+                    prompt_id,
+                    timeout_seconds=VISIBILITY_TIMEOUT_SEC - 60,
+                    cancel_event=cancel_event,
+                )
             finally:
+                # Stop AND join the cancel-watch thread before moving on.
+                # ComfyUI's /interrupt is prompt-agnostic — a watch thread
+                # left alive into the next job's sampling would interrupt the
+                # wrong prompt. The join makes the thread provably dead first.
+                cancel_stop.set()
+                cancel_thread.join(timeout=10)
                 ws_bridge.stop()
 
             # Upload anything new from the output dir.
@@ -232,6 +265,17 @@ def main() -> int:
             )
             success = True
             log.info("job %s complete: %d outputs", job_id, len(output_keys))
+
+        except JobCancelled:
+            # User cancelled mid-run. Not a failure — record it as such and
+            # delete the SQS message (success=True) so it doesn't redeliver.
+            log.info("job %s cancelled by user", job_id)
+            _set_job_status(
+                job_id,
+                "cancelled",
+                extra={"completed_at": datetime.now(timezone.utc).isoformat()},
+            )
+            success = True
 
         except Exception as e:  # noqa: BLE001
             log.exception("job %s failed", job_id)
@@ -269,6 +313,59 @@ def _read_job(job_id: str) -> dict | None:
         "workflow_json": item.get("workflow_json", {"S": "{}"})["S"],
         "client_id": item.get("client_id", {"S": ""})["S"],
     }
+
+
+def _claim_job(job_id: str) -> bool:
+    """Atomically transition the job queued → running and stamp started_at.
+
+    Conditional on the job still being "queued": returns False if it was
+    cancelled or claimed by another worker in the meantime, so the caller
+    skips it instead of clobbering a terminal status.
+
+    Also clears any stale cancel_requested flag so the claim starts from a
+    clean slate — without this, a job re-queued after a spot interruption
+    (status reverts to "queued", message redelivers) would still carry the
+    flag and the new worker's cancel-watch would interrupt it immediately."""
+    try:
+        ddb.update_item(
+            TableName=JOBS_TABLE,
+            Key={"job_id": {"S": job_id}},
+            UpdateExpression="SET #s = :running, started_at = :t REMOVE cancel_requested",
+            ConditionExpression="#s = :queued",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":running": {"S": "running"},
+                ":queued": {"S": "queued"},
+                ":t": {"S": datetime.now(timezone.utc).isoformat()},
+            },
+        )
+        return True
+    except ddb.exceptions.ConditionalCheckFailedException:
+        return False
+
+
+def _cancel_watch_loop(job_id: str, client: ComfyClient,
+                       cancel_event: threading.Event,
+                       stop_event: threading.Event) -> None:
+    """Poll the job's DDB record for a cancel_requested flag while it runs.
+
+    When POST /jobs/{id}/cancel sets the flag, interrupt ComfyUI and trip
+    cancel_event so wait_for_completion raises JobCancelled. Stops itself once
+    the job finishes (stop_event) or after a successful cancel."""
+    while not stop_event.wait(CANCEL_POLL_INTERVAL_SEC):
+        try:
+            r = ddb.get_item(
+                TableName=JOBS_TABLE,
+                Key={"job_id": {"S": job_id}},
+                ProjectionExpression="cancel_requested",
+            )
+            if r.get("Item", {}).get("cancel_requested", {}).get("BOOL"):
+                log.info("cancel requested for job %s; interrupting ComfyUI", job_id)
+                client.interrupt()
+                cancel_event.set()
+                return
+        except Exception:  # noqa: BLE001
+            log.exception("cancel-watch poll failed for %s", job_id)
 
 
 def _set_job_status(job_id: str, status: str, extra: dict | None = None) -> None:

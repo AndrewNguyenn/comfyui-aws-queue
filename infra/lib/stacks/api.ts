@@ -30,6 +30,7 @@ export interface ApiStackProps extends StackProps {
  *   POST /internal/object_info→ DispatcherFn  (worker pushes its object_info on boot)
  *
  *   GET  /jobs/{id}           → StatusFn
+ *   POST /jobs/{id}/cancel    → StatusFn      (cancel a queued or running job)
  *   GET  /view                → StatusFn      (presigned-redirect to S3 output)
  *   POST /upload/image        → StatusFn      (presigned PUT for direct upload)
  *
@@ -310,6 +311,8 @@ export class ApiStack extends Stack {
     const jobs = jobsRoot.addResource('{id}');
     jobs.addMethod('GET', statusIntegration, authMethodOptions);
     jobs.addMethod('DELETE', statusIntegration, authMethodOptions);
+    // /jobs/{id}/cancel — cancel a queued or running job
+    jobs.addResource('cancel').addMethod('POST', statusIntegration, authMethodOptions);
 
     // /view
     const view = root.addResource('view');
