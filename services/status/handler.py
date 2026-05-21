@@ -91,6 +91,97 @@ def _extract_model(workflow_json: str) -> str:
     return name.rsplit("/", 1)[-1].rsplit(".", 1)[0]
 
 
+_PROMPT_MAX = 2000  # cap each prompt — keeps the /jobs list response bounded
+
+
+def _extract_prompts(workflow_json: str) -> tuple[str, str]:
+    """Best-effort: the positive + negative text prompts a workflow used.
+
+    ComfyUI's API-format graph wires two CONDITIONING chains into a sampler's
+    `positive` / `negative` inputs (or a guider's `conditioning`). The text
+    itself lives in a CLIPTextEncode node's `inputs.text`. We find the sampler,
+    then walk each conditioning input upstream — following only conditioning-
+    *named* inputs so a ControlNet/Concat node can't leak the other polarity's
+    text — until we hit a node carrying a `text` string. Returns ("", "") when
+    nothing is recoverable (no workflow, an unusual graph, etc.)."""
+    if not workflow_json:
+        return "", ""
+    try:
+        wf = json.loads(workflow_json)
+    except (json.JSONDecodeError, TypeError):
+        return "", ""
+    if not isinstance(wf, dict):
+        return "", ""
+
+    def _node(ref: Any) -> dict | None:
+        # A link is [node_id, output_index]; node_id is a str in API format.
+        if not (isinstance(ref, list) and ref):
+            return None
+        n = wf.get(str(ref[0]))
+        return n if isinstance(n, dict) else None
+
+    def _resolve(ref: Any, polarity: str, seen: set[str], depth: int = 0) -> str:
+        node = _node(ref)
+        if node is None or depth > 8:
+            return ""
+        nid = str(ref[0])
+        if nid in seen:
+            return ""
+        seen.add(nid)
+        inp = node.get("inputs", {}) or {}
+        # Direct text — the CLIPTextEncode case (also SDXL's text_g / text_l).
+        for key in ("text", "text_g", "text_l"):
+            val = inp.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        # Otherwise walk upstream, but only through conditioning-named inputs so
+        # a ControlNetApplyAdvanced (has both `positive` and `negative`) can't
+        # cross polarities. `seen` is copied per branch so it guards against
+        # path cycles without letting one branch starve a sibling that shares
+        # an upstream node (diamond-shaped conditioning graphs).
+        for key, val in inp.items():
+            if "cond" not in key.lower() and key != polarity:
+                continue
+            got = _resolve(val, polarity, set(seen), depth + 1)
+            if got:
+                return got
+        return ""
+
+    samplers = [
+        n for n in wf.values()
+        if isinstance(n, dict)
+        and any(t in (n.get("class_type") or "").lower() for t in ("sampler", "guider"))
+    ]
+    pos = neg = ""
+    for node in samplers:
+        inp = node.get("inputs", {}) or {}
+        p_ref = inp.get("positive") or inp.get("conditioning")
+        p = _resolve(p_ref, "positive", set()) if p_ref else ""
+        if p:
+            pos = p
+            n_ref = inp.get("negative")
+            neg = _resolve(n_ref, "negative", set()) if n_ref else ""
+            break
+
+    # Fallback: no sampler resolved — read CLIPTextEncode nodes directly, in
+    # graph order (first = positive, second = negative).
+    if not pos:
+        texts = []
+        for node in wf.values():
+            if not isinstance(node, dict):
+                continue
+            if "cliptextencode" in (node.get("class_type") or "").lower():
+                t = (node.get("inputs", {}) or {}).get("text")
+                if isinstance(t, str) and t.strip():
+                    texts.append(t.strip())
+        if texts:
+            pos = texts[0]
+            if len(texts) > 1 and not neg:
+                neg = texts[1]
+
+    return pos[:_PROMPT_MAX], neg[:_PROMPT_MAX]
+
+
 def _list_jobs(event: dict) -> dict:
     """GET /jobs?status=completed,failed,cancelled&limit=64&offset=0
 
@@ -129,22 +220,30 @@ def _list_jobs(event: dict) -> dict:
     items.sort(key=lambda it: it.get("created_at", {}).get("S", ""), reverse=True)
     page = items[offset : offset + limit]
 
-    jobs = [
-        {
-            "job_id": it["job_id"]["S"],
-            "type": it.get("type", {"S": ""})["S"],
-            "status": it.get("status", {"S": ""})["S"],
-            "created_at": it.get("created_at", {"S": ""})["S"],
-            "started_at": it.get("started_at", {"S": ""})["S"],
-            "completed_at": it.get("completed_at", {"S": ""})["S"],
-            "output_keys": json.loads(it.get("output_keys", {"S": "[]"})["S"]),
-            "error": it.get("error", {"S": ""})["S"],
-            "model": _extract_model(it.get("workflow_json", {}).get("S", "")),
-            "progress": it.get("progress", {}).get("S", ""),
-        }
-        for it in page
-    ]
+    jobs = [_serialize_job(it) for it in page]
     return _resp(200, {"jobs": jobs, "limit": limit, "offset": offset, "total": len(items)})
+
+
+def _serialize_job(it: dict) -> dict:
+    """Shape a raw DDB job item into the API job object. `model` and the
+    positive/negative prompts are derived on the fly from the stored
+    `workflow_json` (the job record itself never carries them)."""
+    workflow_json = it.get("workflow_json", {}).get("S", "")
+    positive, negative = _extract_prompts(workflow_json)
+    return {
+        "job_id": it["job_id"]["S"],
+        "type": it.get("type", {"S": ""})["S"],
+        "status": it.get("status", {"S": ""})["S"],
+        "created_at": it.get("created_at", {"S": ""})["S"],
+        "started_at": it.get("started_at", {"S": ""})["S"],
+        "completed_at": it.get("completed_at", {"S": ""})["S"],
+        "output_keys": json.loads(it.get("output_keys", {"S": "[]"})["S"]),
+        "error": it.get("error", {"S": ""})["S"],
+        "model": _extract_model(workflow_json),
+        "positive_prompt": positive,
+        "negative_prompt": negative,
+        "progress": it.get("progress", {}).get("S", ""),
+    }
 
 
 def _get_job(event: dict) -> dict:
@@ -154,19 +253,8 @@ def _get_job(event: dict) -> dict:
         return _resp(404, {"error": "job not found"})
 
     item = r["Item"]
-    output = {
-        "job_id": item["job_id"]["S"],
-        "type": item.get("type", {"S": ""})["S"],
-        "status": item.get("status", {"S": ""})["S"],
-        "created_at": item.get("created_at", {"S": ""})["S"],
-        "started_at": item.get("started_at", {"S": ""})["S"],
-        "completed_at": item.get("completed_at", {"S": ""})["S"],
-        "attempt_count": int(item.get("attempt_count", {"N": "0"})["N"]),
-        "output_keys": json.loads(item.get("output_keys", {"S": "[]"})["S"]),
-        "error": item.get("error", {"S": ""})["S"],
-        "model": _extract_model(item.get("workflow_json", {}).get("S", "")),
-        "progress": item.get("progress", {}).get("S", ""),
-    }
+    output = _serialize_job(item)
+    output["attempt_count"] = int(item.get("attempt_count", {"N": "0"})["N"])
     return _resp(200, output)
 
 
