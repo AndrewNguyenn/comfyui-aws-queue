@@ -39,7 +39,12 @@ _s3 = boto3.client("s3")
 FRONTEND_BUCKET = os.environ.get("FRONTEND_BUCKET", "")
 DISPATCHER_API_URL = os.environ.get("DISPATCHER_API_URL", "").rstrip("/")
 WORKER_API_KEY_ID = os.environ.get("WORKER_API_KEY_ID", "")
-COMFY_BASE = "http://127.0.0.1:8188"
+# Local ComfyUI base URL. On GPU workers ComfyUI binds :8188 directly. On the
+# metadata instance ComfyUI binds 127.0.0.1:8189 behind an nginx auth gate on
+# :8188 — hitting :8188 without the X-Comfy-Auth header gets a 403, so the
+# metadata entrypoint sets COMFY_LOCAL_URL to the un-gated :8189. Default
+# :8188 keeps the worker path unchanged.
+COMFY_BASE = os.environ.get("COMFY_LOCAL_URL", "http://127.0.0.1:8188")
 
 _api_key_cache: Optional[str] = None
 

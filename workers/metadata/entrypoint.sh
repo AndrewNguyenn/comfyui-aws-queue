@@ -16,6 +16,12 @@ echo "  FRONTEND_BUCKET=${FRONTEND_BUCKET:-unset}"
 export TQDM_DISABLE=1
 export PYTHONUNBUFFERED=1
 
+# extensions_publisher fetches ComfyUI's /extensions over HTTP. On this
+# instance ComfyUI binds 127.0.0.1:8189 behind the nginx auth gate (:8188);
+# point the publisher straight at :8189 so its request isn't 403'd by the
+# gate for lacking the X-Comfy-Auth header.
+export COMFY_LOCAL_URL=http://127.0.0.1:8189
+
 # Set ComfyUI-Manager security_level=weak so /customnode/install accepts
 # requests from non-loopback callers (our dispatcher Lambda proxy). The
 # Cognito authorizer at API GW is the real gate; Manager's built-in check
