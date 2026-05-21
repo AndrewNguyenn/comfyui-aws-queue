@@ -46,7 +46,12 @@ def _get_ddb():
     global _ddb
     if _ddb is None:
         import boto3
-        _ddb = boto3.client("dynamodb")
+        # Must pass the region explicitly — ECS EC2-launch tasks don't always
+        # expose AWS_REGION to boto3's resolver, so a bare client() raises
+        # NoRegionError (which silently killed every progress write).
+        region = (os.environ.get("AWS_REGION")
+                  or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1")
+        _ddb = boto3.client("dynamodb", region_name=region)
     return _ddb
 
 # Lazy cache: actual API key value (looked up from API GW once on first use).

@@ -20,6 +20,17 @@ class ComfyClient:
         self.base_url = base_url.rstrip("/")
 
     def submit_prompt(self, workflow: dict, client_id: str = "worker") -> str:
+        # Drop frontend-only nodes — Notes, rgthree "Fast Groups Bypasser"
+        # ("Enable / Disable groups"), labels. They carry no class_type and
+        # never execute, but ComfyUI's prompt validator rejects the WHOLE
+        # prompt over a single one ("Node ... has no class_type"). A healthy
+        # editor strips them client-side; do it here too so a workflow saved
+        # while a node pack's JS wasn't loaded still runs.
+        if isinstance(workflow, dict):
+            workflow = {
+                nid: node for nid, node in workflow.items()
+                if isinstance(node, dict) and node.get("class_type")
+            }
         body = json.dumps({"prompt": workflow, "client_id": client_id}).encode()
         r = _http.request(
             "POST",
