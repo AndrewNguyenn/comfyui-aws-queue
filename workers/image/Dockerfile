@@ -119,6 +119,22 @@ RUN chmod +x /entrypoint.sh
 COPY workers/image/baked_nodes.txt /tmp/baked_nodes.txt
 RUN cd /opt/worker && python3 bake_nodes.py /tmp/baked_nodes.txt
 
+# ---------- Re-assert the torchaudio stub ----------
+# The bake pulls a real torchaudio (demucs / openai-whisper deps). ComfyUI
+# v0.20.1 hard-imports torchaudio and a real wheel needs libcudart.so.13 —
+# a CUDA the NGC image lacks → ComfyUI crashes on every boot. Definitively
+# re-stub here (hardcoded site-packages path) and verify the import works,
+# so a broken stub fails the BUILD instead of every worker.
+RUN pip uninstall -y torchaudio 2>/dev/null || true \
+    && rm -rf /usr/local/lib/python3.10/dist-packages/torchaudio \
+              /usr/local/lib/python3.10/dist-packages/torchaudio-*.dist-info \
+    && mkdir -p /usr/local/lib/python3.10/dist-packages/torchaudio \
+    && printf '%s\n' \
+         '"""torchaudio stub — NGC ships none; audio unused on the image fleet."""' \
+         '__version__ = "0.0.0-stub"' \
+         > /usr/local/lib/python3.10/dist-packages/torchaudio/__init__.py \
+    && python -c "import torchaudio; print('torchaudio OK:', torchaudio.__version__)"
+
 # Per-job scratch dir (output_uploader watches this)
 RUN mkdir -p /opt/comfy/output
 
