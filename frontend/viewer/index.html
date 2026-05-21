@@ -192,8 +192,10 @@ a { color:var(--pond-dk); }
 .card.deleting { opacity:.35; pointer-events:none; }
 .card .thumb-wrap { position:relative; width:100%; aspect-ratio:1/1;
   background:var(--cream); border-bottom:1px solid var(--line); overflow:hidden; }
+/* contain, not cover — show the whole generation (portraits/landscapes are
+   letterboxed against the cream tile) rather than centre-cropping it square. */
 .card .thumb-wrap img, .card .thumb-wrap video { width:100%; height:100%;
-  object-fit:cover; }
+  object-fit:contain; }
 .card .thumb-wrap .ph { display:flex; align-items:center; justify-content:center;
   height:100%; font-family:var(--font-mono); font-size:9px; color:var(--ink-3); }
 .card .typestamp { position:absolute; top:6px; right:6px; font-size:9px; font-weight:600;
