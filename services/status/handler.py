@@ -58,22 +58,25 @@ def lambda_handler(event: dict, _context: Any) -> dict:
         return _resp(500, {"error": "internal error"})
 
 
-def _extract_model(workflow_json: str) -> str:
-    """Best-effort: the primary model a workflow used — the *biggest* one.
+def _parse_workflow(workflow_json: str) -> dict:
+    """Parse the stored workflow JSON into a node dict, or {} if unusable."""
+    if not workflow_json:
+        return {}
+    try:
+        wf = json.loads(workflow_json)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return wf if isinstance(wf, dict) else {}
+
+
+def _extract_model(wf: dict) -> str:
+    """Best-effort: the primary model a workflow used.
 
     A workflow loads many models (LoRA, VAE, CLIP, ControlNet…). The main
     model is either a checkpoint (CheckpointLoaderSimple → ckpt_name) or, for
     Flux/Wan-style graphs, a standalone diffusion model (UNETLoader /
     UnetLoaderGGUF / a 'Load Diffusion Model' node → unet_name). We scan for
     either, skipping the auxiliary loaders, and prefer a checkpoint."""
-    if not workflow_json:
-        return ""
-    try:
-        wf = json.loads(workflow_json)
-    except (json.JSONDecodeError, TypeError):
-        return ""
-    if not isinstance(wf, dict):
-        return ""
     ckpt = diffusion = None
     for node in wf.values():
         if not isinstance(node, dict):
@@ -98,24 +101,41 @@ def _extract_model(workflow_json: str) -> str:
 _PROMPT_MAX = 2000  # cap each prompt — keeps the /jobs list response bounded
 
 
-def _extract_prompts(workflow_json: str) -> tuple[str, str]:
-    """Best-effort: the positive + negative text prompts a workflow used.
+def _generators(wf: dict) -> tuple[list, list]:
+    """Split conditioning-consuming nodes into (samplers, detailers).
 
-    ComfyUI's API-format graph wires two CONDITIONING chains into a sampler's
-    `positive` / `negative` inputs (or a guider's `conditioning`). The text
-    itself lives in a CLIPTextEncode node's `inputs.text`. We find the sampler,
-    then walk each conditioning input upstream — following only conditioning-
-    *named* inputs so a ControlNet/Concat node can't leak the other polarity's
-    text — until we hit a node carrying a `text` string. Returns ("", "") when
-    nothing is recoverable (no workflow, an unusual graph, etc.)."""
-    if not workflow_json:
-        return "", ""
-    try:
-        wf = json.loads(workflow_json)
-    except (json.JSONDecodeError, TypeError):
-        return "", ""
-    if not isinstance(wf, dict):
-        return "", ""
+    A "generator" is detected by input shape — it has a positive / negative /
+    conditioning *link* — so samplers, guiders and detailers are all caught
+    without hard-coding class names. Both lists keep workflow order, so
+    samplers[0] is the primary pass."""
+    samplers, detailers = [], []
+    for nid, node in wf.items():
+        if not isinstance(node, dict):
+            continue
+        inp = node.get("inputs", {}) or {}
+        if not any(isinstance(inp.get(k), list)
+                   for k in ("positive", "negative", "conditioning")):
+            continue
+        ct = (node.get("class_type") or "").lower()
+        (detailers if "detailer" in ct else samplers).append((nid, node))
+    return samplers, detailers
+
+
+def _extract_prompts(wf: dict) -> list[dict]:
+    """Every distinct text prompt a workflow used, each with a label.
+
+    Returns a list of {"label": str, "text": str}. A plain txt2img graph
+    yields [Positive, Negative]; a graph with detailer nodes (FaceDetailer,
+    DetailerForEach, …) carries its own prompts, so each detailer that uses a
+    *different* prompt adds its own labelled section. Ordered primary-sampler
+    first; identical prompt text is shown only once.
+
+    ComfyUI's API-format graph wires CONDITIONING chains into a sampler's
+    `positive` / `negative` inputs (or a guider's `conditioning`); the text
+    lives in a CLIPTextEncode `inputs.text`. We walk each conditioning input
+    upstream — following only conditioning-named inputs so a ControlNet/Concat
+    node can't leak the other polarity's text — until we hit a `text` string.
+    """
 
     def _node(ref: Any) -> dict | None:
         # A link is [node_id, output_index]; node_id is a str in API format.
@@ -124,7 +144,7 @@ def _extract_prompts(workflow_json: str) -> tuple[str, str]:
         n = wf.get(str(ref[0]))
         return n if isinstance(n, dict) else None
 
-    def _resolve(ref: Any, polarity: str, seen: set[str], depth: int = 0) -> str:
+    def _resolve(ref: Any, polarity: str, seen: set, depth: int = 0) -> str:
         node = _node(ref)
         if node is None or depth > 8:
             return ""
@@ -151,39 +171,128 @@ def _extract_prompts(workflow_json: str) -> tuple[str, str]:
                 return got
         return ""
 
-    samplers = [
-        n for n in wf.values()
-        if isinstance(n, dict)
-        and any(t in (n.get("class_type") or "").lower() for t in ("sampler", "guider"))
-    ]
-    pos = neg = ""
-    for node in samplers:
-        inp = node.get("inputs", {}) or {}
-        p_ref = inp.get("positive") or inp.get("conditioning")
-        p = _resolve(p_ref, "positive", set()) if p_ref else ""
-        if p:
-            pos = p
-            n_ref = inp.get("negative")
-            neg = _resolve(n_ref, "negative", set()) if n_ref else ""
-            break
+    def _title(node: dict, nid: str) -> str:
+        meta = node.get("_meta") or {}
+        t = meta.get("title")
+        if isinstance(t, str) and t.strip():
+            return t.strip()
+        return node.get("class_type") or f"node {nid}"
 
-    # Fallback: no sampler resolved — read CLIPTextEncode nodes directly, in
-    # graph order (first = positive, second = negative).
-    if not pos:
-        texts = []
+    def _cap(text: str) -> str:
+        return (text or "").strip()[:_PROMPT_MAX]
+
+    # Each generator (sampler / guider / detailer) contributes a positive +
+    # negative pair. Dedupe at the *pair* level: a detailer whose whole prompt
+    # set matches an earlier generator's is dropped, but a detailer with any
+    # distinct prompt keeps its full pair — so a section never ends up orphaned
+    # from its other half.
+    samplers, detailers = _generators(wf)
+    sections: list[dict] = []
+    seen_pairs: set = set()
+    primary_id = samplers[0][0] if samplers else None
+    for nid, node in samplers + detailers:
+        inp = node.get("inputs", {}) or {}
+        pos = _cap(_resolve(inp.get("positive") or inp.get("conditioning"), "positive", set()))
+        neg = _cap(_resolve(inp.get("negative"), "negative", set()))
+        if (not pos and not neg) or (pos, neg) in seen_pairs:
+            continue
+        seen_pairs.add((pos, neg))
+        if nid == primary_id:
+            p_label, n_label = "Positive", "Negative"
+        else:
+            title = _title(node, nid)
+            p_label, n_label = f"{title} · Positive", f"{title} · Negative"
+        if pos:
+            sections.append({"label": p_label, "text": pos})
+        if neg:
+            sections.append({"label": n_label, "text": neg})
+
+    # Fallback: no generator resolved — read CLIPTextEncode nodes in graph
+    # order (first = positive, second = negative, rest numbered).
+    if not sections:
+        seen: set = set()
         for node in wf.values():
             if not isinstance(node, dict):
                 continue
-            if "cliptextencode" in (node.get("class_type") or "").lower():
-                t = (node.get("inputs", {}) or {}).get("text")
-                if isinstance(t, str) and t.strip():
-                    texts.append(t.strip())
-        if texts:
-            pos = texts[0]
-            if len(texts) > 1 and not neg:
-                neg = texts[1]
+            if "cliptextencode" not in (node.get("class_type") or "").lower():
+                continue
+            t = (node.get("inputs", {}) or {}).get("text")
+            if not (isinstance(t, str) and t.strip()):
+                continue
+            t = _cap(t)
+            if t in seen:
+                continue
+            seen.add(t)
+            i = len(sections)
+            sections.append({
+                "label": "Positive" if i == 0 else "Negative" if i == 1 else f"Prompt {i + 1}",
+                "text": t,
+            })
 
-    return pos[:_PROMPT_MAX], neg[:_PROMPT_MAX]
+    return sections
+
+
+_PARAM_KEYS = ("steps", "cfg", "sampler_name", "scheduler", "denoise")
+
+
+def _extract_params(wf: dict) -> dict:
+    """Best-effort generation parameters, anchored on the primary sampler.
+
+    KSampler carries steps/cfg/sampler_name/scheduler/denoise inline, so a
+    single node yields a coherent set. Custom-sampler (Flux-style) graphs split
+    them across BasicScheduler / CFGGuider / KSamplerSelect nodes — so any key
+    the primary sampler lacks is then filled from the other sampler/guider/
+    scheduler nodes. Detailer nodes are skipped throughout: we want the main
+    run's settings, not a face/hand pass."""
+
+    def _scalar(v: Any) -> Any:
+        return v if isinstance(v, (int, float, str)) and v != "" else None
+
+    samplers, _ = _generators(wf)
+    primary = samplers[0][1] if samplers else None
+    # Fill-in candidates for keys the primary node doesn't carry inline.
+    cands = [
+        node for node in wf.values()
+        if isinstance(node, dict)
+        and "detailer" not in (node.get("class_type") or "").lower()
+        and any(t in (node.get("class_type") or "").lower()
+                for t in ("sampler", "guider", "scheduler"))
+    ]
+
+    params: dict = {}
+    if primary:
+        pinp = primary.get("inputs", {}) or {}
+        for key in _PARAM_KEYS:
+            v = _scalar(pinp.get(key))
+            if v is not None:
+                params[key] = v
+    for key in _PARAM_KEYS:
+        if key in params:
+            continue
+        for node in cands:
+            v = _scalar((node.get("inputs", {}) or {}).get(key))
+            if v is not None:
+                params[key] = v
+                break
+
+    # Seed — primary sampler first, then a one-hop walk for a wired Seed node.
+    for node in ([primary] if primary else []) + cands:
+        inp = node.get("inputs", {}) or {}
+        ref = inp.get("seed") if inp.get("seed") is not None else inp.get("noise_seed")
+        seed = _scalar(ref)
+        if seed is None and isinstance(ref, list) and ref:
+            up = wf.get(str(ref[0]))
+            if isinstance(up, dict):
+                ui = up.get("inputs", {}) or {}
+                for k in ("seed", "noise_seed", "value"):
+                    seed = _scalar(ui.get(k))
+                    if seed is not None:
+                        break
+        if seed is not None:
+            params["seed"] = seed
+            break
+
+    return params
 
 
 def _list_jobs(event: dict) -> dict:
@@ -232,11 +341,10 @@ def _list_jobs(event: dict) -> dict:
 
 
 def _serialize_job(it: dict) -> dict:
-    """Shape a raw DDB job item into the API job object. `model` and the
-    positive/negative prompts are derived on the fly from the stored
-    `workflow_json` (the job record itself never carries them)."""
-    workflow_json = it.get("workflow_json", {}).get("S", "")
-    positive, negative = _extract_prompts(workflow_json)
+    """Shape a raw DDB job item into the API job object. `model`, the prompt
+    sections and the generation params are all derived on the fly from the
+    stored `workflow_json` (the job record itself never carries them)."""
+    wf = _parse_workflow(it.get("workflow_json", {}).get("S", ""))
     return {
         "job_id": it["job_id"]["S"],
         "type": it.get("type", {"S": ""})["S"],
@@ -246,9 +354,11 @@ def _serialize_job(it: dict) -> dict:
         "completed_at": it.get("completed_at", {"S": ""})["S"],
         "output_keys": json.loads(it.get("output_keys", {"S": "[]"})["S"]),
         "error": it.get("error", {"S": ""})["S"],
-        "model": _extract_model(workflow_json),
-        "positive_prompt": positive,
-        "negative_prompt": negative,
+        "model": _extract_model(wf),
+        # All distinct prompts (txt2img → Positive/Negative; detailer graphs
+        # add their own sections) + best-effort generation params.
+        "prompts": _extract_prompts(wf),
+        "params": _extract_params(wf),
         "progress": it.get("progress", {}).get("S", ""),
         # True once a cancel has been requested on a still-running job — lets
         # the viewer keep the row in a "cancelling" state until the worker
