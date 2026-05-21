@@ -143,6 +143,14 @@ RUN pip uninstall -y torchaudio 2>/dev/null || true \
 COPY workers/image/patch_metadata_ext.py /tmp/patch_metadata_ext.py
 RUN python3 /tmp/patch_metadata_ext.py
 
+# ---------- Patch ComfyUI's model-folder cache ----------
+# ComfyUI caches the model list and only re-scans on a dir mtime change —
+# but mount-s3 never bumps mtimes when a model is added to S3, so a model
+# added to a running worker is invisible until restart (→ 0-output jobs).
+# Add a 60 s TTL so newly-added models are picked up. Build-verified.
+COPY workers/image/patch_folder_cache.py /tmp/patch_folder_cache.py
+RUN python3 /tmp/patch_folder_cache.py
+
 # Per-job scratch dir (output_uploader watches this)
 RUN mkdir -p /opt/comfy/output
 
