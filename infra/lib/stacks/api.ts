@@ -213,6 +213,12 @@ export class ApiStack extends Stack {
       handler: 'handler.lambda_handler',
       description: 'Sweeps zombie jobs: re-queues up to 3x, then archives to S3',
       timeout: Duration.seconds(60),
+      // The reaper self-perpetuates by sending a delayed tick to the same SQS
+      // queue that triggers it — an intentional, rate-limited loop (one tick
+      // per 180 s, stops at idle). Lambda's recursive-loop detector flags any
+      // Lambda↔own-SQS pattern and would otherwise terminate the chain, so
+      // opt that one function out.
+      recursiveLoop: lambda.RecursiveLoop.ALLOW,
       environment: {
         ...commonLambdaProps.environment,
         REAPER_QUEUE_URL: queue.reaperTicksQueue.queueUrl,
