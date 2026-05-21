@@ -68,6 +68,16 @@ RUN git clone --depth 1 --branch ${COMFYUI_TAG} \
          '__version__ = "0.0.0-stub"' \
          > /usr/local/lib/python3.10/dist-packages/torchaudio/__init__.py
 
+# ---------- transformers + segment-anything (custom-node foundation) ----------
+# ComfyUI's requirements floor lets pip grab the LATEST transformers, which
+# now needs torch.distributed.tensor.device_mesh — absent from NGC's torch
+# 2.5.x. That breaks transformers' lazy imports (AutoModel, BlipProcessor…),
+# so every custom node that touches transformers (Easy-Use, LayerStyle,
+# WAS, Florence2…) fails to import. Pin transformers to a torch-2.5-era
+# release. segment-anything is a hard dep of ComfyUI-Impact-Pack that its
+# requirements resolution drops — install it explicitly.
+RUN pip install "transformers==4.46.3" "tokenizers<0.21" segment-anything
+
 # ---------- xformers (image fleet attention backend) ----------
 # Pin to the xformers wheel built against torch 2.5.x (what NGC 24.10 ships)
 # and install --no-deps so pip does NOT upgrade torch + torchvision out from

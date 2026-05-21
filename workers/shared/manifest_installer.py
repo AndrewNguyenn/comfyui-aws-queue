@@ -216,7 +216,12 @@ def _constraints_file() -> Optional[str]:
     # numpy/torch: a wrong version breaks every tensor node. opencv: a wrong
     # version raises 'cv2.dnn has no attribute DictValue' which crashes the
     # ENTIRE ComfyUI process on startup, not just one node.
+    # transformers/tokenizers: a too-new transformers needs torch features
+    # NGC's torch 2.5 lacks (torch.distributed.tensor.device_mesh) → its lazy
+    # imports (AutoModel, BlipProcessor) fail → every transformers-using node
+    # IMPORT FAILS. Pin it so a node can't upgrade it.
     for pkg in ("numpy", "torch", "torchvision", "torchaudio",
+                "transformers", "tokenizers",
                 "opencv-python", "opencv-python-headless",
                 "opencv-contrib-python", "opencv-contrib-python-headless"):
         try:
@@ -237,15 +242,27 @@ def _pip_install_requirements(target: Path) -> None:
     if not req.is_file():
         return
     log.info("pip install -r %s", req)
-    cmd = ["pip", "install", "--no-input"]
+    base = ["pip", "install", "--no-input"]
     constraints = _constraints_file()
     if constraints:
-        cmd += ["--constraint", constraints]
-    cmd += ["-r", str(req)]
+        base += ["--constraint", constraints]
     try:
-        _run(cmd)
-    except subprocess.CalledProcessError as e:
-        log.error("pip install failed for %s (rc=%d). Continuing.", target.name, e.returncode)
+        _run(base + ["-r", str(req)])
+        return
+    except subprocess.CalledProcessError:
+        log.warning("pip -r failed for %s; retrying line-by-line", target.name)
+    # Fallback: install each requirement on its own. `pip install -r` is
+    # all-or-nothing — one line that conflicts with the constraint (or is
+    # otherwise unsatisfiable) drops EVERY dep, which is how impact-pack lost
+    # segment-anything. Line-by-line lets the satisfiable deps through.
+    for raw in req.read_text().splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        try:
+            _run(base + [line])
+        except subprocess.CalledProcessError:
+            log.error("  skipped unsatisfiable requirement: %s (%s)", line, target.name)
 
 
 def _run(cmd: list[str], cwd: Optional[Path] = None) -> None:
