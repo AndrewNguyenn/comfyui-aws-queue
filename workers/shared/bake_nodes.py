@@ -48,6 +48,7 @@ def main(list_path: str) -> int:
     mi._force_clean_opencv()
     mi._force_transformers()
     mi._restore_torchaudio_stub()
+    mi._patch_image_metadata_extension()
 
     print(f"[bake] done — {len(entries) - len(failed)} ok, {len(failed)} failed: {failed}",
           flush=True)

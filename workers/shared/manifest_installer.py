@@ -118,6 +118,7 @@ def sync() -> dict[str, str]:
         _force_clean_opencv()
         _force_transformers()
         _restore_torchaudio_stub()
+        _patch_image_metadata_extension()
     return results
 
 
@@ -216,6 +217,37 @@ def _patch_cv2_typing() -> None:
                 log.info("patched cv2/typing DictValue reference at %s", f)
         except Exception as e:  # noqa: BLE001
             log.error("cv2 typing patch failed: %r", e)
+
+
+def _patch_image_metadata_extension() -> None:
+    """SaveImageWithMetaData (comfyui_image_metadata_extension) builds its PNG
+    metadata by introspecting ComfyUI's execution cache. This ComfyUI version
+    made that cache async (`HierarchicalCache.get` is a coroutine), which the
+    extension's capture path doesn't await → AttributeError → the exception
+    propagates out of save_images and the IMAGE NEVER SAVES.
+
+    Make metadata capture non-fatal: wrap the gen_pnginfo() call so a capture
+    failure logs and falls back to empty metadata — the image still saves."""
+    f = (CUSTOM_NODES_DIR / "comfyui_image_metadata_extension"
+         / "modules" / "nodes" / "node.py")
+    old = "pnginfo_dict = pnginfo_dict or self.gen_pnginfo(prompt, prefer_nearest)"
+    new = (
+        "try:\n"
+        "                pnginfo_dict = pnginfo_dict or self.gen_pnginfo(prompt, prefer_nearest)\n"
+        "            except Exception as _meta_e:\n"
+        "                print(f\"[image_metadata_extension] metadata capture failed:"
+        " {_meta_e!r}; saving image without captured metadata\")\n"
+        "                pnginfo_dict = pnginfo_dict or {}"
+    )
+    try:
+        if not f.is_file():
+            return
+        txt = f.read_text()
+        if old in txt and "metadata capture failed" not in txt:
+            f.write_text(txt.replace(old, new, 1))
+            log.info("patched image_metadata_extension: metadata capture is now non-fatal")
+    except Exception as e:  # noqa: BLE001
+        log.error("image_metadata_extension patch failed: %r", e)
 
 
 def _install_one(name: str, url: str, commit: Optional[str]) -> str:
