@@ -117,6 +117,7 @@ def sync() -> dict[str, str]:
     if installed_any:
         _force_clean_opencv()
         _force_transformers()
+        _restore_torchaudio_stub()
     return results
 
 
@@ -147,6 +148,33 @@ def _force_clean_opencv() -> None:
     except subprocess.CalledProcessError as e:
         log.error("opencv reinstall failed (rc=%d)", e.returncode)
     _patch_cv2_typing()
+
+
+def _restore_torchaudio_stub() -> None:
+    """ComfyUI v0.20.1 hard-imports torchaudio at startup; NGC ships none and
+    a real torchaudio wheel needs a CUDA the image lacks (libcudart.so.13) →
+    `import torchaudio` raises OSError → ComfyUI crashes on every boot. The
+    Dockerfile installs a no-op stub; custom-node installs clobber it with a
+    real torchaudio. Re-stub after installs."""
+    import sysconfig
+    try:
+        _run(["pip", "uninstall", "-y", "torchaudio"])
+    except subprocess.CalledProcessError:
+        pass
+    base = sysconfig.get_path("platlib")
+    if not base:
+        return
+    d = Path(base) / "torchaudio"
+    try:
+        if d.exists():
+            shutil.rmtree(d)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "__init__.py").write_text(
+            '"""torchaudio stub — NGC ships no torchaudio; audio workflows are '
+            'unused on the image fleet."""\n__version__ = "0.0.0-stub"\n')
+        log.info("restored torchaudio stub at %s", d)
+    except Exception as e:  # noqa: BLE001
+        log.error("torchaudio stub restore failed: %r", e)
 
 
 _TRANSFORMERS_PIN = "transformers==4.46.3"
