@@ -96,6 +96,17 @@ mount S3) but won't appear in the editor dropdown until it's cataloged. If a
 node's input is the ambiguous `model_name`, `_guess_model_type_from_input`
 disambiguates by node class (e.g. `UltralyticsDetectorProvider` → `ultralytics`).
 
+**A workflow referencing a model that isn't on the worker fails SILENTLY in a
+confusing way.** ComfyUI's `validate_prompt` drops every *output node* whose
+input tree contains the missing-model error (`value_not_in_list`) and runs
+only the still-valid output nodes — the job reports `status: success` but
+produces 0 outputs. Symptom we hit: novaAnimeXL jobs "completed" in ~9 s with
+no image because `UpscaleModelLoader` wanted `2x-AnimeSharpV4_RCAN`, absent
+from S3 → the whole upscale branch (and the `SaveImageWithMetaData` depending
+on it) was dropped, leaving only `PreviewImage`. When a job completes fast
+with 0 outputs, check every loader node's model against S3 + the catalog;
+ComfyUI `/history` `outputs` shows which nodes actually ran.
+
 ---
 
 ## Other gotchas
@@ -103,6 +114,14 @@ disambiguates by node class (e.g. `UltralyticsDetectorProvider` → `ultralytics
 - **Frontend-only nodes** (Notes, rgthree "Fast Groups Bypasser") have no
   `class_type`; ComfyUI's validator rejects the whole prompt over one.
   `comfy_client.submit_prompt` strips them before submitting.
+- **`SaveImageWithMetaData` (comfyui_image_metadata_extension) vs ComfyUI's
+  async cache.** Its metadata capture introspects ComfyUI's execution cache
+  synchronously, but this ComfyUI made `HierarchicalCache.get` a coroutine →
+  `'coroutine' object has no attribute 'outputs'` → the exception aborts
+  `save_images` and the image never saves. `workers/image/patch_metadata_ext.py`
+  (a build-verified Dockerfile step) wraps the `gen_pnginfo()` call so a
+  capture failure is non-fatal — the image saves, just without the captured
+  A1111 parameter metadata.
 - **rgthree's Seed node caps `seed` at 1125899906842624 (2^50).** Randomize
   seeds within that — a larger value fails `prompt_outputs_failed_validation`.
 - **API Gateway leaves `%2F` encoded** in `{proxy+}` greedy path params —
