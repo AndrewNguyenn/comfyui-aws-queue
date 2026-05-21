@@ -128,5 +128,12 @@ ComfyUI `/history` `outputs` shows which nodes actually ran.
   decode it (this broke userdata/workflow save+load).
 - **Worker rotation strands in-flight jobs** as zombie `running` records — when
   rotating the `comfy-image` task definition, expect to clean those up.
-- The image fleet is **g5.2xlarge only** (A10G, bf16). 8 vCPU = one worker at
-  the current us-east-1 G/VT spot quota; a 2nd needs the quota raised.
+- The image fleet runs a **mixed-instance spot ASG** across the g5 (A10G) and
+  g6 (L4) families — `g5.2xlarge` primary, then `g5.xlarge`/`g6.2xlarge`/
+  `g6.xlarge` fallbacks (`capacity-optimized-prioritized`, so g5.2xlarge is
+  preferred and the fleet only walks down during a spot drought). All four are
+  bf16-capable. The `.xlarge` sizes have 16 GB sys RAM — fine for SDXL but they
+  can't mmap 20 GB+ FLOW checkpoints, so a heavy FLOW job landing on one OOMs.
+  See `infra/lib/config.ts` for the canonical list. The us-east-1 G/VT spot
+  vCPU quota still gates how many workers run concurrently — at 8 vCPU/instance
+  that's ~1; a 2nd in-flight worker needs the quota raised.
