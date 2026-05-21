@@ -62,6 +62,12 @@ window.COMFY_CONFIG = {
       ],
       retainOnDelete: false,
       memoryLimit: 512,
+      // prune:false — the metadata/worker `extensions_publisher` uploads
+      // custom-node JS to extensions/<pack>/ at runtime. With the default
+      // prune:true, every frontend (re)deploy wipes those (only
+      // extensions/core/ ships in the build) → the editor 404s
+      // comfyui-manager.js etc. and the Manager UI disappears. Don't prune.
+      prune: false,
     });
 
     new CfnOutput(this, 'FrontendUrl', {
