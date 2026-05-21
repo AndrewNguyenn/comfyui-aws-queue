@@ -65,6 +65,16 @@
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const isVideoKey = (k) => /\.(mp4|webm|mov|gif|mkv)$/i.test(k);
   const fmtWhen = (iso) => (iso ? iso.replace("T", " ").slice(0, 16) : "");
+  // A titled prompt block for the modal info panel. The positive prompt always
+  // renders (with a muted fallback); a missing negative prompt is common
+  // (Flux/SDXL graphs often have none) so that section is simply omitted.
+  function promptSection(label, text, cls) {
+    text = (text || "").trim();
+    if (!text && cls === "neg") return "";
+    const ttl = `<div class="section-ttl">${label}</div>`;
+    if (!text) return ttl + `<div class="prompt muted">Not recorded for this generation.</div>`;
+    return ttl + `<div class="prompt ${cls}">${esc(text)}</div>`;
+  }
   function elapsed(iso) {
     if (!iso) return "";
     const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -288,6 +298,8 @@
             `<div class="field"><div class="k">Type</div><div class="v">${esc(job.type || "—")}</div></div>` +
             `<div class="field"><div class="k">Created</div><div class="v">${esc(fmtWhen(job.created_at))}</div></div>` +
             `<div class="field"><div class="k">Job</div><div class="v">${esc(job.job_id.slice(0, 8))}</div></div>` +
+            promptSection("Prompt", job.positive_prompt, "") +
+            promptSection("Negative prompt", job.negative_prompt, "neg") +
           `</div>` +
           `<div class="info-foot">` +
             `<button class="dl">Download</button>` +

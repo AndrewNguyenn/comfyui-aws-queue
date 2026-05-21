@@ -190,6 +190,14 @@ a { color:var(--pond-dk); }
   text-transform:uppercase; color:var(--ink-3); }
 .modal .field .v { font-family:var(--font-mono); font-size:11.5px; color:var(--ink);
   letter-spacing:.04em; word-break:break-word; }
+.modal .section-ttl { font-family:var(--font-ui); font-size:9px; font-weight:600;
+  letter-spacing:.22em; text-transform:uppercase; color:var(--ink-3); margin:22px 0 8px; }
+.modal .prompt { font-family:var(--font-display); font-style:italic; font-size:15px;
+  color:var(--ink); line-height:1.55; background:var(--paper-2); padding:14px;
+  border:1px solid var(--line); white-space:pre-wrap; word-break:break-word; }
+.modal .prompt.neg { color:var(--ink-2); font-size:13px; }
+.modal .prompt.muted { font-family:var(--font-ui); font-style:normal; font-size:11.5px;
+  color:var(--ink-3); }
 .modal .info-foot { padding:14px 22px; border-top:1px solid var(--line); display:flex;
   gap:8px; }
 .modal .info-foot button { font-size:10px; font-weight:600; letter-spacing:.18em;
@@ -298,6 +306,10 @@ a { color:var(--pond-dk); }
   .modal .info .close { top:10px; right:10px; width:36px; height:36px; }
   .modal .info-body { padding:14px 16px 24px; }
   .modal .field { grid-template-columns:92px 1fr; gap:12px; padding:8px 0; }
+  .modal .section-ttl { margin:18px 0 6px; }
+  .modal .prompt { font-size:14px; padding:12px; }
+  .modal .prompt.neg { font-size:12px; }
+  .modal .prompt.muted { font-size:11px; }
   .modal .info-foot { padding:10px 14px calc(10px + env(safe-area-inset-bottom));
     flex-wrap:wrap; gap:8px; }
   .modal .info-foot button { flex:1; padding:11px 10px; justify-content:center; }
