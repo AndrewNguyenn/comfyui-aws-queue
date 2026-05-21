@@ -339,13 +339,42 @@ def _extract_params(wf: dict) -> dict:
     return params
 
 
-def _list_jobs(event: dict) -> dict:
-    """GET /jobs?status=completed,failed,cancelled&limit=64&offset=0
+def _query_newest(status: str, n: int) -> list:
+    """The `n` newest job records in `status`, via the status-index GSI.
 
-    Editor's new queue/history menu paginates by status. We Query the
-    status-index GSI once per requested status, merge results, sort by
-    created_at desc, then apply offset/limit in Python. Volume is small
-    (1 user, ~120 jobs/day) so the per-status Query is fine.
+    A single DynamoDB Query returns only one ~1 MB page — and because each job
+    record carries the full workflow_json, that page can hold far fewer than
+    `n` items (≈50). This is the bug that hid every generation past the newest
+    ~50: the query was issued once and never followed past the first page. So
+    here we page through LastEvaluatedKey until we have `n` items or the
+    status is exhausted."""
+    items: list = []
+    kwargs: dict = {}
+    while len(items) < n:
+        r = ddb.query(
+            TableName=JOBS_TABLE,
+            IndexName="status-index",
+            KeyConditionExpression="#s = :s",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":s": {"S": status}},
+            ScanIndexForward=False,  # newest (highest created_at) first
+            Limit=n - len(items),
+            **kwargs,
+        )
+        items.extend(r.get("Items", []))
+        lek = r.get("LastEvaluatedKey")
+        if not lek:
+            break
+        kwargs["ExclusiveStartKey"] = lek
+    return items[:n]
+
+
+def _list_jobs(event: dict) -> dict:
+    """GET /jobs?status=complete,failed,cancelled&limit=64&offset=0
+
+    Queries the status-index GSI (paginated — see _query_newest) once per
+    requested status, merges, sorts by completion time newest-first, then
+    applies offset/limit in Python.
     """
     qs = event.get("queryStringParameters") or {}
     statuses = [s.strip() for s in (qs.get("status") or "").split(",") if s.strip()]
@@ -364,23 +393,31 @@ def _list_jobs(event: dict) -> dict:
     except ValueError:
         offset = 0
 
+    # Each status contributes its newest (offset+limit) records by created_at
+    # (the GSI sort key); the merge is then re-sorted by completed_at. The page
+    # is exact whenever each status fits within offset+limit rows — true for
+    # the gallery (limit=500, ~128 complete jobs). If a status ever exceeds
+    # that, a job created early but completed late could fall just outside the
+    # fetched window; acceptable best-effort until volume warrants real paging.
     items: list[dict] = []
     for status in statuses:
-        r = ddb.query(
-            TableName=JOBS_TABLE,
-            IndexName="status-index",
-            KeyConditionExpression="#s = :s",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":s": {"S": status}},
-            ScanIndexForward=False,  # newest first
-            Limit=offset + limit,
-        )
-        items.extend(r.get("Items", []))
+        items.extend(_query_newest(status, offset + limit))
 
-    items.sort(key=lambda it: it.get("created_at", {}).get("S", ""), reverse=True)
+    # Sort by completion time — the worker stamps completed_at right after it
+    # uploads the outputs to S3, so it is the closest proxy to "S3 insert time"
+    # without a HeadObject per image. Fall back to created_at for records with
+    # no completed_at (still queued/running, or an older failed record).
+    items.sort(
+        key=lambda it: (it.get("completed_at", {}).get("S", "")
+                        or it.get("created_at", {}).get("S", "")),
+        reverse=True,
+    )
     page = items[offset : offset + limit]
 
     jobs = [_serialize_job(it) for it in page]
+    # `total` is the size of the fetched candidate pool (capped per status at
+    # offset+limit), not a true count of all matching jobs. Fine for the
+    # current callers — none of them page on it.
     return _resp(200, {"jobs": jobs, "limit": limit, "offset": offset, "total": len(items)})
 
 
