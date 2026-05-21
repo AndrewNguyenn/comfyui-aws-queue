@@ -114,6 +114,10 @@ def main() -> int:
     comfy.start()
     comfy.wait_for_ready(timeout_seconds=180)
 
+    # ComfyUI HTTP client — used for object_info AND for submitting every job
+    # below, so it must always be created (not just when publishing).
+    client = ComfyClient(comfy.base_url)
+
     # Publish /object_info + JS extensions to the frontend — ONLY for fleets
     # without a dedicated metadata instance. The image fleet has the always-on
     # metadata instance as the canonical publisher: it runs full-time with
@@ -124,7 +128,6 @@ def main() -> int:
     # (the worker still *installs* every manifest node, so it can run jobs);
     # video workers (no metadata box) keep publishing.
     if FLEET != "image":
-        client = ComfyClient(comfy.base_url)
         try:
             oi = client.fetch_object_info()
             publish_object_info(FLEET, oi)

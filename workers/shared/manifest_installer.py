@@ -124,13 +124,44 @@ def _install_one(name: str, url: str, commit: Optional[str]) -> str:
     return "installed"
 
 
+def _constraints_file() -> Optional[str]:
+    """Pin the foundational packages at their image-shipped versions so a
+    custom node's requirements.txt cannot upgrade/downgrade them. A node that
+    pulled a different numpy used to break the WHOLE environment ('numpy.core
+    .multiarray failed to import' → every torch/numpy node IMPORT FAILED);
+    with a constraint that node simply doesn't get its way instead of taking
+    everything down."""
+    cache = getattr(_constraints_file, "_cache", "unset")
+    if cache != "unset":
+        return cache  # type: ignore[return-value]
+    import importlib.metadata as md
+    lines = []
+    for pkg in ("numpy", "torch", "torchvision", "torchaudio"):
+        try:
+            lines.append(f"{pkg}=={md.version(pkg)}")
+        except Exception:  # noqa: BLE001
+            pass
+    path: Optional[str] = None
+    if lines:
+        path = "/tmp/comfy-pip-constraints.txt"
+        Path(path).write_text("\n".join(lines) + "\n")
+        log.info("pip constraints: %s", ", ".join(lines))
+    _constraints_file._cache = path  # type: ignore[attr-defined]
+    return path
+
+
 def _pip_install_requirements(target: Path) -> None:
     req = target / "requirements.txt"
     if not req.is_file():
         return
     log.info("pip install -r %s", req)
+    cmd = ["pip", "install", "--no-input"]
+    constraints = _constraints_file()
+    if constraints:
+        cmd += ["--constraint", constraints]
+    cmd += ["-r", str(req)]
     try:
-        _run(["pip", "install", "--no-input", "-r", str(req)])
+        _run(cmd)
     except subprocess.CalledProcessError as e:
         log.error("pip install failed for %s (rc=%d). Continuing.", target.name, e.returncode)
 
