@@ -384,23 +384,14 @@ def _list_jobs(event: dict) -> dict:
     return _resp(200, {"jobs": jobs, "limit": limit, "offset": offset, "total": len(items)})
 
 
-# GPU instance type by fleet. The image fleet is g5.2xlarge-only — no
-# fallback types (infra/lib/config.ts) — so an image job's instance type is
-# known without the worker reporting it. The video fleet uses mixed spot
-# types, so a video job is left blank here unless a worker recorded the
-# actual type on the job record (`instance_type` attribute).
-_FLEET_INSTANCE_TYPE = {"image": "g5.2xlarge"}
-
-
 def _serialize_job(it: dict) -> dict:
     """Shape a raw DDB job item into the API job object. `model`, the prompt
     sections and the generation params are all derived on the fly from the
     stored `workflow_json` (the job record itself never carries them)."""
     wf = _parse_workflow(it.get("workflow_json", {}).get("S", ""))
-    job_type = it.get("type", {"S": ""})["S"]
     return {
         "job_id": it["job_id"]["S"],
-        "type": job_type,
+        "type": it.get("type", {"S": ""})["S"],
         "status": it.get("status", {"S": ""})["S"],
         "created_at": it.get("created_at", {"S": ""})["S"],
         "started_at": it.get("started_at", {"S": ""})["S"],
@@ -413,11 +404,11 @@ def _serialize_job(it: dict) -> dict:
         "prompts": _extract_prompts(wf),
         "params": _extract_params(wf),
         "progress": it.get("progress", {}).get("S", ""),
-        # The GPU instance type running this job — the worker's recorded value
-        # if it has one, else the fleet default (exact for image, blank for
-        # the mixed-type video fleet).
-        "instance_type": (it.get("instance_type", {}).get("S", "")
-                          or _FLEET_INSTANCE_TYPE.get(job_type, "")),
+        # The GPU instance type the worker recorded when it claimed the job.
+        # Both fleets run mixed instance types (a spot-capacity ASG), so this
+        # is only accurate from the worker — blank on jobs claimed before the
+        # worker started reporting it.
+        "instance_type": it.get("instance_type", {}).get("S", ""),
         # True once a cancel has been requested on a still-running job — lets
         # the viewer keep the row in a "cancelling" state until the worker
         # actually stops it (a running cancel is not instantaneous).

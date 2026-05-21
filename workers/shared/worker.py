@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import boto3
+import urllib3
 
 # Model files appear under /opt/comfy/models/<type>/ via mount-s3 (see
 # workers/image/entrypoint.sh). No download path needed here.
@@ -65,9 +66,41 @@ COMFY_OUTPUT_DIR = Path("/opt/comfy/output")
 sqs = boto3.client("sqs", region_name=REGION)
 ddb = boto3.client("dynamodb", region_name=REGION)
 
+_IMDS = "http://169.254.169.254/latest"
+_imds_http = urllib3.PoolManager(timeout=urllib3.Timeout(connect=1.0, read=2.0))
+
+
+def _fetch_instance_type() -> str:
+    """This worker's EC2 instance type via IMDSv2, or '' if unavailable.
+
+    Both GPU fleets run a spot-capacity ASG spanning several instance types
+    (g5/g6 .xlarge/.2xlarge), so the type is only knowable from the instance
+    itself — there is no fleet-wide constant. Best-effort: a lookup failure
+    just means the job carries no instance_type."""
+    try:
+        tok = _imds_http.request(
+            "PUT", f"{_IMDS}/api/token",
+            headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"},
+        )
+        if tok.status != 200:
+            return ""
+        r = _imds_http.request(
+            "GET", f"{_IMDS}/meta-data/instance-type",
+            headers={"X-aws-ec2-metadata-token": tok.data.decode().strip()},
+        )
+        return r.data.decode().strip() if r.status == 200 else ""
+    except Exception:  # noqa: BLE001
+        log.exception("instance-type lookup failed (non-fatal)")
+        return ""
+
 
 def main() -> int:
     log.info("worker starting: fleet=%s, queue=%s", FLEET, QUEUE_URL)
+
+    # This worker's GPU instance type — recorded on each job it claims so the
+    # viewer can show what hardware a generation is running on.
+    instance_type = _fetch_instance_type()
+    log.info("worker instance type: %s", instance_type or "(unknown)")
 
     # Install custom nodes from the S3 manifest BEFORE starting ComfyUI so
     # they register on the first /object_info publish. This is what makes
@@ -195,7 +228,7 @@ def main() -> int:
             # if a cancel landed in the gap between the dequeue check above and
             # here, the job is "cancelled" and the claim fails — skip it rather
             # than running (and overwriting) a job the user already cancelled.
-            if not _claim_job(job_id):
+            if not _claim_job(job_id, instance_type):
                 log.info("job %s no longer queued (cancelled or claimed elsewhere); skipping", job_id)
                 continue
 
@@ -315,8 +348,9 @@ def _read_job(job_id: str) -> dict | None:
     }
 
 
-def _claim_job(job_id: str) -> bool:
-    """Atomically transition the job queued → running and stamp started_at.
+def _claim_job(job_id: str, instance_type: str = "") -> bool:
+    """Atomically transition the job queued → running and stamp started_at
+    (and the worker's instance_type, when known).
 
     Conditional on the job still being "queued": returns False if it was
     cancelled or claimed by another worker in the meantime, so the caller
@@ -326,18 +360,23 @@ def _claim_job(job_id: str) -> bool:
     clean slate — without this, a job re-queued after a spot interruption
     (status reverts to "queued", message redelivers) would still carry the
     flag and the new worker's cancel-watch would interrupt it immediately."""
+    sets = ["#s = :running", "started_at = :t"]
+    values = {
+        ":running": {"S": "running"},
+        ":queued": {"S": "queued"},
+        ":t": {"S": datetime.now(timezone.utc).isoformat()},
+    }
+    if instance_type:
+        sets.append("instance_type = :it")
+        values[":it"] = {"S": instance_type}
     try:
         ddb.update_item(
             TableName=JOBS_TABLE,
             Key={"job_id": {"S": job_id}},
-            UpdateExpression="SET #s = :running, started_at = :t REMOVE cancel_requested",
+            UpdateExpression="SET " + ", ".join(sets) + " REMOVE cancel_requested",
             ConditionExpression="#s = :queued",
             ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={
-                ":running": {"S": "running"},
-                ":queued": {"S": "queued"},
-                ":t": {"S": datetime.now(timezone.utc).isoformat()},
-            },
+            ExpressionAttributeValues=values,
         )
         return True
     except ddb.exceptions.ConditionalCheckFailedException:
