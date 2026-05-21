@@ -52,19 +52,63 @@ echo "  syncing custom nodes from manifest..."
 ( cd /opt/worker && python -m manifest_installer 2>&1 ) || \
   echo "  WARN: manifest_installer exited non-zero (continuing)"
 
-# Start ComfyUI in the background, CPU mode, listening on 0.0.0.0 so that
-# external traffic DNAT'd through docker's iptables PREROUTING rules
-# (host:8188 -> container 172.17.0.2:8188) is actually accepted. With
-# --listen 127.0.0.1 ComfyUI only accepts container loopback, breaking
-# API GW HTTP_PROXY proxying.
-cd /opt/comfy
-python main.py --listen 0.0.0.0 --port 8188 --cpu &
-COMFY_PID=$!
-echo "  comfy pid=$COMFY_PID"
+# ---- nginx auth gate ----------------------------------------------------
+# ComfyUI binds 127.0.0.1:8189 (loopback only); nginx listens on 0.0.0.0:8188
+# (the public port) and forwards to ComfyUI ONLY for requests carrying the
+# correct X-Comfy-Auth header — everything else gets 403. This is what stops
+# the internet-facing 8188 from being an open ComfyUI / ComfyUI-Manager RCE
+# surface. The dispatcher Lambda holds the same secret and sends the header.
+echo "  fetching X-Comfy-Auth secret..."
+COMFY_AUTH=$(python - <<'PY' 2>/dev/null || true
+import os, boto3
+print(boto3.client("secretsmanager", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+      .get_secret_value(SecretId="comfy/metadata-auth")["SecretString"], end="")
+PY
+)
+if [ -z "${COMFY_AUTH}" ]; then
+  # Fail CLOSED: an unguessable value so nginx denies everything rather than
+  # exposing ComfyUI. The dispatcher's real secret won't match (editor proxy
+  # degrades), but the box is never left an open RCE target.
+  COMFY_AUTH="UNSET-$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  echo "  WARN: could not fetch comfy/metadata-auth — nginx fails CLOSED"
+else
+  echo "  got X-Comfy-Auth secret (${#COMFY_AUTH} chars)"
+fi
 
-# Wait for /system_stats to respond (means ComfyUI is ready).
+cat > /etc/nginx/conf.d/comfy-auth.conf <<NGINX
+map \$http_upgrade \$connection_upgrade { default upgrade; '' close; }
+server {
+    listen 8188 default_server;
+    client_max_body_size 100M;
+    location / {
+        if (\$http_x_comfy_auth != "${COMFY_AUTH}") { return 403; }
+        proxy_pass http://127.0.0.1:8189;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+}
+NGINX
+rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf 2>/dev/null || true
+nginx -t 2>&1 && nginx 2>&1 && echo "  nginx auth gate up :8188 -> ComfyUI 127.0.0.1:8189" \
+  || echo "  WARN: nginx auth gate failed to start"
+
+# Start ComfyUI in the background, CPU mode, bound to LOOPBACK only. The nginx
+# gate above is the sole thing that talks to it; binding 127.0.0.1 means
+# nothing outside the container can reach raw ComfyUI even if the gate were
+# misconfigured. ComfyUI :8189, nginx :8188.
+cd /opt/comfy
+python main.py --listen 127.0.0.1 --port 8189 --cpu &
+COMFY_PID=$!
+echo "  comfy pid=$COMFY_PID (127.0.0.1:8189, behind nginx)"
+
+# Wait for /system_stats to respond (means ComfyUI is ready). Hit ComfyUI
+# directly on 8189 — bypassing the nginx gate, which would 403 this curl.
 for i in $(seq 1 60); do
-  if curl -sf http://127.0.0.1:8188/system_stats >/dev/null 2>&1; then
+  if curl -sf http://127.0.0.1:8189/system_stats >/dev/null 2>&1; then
     echo "  comfy ready"
     break
   fi
@@ -83,7 +127,7 @@ from extensions_publisher import publish_extensions
 import os
 
 fleet = os.environ.get("FLEET", "image")  # Use 'image' so the merged /object_info works
-client = ComfyClient("http://127.0.0.1:8188")
+client = ComfyClient("http://127.0.0.1:8189")  # ComfyUI direct; nginx gate is :8188
 try:
     oi = client.fetch_object_info()
     print(f"  fetched object_info: {len(oi)} node classes")

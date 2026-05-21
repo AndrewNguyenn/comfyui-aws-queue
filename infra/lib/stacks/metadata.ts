@@ -86,6 +86,9 @@ export class MetadataStack extends Stack {
       actions: ['logs:CreateLogStream', 'logs:CreateLogGroup', 'logs:PutLogEvents', 'logs:DescribeLogStreams'],
       resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/comfy/*`],
     }));
+    // Read the shared X-Comfy-Auth secret — entrypoint.sh fetches it at boot
+    // and bakes it into the in-container nginx config that gates ComfyUI.
+    storage.metadataAuthSecret.grantRead(role);
 
     // ----- Look up shared SSM values -----
     const dispatcherApiUrl = ssm.StringParameter.valueForStringParameter(this, '/comfy/api/url');
@@ -131,16 +134,21 @@ export class MetadataStack extends Stack {
           ${ecrUri}:latest`,
     );
 
-    // Dedicated SG for metadata instance: allow inbound 8188 from anywhere.
-    // Why public: API Gateway HTTP_PROXY integrations can't reach private IPs
-    // without VPC Link (NLB + LCU costs ~$20/mo); 0.0.0.0/0 keeps it free.
-    // Cognito auth at API GW is the primary gate. Direct access to the
-    // metadata instance bypass Cognito, but the only sensitive endpoint is
-    // /customnode/install (could pip-install arbitrary packages on a $15/mo
-    // metadata box — acceptable risk for 1-user personal project).
+    // Dedicated SG for metadata instance: 8188 inbound from anywhere.
+    // The non-VPC dispatcher Lambda can only reach this instance over its
+    // public IP, so 8188 must be internet-facing. It is NOT raw ComfyUI:
+    // an in-container nginx (see metadata/entrypoint.sh) listens on 8188 and
+    // requires the X-Comfy-Auth shared secret — every request without it
+    // gets 403. ComfyUI itself binds 127.0.0.1:8189, unreachable from
+    // outside the container. So an internet scan of <eip>:8188 hits only the
+    // auth gate, not ComfyUI/ComfyUI-Manager. (Keeping 8188 public avoids
+    // ~$29/mo of VPC interface endpoints that fully private routing needs.)
     const metadataSg = new ec2.SecurityGroup(this, 'MetadataSg', {
       vpc: network.vpc,
       securityGroupName: `${props.config.projectName}-metadata-sg`,
+      // NOTE: GroupDescription is immutable — editing it forces an SG
+      // replacement (which collides with the explicit name). Leave as-is;
+      // the accurate description of the design is in the comment above.
       description: 'Metadata instance: inbound 8188 from anywhere (for API GW HTTP_PROXY)',
       allowAllOutbound: true,
     });

@@ -104,6 +104,9 @@ export class ApiStack extends Stack {
     // /ws-ticket needs to read the HMAC secret to sign tickets.
     storage.wsTicketSecret.grantRead(this.dispatcherFn);
     this.dispatcherFn.addEnvironment('WS_TICKET_SECRET_ARN', storage.wsTicketSecret.secretArn);
+    // X-Comfy-Auth secret — sent on every proxied request to the metadata
+    // instance so the in-container nginx gate lets the dispatcher through.
+    storage.metadataAuthSecret.grantRead(this.dispatcherFn);
     this.dispatcherFn.addEnvironment('WS_API_ENDPOINT', props.websocket.wsStage.url);
 
     // ----- Lambda: EditorCompat -----
@@ -124,6 +127,9 @@ export class ApiStack extends Stack {
     storage.outputsBucket.grantReadWrite(this.editorCompatFn);
     queue.imageJobsQueue.grantSendMessages(this.editorCompatFn); // not used but cheaper than conditional env
     queue.videoJobsQueue.grantSendMessages(this.editorCompatFn);
+    // EditorCompat shares the dispatcher code, including _proxy_to_metadata —
+    // it also needs the X-Comfy-Auth secret for the nginx gate.
+    storage.metadataAuthSecret.grantRead(this.editorCompatFn);
 
     // ----- Lambda: Status -----
     this.statusFn = new lambda.Function(this, 'StatusFn', {

@@ -21,7 +21,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git curl ca-certificates \
         libgl1 libglib2.0-0 \
+        nginx-light \
     && rm -rf /var/lib/apt/lists/*
+
+# entrypoint.sh runs nginx as an auth gate in front of ComfyUI: it listens on
+# 8188 (the public port) and 403s any request lacking the X-Comfy-Auth shared
+# secret. ComfyUI itself binds 127.0.0.1:8189, unreachable from outside.
 
 # CPU-only torch — way smaller than CUDA torch (~200 MB vs ~1 GB).
 RUN pip install --index-url https://download.pytorch.org/whl/cpu \

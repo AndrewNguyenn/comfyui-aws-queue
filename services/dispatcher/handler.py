@@ -587,6 +587,27 @@ def _get_metadata_url() -> str:
         return ""
 
 
+_metadata_auth_cache: Optional[str] = None  # type: ignore[name-defined]
+
+
+def _get_metadata_auth() -> str:
+    """Shared secret for the metadata instance's nginx X-Comfy-Auth gate.
+
+    The metadata box is on a public IP; an in-container nginx 403s any
+    request to :8188 lacking this header. Cached for the Lambda container's
+    life (the secret is static)."""
+    global _metadata_auth_cache
+    if _metadata_auth_cache:
+        return _metadata_auth_cache
+    try:
+        r = sm.get_secret_value(SecretId="comfy/metadata-auth")
+        _metadata_auth_cache = r["SecretString"]
+        return _metadata_auth_cache
+    except Exception as e:  # noqa: BLE001
+        print(f"failed to fetch metadata auth secret: {e!r}")
+        return ""
+
+
 def _manager_reboot() -> dict:
     """Restart the metadata container in response to the editor's Manager
     'Restart' button (POST /manager/reboot).
@@ -639,6 +660,12 @@ def _proxy_to_metadata(event: dict, _base: str, timeout: int = 8) -> dict:
     body = event.get("body") or ""
     body_bytes = body.encode() if body else None
     headers = {"Content-Type": event.get("headers", {}).get("Content-Type", "application/json")}
+    # Authenticate to the metadata instance's nginx gate. Without this header
+    # the request is 403'd — that gate is what keeps the public 8188 from
+    # being an open ComfyUI / ComfyUI-Manager RCE surface.
+    auth = _get_metadata_auth()
+    if auth:
+        headers["X-Comfy-Auth"] = auth
 
     req = urllib.request.Request(target_url, data=body_bytes, method=method, headers=headers)
     try:

@@ -36,6 +36,7 @@ export class StorageStack extends Stack {
   public readonly objectInfoTable: dynamodb.Table;
   public readonly civitaiTokenSecret: secretsmanager.Secret;
   public readonly wsTicketSecret: secretsmanager.Secret;
+  public readonly metadataAuthSecret: secretsmanager.Secret;
 
   constructor(scope: Construct, id: string, props: StorageStackProps) {
     super(scope, id, props);
@@ -234,6 +235,25 @@ export class StorageStack extends Stack {
       generateSecretString: {
         excludePunctuation: true,
         passwordLength: 64,
+      },
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+
+    // Shared secret authenticating the dispatcher Lambda to the metadata
+    // instance's ComfyUI. The metadata instance sits on a public IP with
+    // 8188 open 0.0.0.0/0 (the non-VPC dispatcher can only reach it over the
+    // internet). An in-container nginx requires this value in the
+    // X-Comfy-Auth header and 403s everything else — so an internet scan of
+    // <eip>:8188 can't reach ComfyUI or ComfyUI-Manager (an RCE surface).
+    // Fetched by both metadata/entrypoint.sh and the dispatcher by the fixed
+    // name below. RETAIN so the value survives stack churn.
+    this.metadataAuthSecret = new secretsmanager.Secret(this, 'MetadataAuthSecret', {
+      secretName: 'comfy/metadata-auth',
+      description:
+        'Shared secret: dispatcher Lambda -> metadata instance ComfyUI (X-Comfy-Auth header)',
+      generateSecretString: {
+        excludePunctuation: true,
+        passwordLength: 48,
       },
       removalPolicy: RemovalPolicy.RETAIN,
     });
