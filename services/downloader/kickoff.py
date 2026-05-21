@@ -51,6 +51,7 @@ ALLOWED_TYPES = (
     "model_patches",     # → models/model_patches
     "unet",              # → models/unet — deprecated alias for diffusion_models
     "ultralytics",       # → models/ultralytics — Impact-Pack detector models
+    "sams",              # → models/sams — Segment Anything models (FaceDetailer)
 )
 DOWNLOAD_TTL = timedelta(hours=24)
 

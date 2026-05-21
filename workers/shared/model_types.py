@@ -38,6 +38,9 @@ TYPE_DIR: dict[str, str] = {
     # Impact-Pack / Impact-Subpack detector models (face_yolov8m-seg etc.).
     # ComfyUI reads models/ultralytics/{bbox,segm}/.
     "ultralytics": "ultralytics",
+    # Segment Anything models (sam_vit_*) — Impact-Pack's SAMLoader reads
+    # models/sams/.
+    "sams": "sams",
 }
 
 
