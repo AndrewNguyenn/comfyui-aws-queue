@@ -52,6 +52,8 @@ ALLOWED_TYPES = (
     "unet",              # → models/unet — deprecated alias for diffusion_models
     "ultralytics",       # → models/ultralytics — Impact-Pack detector models
     "sams",              # → models/sams — Segment Anything models (FaceDetailer)
+    "ipadapter",         # → models/ipadapter — IPAdapter model weights
+    "insightface",       # → models/insightface — InsightFace face-analysis sets (FaceID)
 )
 DOWNLOAD_TTL = timedelta(hours=24)
 

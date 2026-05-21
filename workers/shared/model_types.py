@@ -41,6 +41,13 @@ TYPE_DIR: dict[str, str] = {
     # Segment Anything models (sam_vit_*) — Impact-Pack's SAMLoader reads
     # models/sams/.
     "sams": "sams",
+    # IPAdapter model weights (ip-adapter-*.safetensors/.bin) — ComfyUI_IPAdapter_plus
+    # reads models/ipadapter/.
+    "ipadapter": "ipadapter",
+    # InsightFace face-analysis model sets (buffalo_l etc.) — IPAdapter FaceID
+    # nodes load these from models/insightface/. The buffalo_l set lives at
+    # models/insightface/models/buffalo_l/.
+    "insightface": "insightface",
 }
 
 
