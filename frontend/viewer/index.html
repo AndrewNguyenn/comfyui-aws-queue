@@ -126,6 +126,14 @@ a { color:var(--pond-dk); }
   font-weight:600; letter-spacing:.22em; text-transform:uppercase; color:var(--ink-3);
   margin-bottom:2px; }
 .pq-row.queued .pq-eta { color:var(--ink-3); }
+/* Failed row — a maple stamp, the error spanning the meter+eta columns. */
+.pq-row.failed { background:rgba(181,97,74,.055); }
+.pq-row.failed .pq-stamp { color:var(--maple); }
+.pq-row.failed .pq-act { opacity:1; }
+.pq-err { grid-column:3 / 5; font-family:var(--font-mono); font-size:10.5px;
+  color:var(--maple); letter-spacing:.02em; white-space:nowrap; overflow:hidden;
+  text-overflow:ellipsis; min-width:0; }
+.pending-hd .summary .failnote { color:var(--maple); font-style:normal; }
 /* Cancel / remove action — on every row. Maple on hover. */
 .pq-act { width:28px; height:28px; display:flex; align-items:center;
   justify-content:center; border:1px solid var(--line); color:var(--ink-3); opacity:0;
@@ -349,6 +357,7 @@ a { color:var(--pond-dk); }
   .pq-meter { grid-area:meter; }
   .pq-eta { grid-area:eta; font-size:10px; }
   .pq-act { grid-area:act; opacity:1; }
+  .pq-err { grid-area:meter; white-space:normal; }
   .pq-row.running .pq-eta .step { font-size:8.5px; letter-spacing:.18em; }
   .pq-row.queued .pq-meter { display:none; }
   .pq-row.queued { grid-template-areas:"stamp name eta act"; }

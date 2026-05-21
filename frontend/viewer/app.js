@@ -211,12 +211,39 @@
   /* ---------- pending workflows panel ----------
      The running job is featured with a live progress meter; the queue is
      collapsed to one row per model (consecutive same-model jobs read as one
-     batched intent). Every row carries a cancel (×) action. */
+     batched intent). Recently-failed jobs surface as a maple FAILED row.
+     Every row carries a cancel / dismiss (×) action. */
   let lastPendingIds = null;
   let pendCollapsed = false;   // Hide/Show toggle
   let pendShowAll = false;     // "+ N more queued" reveal
   let pendGroups = [];         // queue groups for the current render (wired below)
   const cancelling = new Set(); // job_ids the user has cancelled, awaiting feed drop
+
+  // Failure tracking. `failedSeen` is the failed job_ids observed as of the
+  // previous poll — the toast is a live alert, so the first poll baselines it
+  // silently and only later polls toast. `failedDismissed` (localStorage) is
+  // failures the user has cleared from the panel; it survives reloads.
+  const RECENT_FAIL_MS = 2 * 3600 * 1000; // a failure is "recent" for 2h
+  const ROW_COLLAPSE_MS = 260;            // matches the pq-collapse CSS animation
+  const FAIL_DISMISS_KEY = "viewer.faildismiss";
+  let failedSeen = null;
+  // job_id → dismissed-at epoch ms. Keyed by time so it self-prunes: an entry
+  // is dropped once it outlives the recency window (past that the row it
+  // hides can't render anyway), which keeps localStorage bounded.
+  let failedDismissed = (() => {
+    try {
+      const v = JSON.parse(localStorage.getItem(FAIL_DISMISS_KEY) || "{}");
+      return (v && typeof v === "object" && !Array.isArray(v)) ? v : {};
+    } catch (_e) { return {}; }
+  })();
+  function persistDismissed() {
+    try { localStorage.setItem(FAIL_DISMISS_KEY, JSON.stringify(failedDismissed)); }
+    catch (_e) { /* storage full / disabled — dismissal just won't persist */ }
+  }
+  const failMsg = (j) => {
+    const e = (j.error || "Unknown error.").trim();
+    return e.length > 90 ? e.slice(0, 89) + "…" : e;
+  };
 
   // Collapse consecutive same-(type, model) queued jobs into one ledger row.
   // `oldest` is kept as an ISO created_at string — ISO timestamps sort
@@ -306,8 +333,23 @@
     `</div>`;
   }
 
-  function buildPendingHtml(running, queued) {
-    if (!running.length && !queued.length) {
+  function failedRow(j) {
+    const isVid = j.type === "video";
+    const model = j.model || j.type || "job";
+    const err = (j.error || "Unknown error.").trim();
+    return `<div class="pq-row failed">` +
+      `<div class="pq-stamp">Failed</div>` +
+      `<div class="pq-name">` +
+        `<span class="kindchip ${isVid ? "vid" : "img"}">${isVid ? "Vid" : "Img"}</span>` +
+        `<span class="model" title="${esc(model)}">${esc(model)}</span></div>` +
+      `<div class="pq-err" title="${esc(err)}">${esc(failMsg(j))}</div>` +
+      `<button class="pq-act" data-act="dismiss-fail" data-id="${esc(j.job_id)}"` +
+        ` aria-label="Dismiss" title="Dismiss">${SVG_CLOSE}</button>` +
+    `</div>`;
+  }
+
+  function buildPendingHtml(running, queued, failed) {
+    if (!running.length && !queued.length && !failed.length) {
       pendGroups = [];
       return `<section class="pending"><header class="pending-hd"><div class="lhs">` +
         `<span class="eyebrow">Pending</span>` +
@@ -325,6 +367,9 @@
     const eta = pendingEta(running, queued.length);
     const summary =
       `${queued.length} in queue<span class="sep">·</span>${running.length} running` +
+      (failed.length
+        ? `<span class="sep">·</span><span class="failnote">${failed.length} failed</span>`
+        : "") +
       (eta ? `<span class="eta">~${esc(eta)} remaining</span>` : "");
 
     const longestWait = groups.reduce(
@@ -347,6 +392,7 @@
           `<button class="collapse" data-act="collapse">` +
           `${pendCollapsed ? "Show" : "Hide"}</button></div></header>` +
       `<div class="pending-body">` +
+        failed.map(failedRow).join("") +
         running.map(runningRow).join("") +
         visible.map(queuedRow).join("") +
       `</div>${foot}</section>`;
@@ -386,7 +432,18 @@
       failed.forEach((id) => cancelling.delete(id));
       showToast("Couldn't cancel — try again.");
     }
-    setTimeout(renderPending, rowEl ? 260 : 0);
+    setTimeout(renderPending, rowEl ? ROW_COLLAPSE_MS : 0);
+  }
+
+  // Dismiss a failed row — collapse it out, then remember the id so it stays
+  // gone across re-renders and reloads.
+  function dismissFailed(jobId, rowEl) {
+    if (rowEl) rowEl.classList.add("removing");
+    setTimeout(() => {
+      failedDismissed[jobId] = Date.now();
+      persistDismissed();
+      renderPending();
+    }, rowEl ? ROW_COLLAPSE_MS : 0);
   }
 
   function wirePending() {
@@ -403,13 +460,22 @@
         if (g) cancelGroup(g, btn.closest(".pq-row"));
       };
     });
+    pending.querySelectorAll('[data-act="dismiss-fail"]').forEach((btn) => {
+      btn.onclick = () => dismissFailed(btn.dataset.id, btn.closest(".pq-row"));
+    });
   }
+
+  // A failure is "recent" if it started within RECENT_FAIL_MS. The worker
+  // doesn't stamp completed_at on failure, so started_at is the freshest time
+  // a failed job carries (image jobs run ~1-2 min, so it's close enough).
+  const failRecent = (j) =>
+    Date.now() - new Date(j.started_at || j.created_at).getTime() < RECENT_FAIL_MS;
 
   async function renderPending() {
     if (!(await ensureAuth())) return;
     let jobs;
     try {
-      const r = await authedFetch(`/jobs?status=queued,running&limit=50`);
+      const r = await authedFetch(`/jobs?status=queued,running,failed&limit=100`);
       if (!r.ok) return;
       jobs = (await r.json()).jobs || [];
     } catch (_e) { return; }
@@ -425,7 +491,38 @@
       .filter((j) => j.status === "queued" && !cancelling.has(j.job_id))
       .sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
 
-    pending.innerHTML = buildPendingHtml(running, queued);
+    const failedAll = jobs.filter((j) => j.status === "failed");
+    // Toast genuinely new failures. The toast is a *live* alert — for a
+    // failure that happens while the viewer is open. The first poll baselines
+    // failedSeen silently: pre-existing failures (however recent) surface as
+    // panel rows, not toasts, and aren't re-toasted on reload. failedSeen is
+    // reset to the current feed each poll, so it stays bounded.
+    if (failedSeen !== null) {
+      const fresh = failedAll.filter(
+        (j) => !failedSeen.has(j.job_id) && failRecent(j));
+      if (fresh.length === 1) {
+        showToast(`Workflow failed — ${fresh[0].model || fresh[0].type || "job"}: ${failMsg(fresh[0])}`);
+      } else if (fresh.length > 1) {
+        showToast(`${fresh.length} workflows failed.`);
+      }
+    }
+    failedSeen = new Set(failedAll.map((j) => j.job_id));
+    // Drop dismissed entries older than the recency window — past that the
+    // row can't render anyway, so the entry is dead weight.
+    let pruned = false;
+    for (const id of Object.keys(failedDismissed)) {
+      if (Date.now() - failedDismissed[id] > RECENT_FAIL_MS) {
+        delete failedDismissed[id]; pruned = true;
+      }
+    }
+    if (pruned) persistDismissed();
+    // Panel shows recent, undismissed failures (newest first).
+    const failed = failedAll
+      .filter((j) => failRecent(j) && !failedDismissed[j.job_id])
+      .sort((a, b) => (b.started_at || b.created_at || "")
+        .localeCompare(a.started_at || a.created_at || ""));
+
+    pending.innerHTML = buildPendingHtml(running, queued, failed);
     wirePending();
 
     // A job leaving the queue (likely) finished — refresh the gallery.
