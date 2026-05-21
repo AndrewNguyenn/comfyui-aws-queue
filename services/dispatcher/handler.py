@@ -42,6 +42,7 @@ MODELS_TABLE = os.environ["MODELS_TABLE"]
 OBJECT_INFO_TABLE = os.environ["OBJECT_INFO_TABLE"]
 IMAGE_QUEUE_URL = os.environ["IMAGE_QUEUE_URL"]
 VIDEO_QUEUE_URL = os.environ["VIDEO_QUEUE_URL"]
+REAPER_QUEUE_URL = os.environ.get("REAPER_QUEUE_URL", "")  # zombie-sweeper wake queue
 OUTPUTS_BUCKET = os.environ.get("OUTPUTS_BUCKET", "")  # Storage for userdata + settings
 WS_TICKET_SECRET_ARN = os.environ.get("WS_TICKET_SECRET_ARN", "")
 WS_API_ENDPOINT = os.environ.get("WS_API_ENDPOINT", "")  # wss://<id>.execute-api.<region>.amazonaws.com/v1
@@ -197,6 +198,40 @@ def lambda_handler(event: dict, context: Any) -> dict:
 
 
 # ----- POST /prompt -----
+def _arm_reaper() -> None:
+    """Wake the zombie-reaper if its tick chain is dormant.
+
+    The reaper isn't on a cron — it runs only while there's work. It
+    self-perpetuates a delayed tick each run while jobs are queued/running and
+    stops at idle, so we only need to seed a tick when the chain is dormant.
+    Best-effort throughout: a missed arm is recovered by the next submit, and
+    a duplicate arm is harmless (the reaper is idempotent)."""
+    if not REAPER_QUEUE_URL:
+        return
+    depth_attrs = (
+        "ApproximateNumberOfMessages",
+        "ApproximateNumberOfMessagesNotVisible",
+        "ApproximateNumberOfMessagesDelayed",
+    )
+    try:
+        attrs = sqs.get_queue_attributes(
+            QueueUrl=REAPER_QUEUE_URL,
+            AttributeNames=list(depth_attrs),
+        )["Attributes"]
+        pending = sum(int(attrs.get(k, "0")) for k in depth_attrs)
+        if pending == 0:  # chain dormant — seed it
+            # Small delay so the job record propagates to the status-index GSI
+            # before the reaper's first sweep reads it (and decides whether to
+            # keep the tick chain alive).
+            sqs.send_message(
+                QueueUrl=REAPER_QUEUE_URL,
+                MessageBody=json.dumps({"tick": "armed-by-dispatcher"}),
+                DelaySeconds=15,
+            )
+    except Exception as e:  # noqa: BLE001
+        print(f"reaper arm failed (non-fatal): {e!r}")
+
+
 def _post_prompt(event: dict) -> dict:
     body = json.loads(event.get("body") or "{}")
 
@@ -228,6 +263,8 @@ def _post_prompt(event: dict) -> dict:
             "client_id": {"S": body.get("client_id", "")},
             "created_at": {"S": now.isoformat()},
             "expire_at": {"N": str(expire_at)},
+            # Reaper-owned: only the reaper increments this (once per zombie
+            # re-queue). The worker never touches it.
             "attempt_count": {"N": "0"},
         },
     )
@@ -257,6 +294,9 @@ def _post_prompt(event: dict) -> dict:
             },
         )
         return _resp(503, {"error": "queue temporarily unavailable; job marked failed"})
+
+    # A new job is in flight — make sure the zombie-reaper is watching.
+    _arm_reaper()
 
     # Match ComfyUI's native /prompt response shape so existing client libraries work.
     return _resp(
