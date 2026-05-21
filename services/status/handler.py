@@ -100,24 +100,39 @@ def _extract_model(wf: dict) -> str:
 
 _PROMPT_MAX = 2000  # cap each prompt — keeps the /jobs list response bounded
 
+# Prompt-specific text input keys — safe to read on any node: a CLIPTextEncode
+# (`text`), an SDXL encoder (`text_g`/`text_l`), a String Literal (`string`),
+# a wildcard processor (`wildcard`/`populated_text`).
+_TEXT_KEYS = ("text", "text_g", "text_l", "string", "wildcard", "populated_text")
+# Generic value keys (a primitive's `value`, a passthrough `prompt`). Only
+# trusted on a node reached by *following a text link* — i.e. a confirmed
+# string-provider — never on an arbitrary conditioning node, where a stray
+# string-typed `value` would be mistaken for a prompt.
+_PROVIDER_KEYS = ("value", "prompt")
+
 
 def _generators(wf: dict) -> tuple[list, list]:
-    """Split conditioning-consuming nodes into (samplers, detailers).
+    """Split the nodes that actually sample/detail into (samplers, detailers).
 
-    A "generator" is detected by input shape — it has a positive / negative /
-    conditioning *link* — so samplers, guiders and detailers are all caught
-    without hard-coding class names. Both lists keep workflow order, so
-    samplers[0] is the primary pass."""
+    A generator must satisfy *both* signals: a sampler/guider/detailer class
+    name AND a positive/negative/conditioning input link. The class check
+    rejects routing nodes like rgthree's "Context Big" (which carry
+    conditioning links but don't sample); the link check rejects KSamplerSelect
+    and SamplerCustomAdvanced (sampler-named but bearing no prompt). Lists keep
+    workflow order, so samplers[0] is the primary pass."""
     samplers, detailers = [], []
     for nid, node in wf.items():
         if not isinstance(node, dict):
+            continue
+        ct = (node.get("class_type") or "").lower()
+        is_detailer = "detailer" in ct
+        if not (is_detailer or "sampler" in ct or "guider" in ct):
             continue
         inp = node.get("inputs", {}) or {}
         if not any(isinstance(inp.get(k), list)
                    for k in ("positive", "negative", "conditioning")):
             continue
-        ct = (node.get("class_type") or "").lower()
-        (detailers if "detailer" in ct else samplers).append((nid, node))
+        (detailers if is_detailer else samplers).append((nid, node))
     return samplers, detailers
 
 
@@ -134,7 +149,9 @@ def _extract_prompts(wf: dict) -> list[dict]:
     `positive` / `negative` inputs (or a guider's `conditioning`); the text
     lives in a CLIPTextEncode `inputs.text`. We walk each conditioning input
     upstream — following only conditioning-named inputs so a ControlNet/Concat
-    node can't leak the other polarity's text — until we hit a `text` string.
+    node can't leak the other polarity's text — until we hit a text string.
+    The text input may itself be *wired* from a string-provider node (a
+    "String Literal", a wildcard processor), so a text-link is followed too.
     """
 
     def _node(ref: Any) -> dict | None:
@@ -144,20 +161,31 @@ def _extract_prompts(wf: dict) -> list[dict]:
         n = wf.get(str(ref[0]))
         return n if isinstance(n, dict) else None
 
-    def _resolve(ref: Any, polarity: str, seen: set, depth: int = 0) -> str:
+    def _resolve(ref: Any, polarity: str, seen: set,
+                 depth: int = 0, via_link: bool = False) -> str:
         node = _node(ref)
-        if node is None or depth > 8:
+        if node is None or depth > 16:
             return ""
         nid = str(ref[0])
         if nid in seen:
             return ""
         seen.add(nid)
         inp = node.get("inputs", {}) or {}
-        # Direct text — the CLIPTextEncode case (also SDXL's text_g / text_l).
-        for key in ("text", "text_g", "text_l"):
+        # A direct string in a text input. The generic value/prompt keys count
+        # only when this node was reached by following a text link (via_link)
+        # — i.e. it is a confirmed string provider — so a stray string-typed
+        # `value` on an unrelated node isn't mistaken for a prompt.
+        for key in (_TEXT_KEYS + _PROVIDER_KEYS if via_link else _TEXT_KEYS):
             val = inp.get(key)
             if isinstance(val, str) and val.strip():
                 return val.strip()
+        # A text input wired from a provider node — follow that link. Only the
+        # fixed text-content keys are followed (none is a polarity-named input),
+        # so this branch structurally cannot cross from positive to negative.
+        for key in _TEXT_KEYS:
+            got = _resolve(inp.get(key), polarity, set(seen), depth + 1, via_link=True)
+            if got:
+                return got
         # Otherwise walk upstream, but only through conditioning-named inputs so
         # a ControlNetApplyAdvanced (has both `positive` and `negative`) can't
         # cross polarities. `seen` is copied per branch so it guards against
@@ -259,37 +287,53 @@ def _extract_params(wf: dict) -> dict:
                 for t in ("sampler", "guider", "scheduler"))
     ]
 
+    def _value(ref: Any, *keys: str) -> Any:
+        """A scalar from `ref` directly, or one hop upstream. Many graphs wire
+        steps/cfg/seed from a shared parameter-provider node (an "Input
+        Parameters" node, a primitive) rather than typing them on the sampler;
+        `keys` are the input names to try on that upstream node. Exactly one
+        hop — a value behind a chain of relay/reroute nodes is left
+        unresolved rather than chased (best-effort, keeps this bounded)."""
+        v = _scalar(ref)
+        if v is not None:
+            return v
+        up = wf.get(str(ref[0])) if isinstance(ref, list) and ref else None
+        if isinstance(up, dict):
+            ui = up.get("inputs", {}) or {}
+            for k in keys:
+                v = _scalar(ui.get(k))
+                if v is not None:
+                    return v
+        return None
+
     params: dict = {}
-    if primary:
-        pinp = primary.get("inputs", {}) or {}
-        for key in _PARAM_KEYS:
-            v = _scalar(pinp.get(key))
+    # Resolve every key from the primary sampler first (following a one-hop
+    # link to a param-provider node) so the set stays coherent; only keys the
+    # primary genuinely lacks fall through to the other sampler nodes — the
+    # Flux custom-sampler case, where the params live in separate nodes.
+    for key in _PARAM_KEYS:
+        alts = (key, "sampler", "value") if key == "sampler_name" else (key, "value")
+        if primary is not None:
+            v = _value((primary.get("inputs", {}) or {}).get(key), *alts)
             if v is not None:
                 params[key] = v
-    for key in _PARAM_KEYS:
-        if key in params:
-            continue
+                continue
         for node in cands:
-            v = _scalar((node.get("inputs", {}) or {}).get(key))
+            v = _value((node.get("inputs", {}) or {}).get(key), *alts)
             if v is not None:
                 params[key] = v
                 break
 
-    # Seed — primary sampler first, then a one-hop walk for a wired Seed node.
+    # Seed — primary first, then any sampler node; it is often wired from a
+    # Seed / primitive node.
     for node in ([primary] if primary else []) + cands:
         inp = node.get("inputs", {}) or {}
-        ref = inp.get("seed") if inp.get("seed") is not None else inp.get("noise_seed")
-        seed = _scalar(ref)
-        if seed is None and isinstance(ref, list) and ref:
-            up = wf.get(str(ref[0]))
-            if isinstance(up, dict):
-                ui = up.get("inputs", {}) or {}
-                for k in ("seed", "noise_seed", "value"):
-                    seed = _scalar(ui.get(k))
-                    if seed is not None:
-                        break
-        if seed is not None:
-            params["seed"] = seed
+        for sk in ("seed", "noise_seed"):
+            v = _value(inp.get(sk), "seed", "noise_seed", "value")
+            if v is not None:
+                params["seed"] = v
+                break
+        if "seed" in params:
             break
 
     return params
