@@ -43,7 +43,19 @@ import boto3
 from botocore.exceptions import ClientError
 
 log = logging.getLogger(__name__)
-_s3 = boto3.client("s3")
+# Lazy S3 client — so this module can be imported at Docker *build* time
+# (bake_nodes.py) where there are no AWS creds / region.
+_s3 = None
+
+
+def _get_s3():
+    global _s3
+    if _s3 is None:
+        region = (os.environ.get("AWS_REGION")
+                  or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1")
+        _s3 = boto3.client("s3", region_name=region)
+    return _s3
+
 
 # Same bucket the dispatcher writes object_info to — already in the worker IAM
 # grant set. Keeps deploy surface small.
@@ -58,7 +70,7 @@ def load_manifest() -> dict:
         log.warning("OUTPUTS_BUCKET unset; manifest sync disabled")
         return {"version": 1, "nodes": []}
     try:
-        r = _s3.get_object(Bucket=MANIFEST_BUCKET, Key=MANIFEST_KEY)
+        r = _get_s3().get_object(Bucket=MANIFEST_BUCKET, Key=MANIFEST_KEY)
         return json.loads(r["Body"].read().decode())
     except ClientError as e:
         if e.response.get("Error", {}).get("Code") == "NoSuchKey":
@@ -84,6 +96,7 @@ def sync() -> dict[str, str]:
     CUSTOM_NODES_DIR.mkdir(parents=True, exist_ok=True)
     log.info("syncing %d custom nodes from manifest", len(nodes))
 
+    installed_any = False
     for entry in nodes:
         name = entry.get("name") or _name_from_url(entry.get("url", ""))
         url = entry.get("url")
@@ -93,11 +106,16 @@ def sync() -> dict[str, str]:
             continue
         try:
             results[name] = _install_one(name, url, commit)
+            if results[name] == "installed":
+                installed_any = True
         except Exception as e:  # noqa: BLE001
             log.exception("install %s crashed", name)
             results[name] = f"failed: {e!r}"
 
-    _force_clean_opencv()
+    # Only re-clean OpenCV if a net-new pack was actually installed — an
+    # all-baked boot already has a clean image, no need to churn.
+    if installed_any:
+        _force_clean_opencv()
     return results
 
 
@@ -155,6 +173,11 @@ def _patch_cv2_typing() -> None:
 
 def _install_one(name: str, url: str, commit: Optional[str]) -> str:
     target = CUSTOM_NODES_DIR / name
+    # Baked into the worker image at build time — already cloned + deps
+    # installed. Skip entirely (no clone, no re-pip) so cold starts are fast
+    # and we don't re-run installs that could re-introduce conflicts.
+    if (target / ".baked").is_file():
+        return "baked"
     if target.exists():
         if commit:
             _run(["git", "fetch", "--depth=1", "origin", commit], cwd=target)

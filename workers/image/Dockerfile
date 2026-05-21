@@ -98,6 +98,17 @@ COPY workers/shared/ /opt/worker/
 COPY workers/image/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# ---------- Bake common custom nodes ----------
+# Clone + install the custom-node set at BUILD time so cold workers don't
+# spend ~13 min doing it on every boot. Dependency conflicts surface here
+# (visible in CodeBuild) instead of as a runtime ComfyUI crash-loop.
+# bake_nodes.py reuses manifest_installer's logic (numpy/torch pin, single
+# clean OpenCV, cv2 typing patch) and drops a .baked marker per pack; the
+# runtime manifest_installer skips anything baked. Net-new packs the user
+# installs later still go through the runtime manifest path.
+COPY workers/image/baked_nodes.txt /tmp/baked_nodes.txt
+RUN cd /opt/worker && python3 bake_nodes.py /tmp/baked_nodes.txt
+
 # Per-job scratch dir (output_uploader watches this)
 RUN mkdir -p /opt/comfy/output
 

@@ -1,0 +1,38 @@
+# Custom-node packs baked into the worker image at build time.
+# Format: <name> <git-url> [<commit-or-ref>]
+# bake_nodes.py clones + installs these during `docker build`; the runtime
+# manifest_installer skips anything with a .baked marker. Net-new packs the
+# user installs later still go through the runtime manifest.
+civicomfy https://github.com/MoonGoblinDev/Civicomfy
+comfyui-impact-pack https://github.com/ltdrdata/ComfyUI-Impact-Pack
+rgthree-comfy https://github.com/rgthree/rgthree-comfy
+comfyui-custom-scripts https://github.com/pythongosssss/ComfyUI-Custom-Scripts
+comfyui-kjnodes https://github.com/kijai/ComfyUI-KJNodes
+comfyui-easy-use https://github.com/yolain/ComfyUI-Easy-Use
+comfyui-florence2 https://github.com/kijai/ComfyUI-Florence2
+comfyui_ultimatesdupscale https://github.com/ssitu/ComfyUI_UltimateSDUpscale
+comfyui-wd14-tagger https://github.com/pythongosssss/ComfyUI-WD14-Tagger
+RES4LYF https://github.com/ClownsharkBatwing/RES4LYF
+comfyui_essentials https://github.com/cubiq/ComfyUI_essentials
+comfyui-impact-subpack https://github.com/ltdrdata/ComfyUI-Impact-Subpack
+comfyui-image-saver https://github.com/alexopus/ComfyUI-Image-Saver
+derfuu_comfyui_moddednodes https://github.com/Derfuu/Derfuu_ComfyUI_ModdedNodes
+comfyui-logicutils https://github.com/aria1th/ComfyUI-LogicUtils
+cg-use-everywhere https://github.com/chrisgoringe/cg-use-everywhere
+virtuoso-nodes https://github.com/chrisfreilich/virtuoso-nodes
+comfyui-mxtoolkit https://github.com/Smirnov75/ComfyUI-mxToolkit
+comfy-image-saver https://github.com/giriss/comfy-image-saver
+was-ns https://github.com/ltdrdata/was-node-suite-comfyui
+ComfyUI_Comfyroll_CustomNodes https://github.com/Suzie1/ComfyUI_Comfyroll_CustomNodes
+comfyui-advancedliveportrait https://github.com/PowerHouseMan/ComfyUI-AdvancedLivePortrait
+comfyui-levelpixel https://github.com/LevelPixel/ComfyUI-LevelPixel
+comfyui_image_metadata_extension https://github.com/edelvarden/comfyui_image_metadata_extension
+comfyui_layerstyle https://github.com/chflame163/ComfyUI_LayerStyle
+comfyui-post-processing-nodes https://github.com/EllangoK/ComfyUI-post-processing-nodes
+comfyui-crystools https://github.com/crystian/ComfyUI-Crystools
+comfyui_controlnet_aux https://github.com/Fannovel16/comfyui_controlnet_aux
+seedvr2_videoupscaler https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler
+controlaltai-nodes https://github.com/gseth/ControlAltAI-Nodes
+comfyui-cyberdelia-z-engineer https://github.com/cyberdeliaAI/comfyui-cyberdelia-z-engineer
+comfyui-cyberdelia-metadata https://github.com/cyberdeliaAI/comfyui-cyberdelia-metadata
+vrgamedev_video_nodes https://github.com/vrgamegirl19/comfyui-vrgamedevgirl
