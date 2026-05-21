@@ -320,11 +320,15 @@
       ? `<div class="pq-meter"><div class="fill" style="--pct:${pct}%"></div></div>`
       : `<div class="pq-meter indet"><div class="fill"></div></div>`;
     const step = cancel ? "Stopping" : frac ? `Step ${frac}` : "Sampling";
+    // The GPU instance this job is generating on, when known.
+    const instance = j.instance_type
+      ? `<span class="pq-instance" title="GPU instance">${esc(j.instance_type)}</span>`
+      : "";
     return `<div class="pq-row running${cancel ? " cancelling" : ""}">` +
       `<div class="pq-stamp">${cancel ? "Cancelling" : "Running"}</div>` +
       `<div class="pq-name">` +
         `<span class="kindchip ${isVid ? "vid" : "img"}">${isVid ? "Vid" : "Img"}</span>` +
-        `<span class="model" title="${esc(model)}">${esc(model)}</span></div>` +
+        `<span class="model" title="${esc(model)}">${esc(model)}</span>${instance}</div>` +
       meter +
       `<div class="pq-eta"><span class="step">${esc(step)}</span>` +
         `${esc(elapsed(j.started_at || j.created_at))}</div>` +
