@@ -62,6 +62,16 @@ window.COMFY_CONFIG = {
       ],
       retainOnDelete: false,
       memoryLimit: 512,
+      // no-cache — our standalone pages (viewer.js/.html, models.js, …) keep
+      // fixed filenames, so without a revalidation directive a browser serves
+      // a stale copy after a deploy (a new viewer.js never reaches the user
+      // until they hard-refresh). `no-cache` makes the browser revalidate via
+      // ETag every load: a 304 when unchanged (cheap), fresh bytes when not.
+      // This also covers the editor's content-hashed assets/ bundles, which
+      // could safely be cached `immutable` — splitting that into a second
+      // BucketDeployment is a deferred optimization; the revalidation cost is
+      // just cheap 304s, acceptable for a single-user tool.
+      cacheControl: [s3deploy.CacheControl.fromString('no-cache')],
       // prune:false — the metadata/worker `extensions_publisher` uploads
       // custom-node JS to extensions/<pack>/ at runtime. With the default
       // prune:true, every frontend (re)deploy wipes those (only
