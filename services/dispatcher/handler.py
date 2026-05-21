@@ -470,6 +470,10 @@ def _guess_model_type_from_input(node_class: str, input_name: str) -> str | None
         return "controlnet"
     if "upscale" in name_lc:
         return "upscale"
+    # Impact-Pack / Impact-Subpack UltralyticsDetectorProvider — its input is
+    # the ambiguous 'model_name'; disambiguate by node class.
+    if "ultralytics" in class_lc:
+        return "ultralytics"
     return None
 
 
