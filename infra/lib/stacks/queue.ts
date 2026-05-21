@@ -1,4 +1,4 @@
-import { Stack, StackProps, RemovalPolicy } from 'aws-cdk-lib';
+import { Stack, StackProps, RemovalPolicy, Duration } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { AppConfig } from '../config';
@@ -23,6 +23,11 @@ export class QueueStack extends Stack {
   public readonly videoJobsQueue: sqs.Queue;
   public readonly imageJobsDlq: sqs.Queue;
   public readonly videoJobsDlq: sqs.Queue;
+  // Self-ticking wake queue for the reaper Lambda. Not on a fixed cron — the
+  // dispatcher seeds a tick when a job is submitted, and each reaper run
+  // re-arms a delayed tick only while jobs are queued/running; at idle the
+  // chain stops. 1 h retention so a stale tick can't resurrect a dead chain.
+  public readonly reaperTicksQueue: sqs.Queue;
 
   constructor(scope: Construct, id: string, props: QueueStackProps) {
     super(scope, id, props);
@@ -63,6 +68,17 @@ export class QueueStack extends Stack {
         queue: this.videoJobsDlq,
         maxReceiveCount: config.queues.maxReceiveCount,
       },
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
+    this.reaperTicksQueue = new sqs.Queue(this, 'ReaperTicksQueue', {
+      queueName: 'comfy-reaper-ticks',
+      // The reaper sweep finishes in seconds; 2 min is ample for a redelivery
+      // if it errors. No DLQ — a tick is cheap and idempotent, and the next
+      // job submit re-arms the chain anyway.
+      visibilityTimeout: Duration.minutes(2),
+      retentionPeriod: Duration.hours(1),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
       removalPolicy: RemovalPolicy.DESTROY,
     });
   }

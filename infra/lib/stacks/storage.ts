@@ -29,6 +29,7 @@ export class StorageStack extends Stack {
   public readonly outputsBucket: s3.Bucket;
   public readonly uploadsBucket: s3.Bucket;
   public readonly frontendBucket: s3.Bucket;
+  public readonly failedWorkflowsBucket: s3.Bucket;
   public readonly modelsTable: dynamodb.Table;
   public readonly jobsTable: dynamodb.Table;
   public readonly downloadsTable: dynamodb.Table;
@@ -149,6 +150,19 @@ export class StorageStack extends Stack {
         resources: [`${this.frontendBucket.bucketArn}/*`],
       })
     );
+
+    // Workflows the reaper gave up on (failed every retry) — parked here for
+    // later analysis. RETAIN on stack delete; a 90-day lifecycle keeps the
+    // bucket from growing without bound.
+    this.failedWorkflowsBucket = new s3.Bucket(this, 'FailedWorkflowsBucket', {
+      bucketName: `${config.storage.failedWorkflowsBucketPrefix}-${sfx}`,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      removalPolicy: RemovalPolicy.RETAIN,
+      lifecycleRules: [
+        { id: 'expire-old-analysis', enabled: true, expiration: Duration.days(90) },
+      ],
+    });
 
     // ---------- DYNAMODB TABLES ----------
     this.modelsTable = new dynamodb.Table(this, 'ModelsTable', {

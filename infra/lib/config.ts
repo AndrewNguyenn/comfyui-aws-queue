@@ -26,6 +26,7 @@ export interface AppConfig {
     readonly outputsBucketPrefix: string;
     readonly uploadsBucketPrefix: string;
     readonly frontendBucketPrefix: string;
+    readonly failedWorkflowsBucketPrefix: string;
     readonly outputsLifecycleDays: number;
     readonly uploadsLifecycleDays: number;
   };
@@ -137,6 +138,7 @@ export const APP_CONFIG: AppConfig = {
     outputsBucketPrefix: 'comfy-outputs',
     uploadsBucketPrefix: 'comfy-uploads',
     frontendBucketPrefix: 'comfy-frontend',
+    failedWorkflowsBucketPrefix: 'comfy-failed-workflows',
     outputsLifecycleDays: 30, // Standard → IA at this age
     uploadsLifecycleDays: 7, // Auto-delete user-uploaded inputs
   },

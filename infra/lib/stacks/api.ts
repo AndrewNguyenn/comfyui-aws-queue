@@ -2,6 +2,7 @@ import { Stack, StackProps, Duration, RemovalPolicy, CfnOutput } from 'aws-cdk-l
 import { Construct } from 'constructs';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as eventsources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
@@ -55,6 +56,7 @@ export class ApiStack extends Stack {
   public readonly downloadKickoffFn: lambda.Function;
   public readonly downloadWorkerFn: lambda.Function;
   public readonly catalogFn: lambda.Function;
+  public readonly reaperFn: lambda.Function;
 
   constructor(scope: Construct, id: string, props: ApiStackProps) {
     super(scope, id, props);
@@ -191,6 +193,37 @@ export class ApiStack extends Stack {
     // as POST /models/download). Grant + wire.
     this.downloadKickoffFn.grantInvoke(this.dispatcherFn);
     this.dispatcherFn.addEnvironment('DOWNLOAD_KICKOFF_FN', this.downloadKickoffFn.functionName);
+
+    // ----- Lambda: Reaper -----
+    // SQS-tick-driven sweeper for zombie jobs (status stuck "running" after a
+    // worker died). Not on a fixed cron — it runs only while there is work
+    // (see ReaperTicksQueue / the dispatcher's arm-on-submit). Re-queues a
+    // zombie up to 3× then parks its workflow JSON in the failed-workflows
+    // bucket for analysis.
+    this.reaperFn = new lambda.Function(this, 'ReaperFn', {
+      ...commonLambdaProps,
+      functionName: 'comfy-reaper',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../../services/reaper')),
+      handler: 'handler.lambda_handler',
+      description: 'Sweeps zombie jobs: re-queues up to 3x, then archives to S3',
+      timeout: Duration.seconds(60),
+      environment: {
+        ...commonLambdaProps.environment,
+        REAPER_QUEUE_URL: queue.reaperTicksQueue.queueUrl,
+        FAILED_WORKFLOWS_BUCKET: storage.failedWorkflowsBucket.bucketName,
+      },
+    });
+    storage.jobsTable.grantReadWriteData(this.reaperFn);          // query GSI + flip status
+    queue.imageJobsQueue.grantSendMessages(this.reaperFn);        // re-queue image jobs
+    queue.videoJobsQueue.grantSendMessages(this.reaperFn);        // re-queue video jobs
+    queue.reaperTicksQueue.grantSendMessages(this.reaperFn);      // self-arm next tick
+    storage.failedWorkflowsBucket.grantPut(this.reaperFn);        // archive give-ups
+    this.reaperFn.addEventSource(
+      new eventsources.SqsEventSource(queue.reaperTicksQueue, { batchSize: 10 }),
+    );
+    // Dispatcher arms the reaper when a job is submitted.
+    queue.reaperTicksQueue.grantSendMessages(this.dispatcherFn);
+    this.dispatcherFn.addEnvironment('REAPER_QUEUE_URL', queue.reaperTicksQueue.queueUrl);
 
     // ----- Lambda: WebSocket Forward (REST endpoint /internal/ws-event) -----
     // Workers POST events here; Lambda pushes them to the right WS connection.
