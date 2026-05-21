@@ -508,12 +508,17 @@ def _guess_model_type_from_input(node_class: str, input_name: str) -> str | None
         return "clip_vision"
     if "controlnet" in name_lc or "control_net" in name_lc:
         return "controlnet"
-    if "upscale" in name_lc:
+    # 'upscale' in the input name (upscale_model_name) OR the node class —
+    # UpscaleModelLoader's input is the ambiguous 'model_name', so the
+    # name-only check missed it and the editor's upscale dropdown stayed empty.
+    if "upscale" in name_lc or "upscale" in class_lc:
         return "upscale"
-    # Impact-Pack / Impact-Subpack UltralyticsDetectorProvider — its input is
-    # the ambiguous 'model_name'; disambiguate by node class.
+    # Impact-Pack / Impact-Subpack nodes whose input is the ambiguous
+    # 'model_name' — disambiguate by node class.
     if "ultralytics" in class_lc:
         return "ultralytics"
+    if "samloader" in class_lc:
+        return "sams"
     return None
 
 
