@@ -217,6 +217,107 @@ a { color:var(--pond-dk); }
   background:var(--ink); color:var(--cream); border:1px solid var(--pine);
   padding:12px 20px; font-family:var(--font-display); font-style:italic; font-size:16px;
   z-index:200; box-shadow:0 12px 32px rgba(0,0,0,.4); }
+
+/* ===========================================================
+   Responsive — tablet (≤ 920px)
+   Header collapses to one column; modal drops to a single
+   column with the info panel below the stage.
+   =========================================================== */
+@media (max-width:920px) {
+  .app { padding:20px 18px 60px; }
+  .hdr { grid-template-columns:1fr; gap:14px; }
+  .hdr .rhs { text-align:left; }
+  .grid { grid-template-columns:repeat(4,minmax(0,1fr)); }
+  .modal { grid-template-columns:1fr; margin:16px; width:calc(100% - 32px); }
+  .modal .info { border-left:0; border-top:1px solid var(--line); }
+}
+
+/* ===========================================================
+   Responsive — phone (≤ 640px)
+   The layout retunes for thumbs:
+   - Header collapses; meta wraps below the title
+   - Tabs become full-width equal segments
+   - Grid is fixed 2-up; card actions stay visible (no hover)
+   - Modal becomes a full-screen vertical sheet: stage on top
+     (aspect-capped), scrollable info below, sticky action bar
+   - Toast stretches edge-to-edge
+   =========================================================== */
+@media (max-width:640px) {
+  body { font-size:13px; }
+  .app { padding:14px 14px 100px; }
+
+  /* Header */
+  .hdr { padding:4px 0 14px; }
+  .hdr .brand { font-size:9.5px; letter-spacing:.28em; }
+  .hdr .title { font-size:32px; margin-top:4px; }
+  .hdr .sub { font-size:11.5px; margin-top:6px; }
+  .hdr .rhs { display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px;
+    font-size:10px; line-height:1.4; margin-top:10px; }
+  .hdr .stamp { margin-left:0; }
+
+  /* Pending strip — tighter rows */
+  #pending { margin-top:12px; }
+  #pending .pend-row { padding:9px 12px; gap:10px; }
+  #pending .pend-kind { font-size:14px; }
+
+  /* Tabs — equal-width touch targets */
+  .tabs { border-top:1px solid var(--line); margin-top:14px; }
+  .tab { flex:1; justify-content:center; padding:14px 6px 12px; font-size:10px;
+    letter-spacing:.2em; gap:6px; }
+  .tab .count { font-size:10px; }
+
+  /* Toolbar — full-width search; 16px input prevents iOS zoom-on-focus */
+  .toolbar { padding:10px 12px 12px; }
+  .search input { font-size:16px; }
+
+  /* Grid — fixed 2-up */
+  .grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; padding:10px; }
+
+  /* Cards — tighter chrome; actions stay visible (no hover on touch) */
+  .card .body { padding:8px 10px 10px; }
+  .card .name { font-size:13px; }
+  .card .meta-row { font-size:9.5px; margin-top:3px; gap:6px; }
+  .card .typestamp { font-size:8px; padding:2px 5px; }
+  .card .play svg { width:40px; height:40px; }
+  .card .thumb-actions { opacity:1; }
+  .card .thumb-actions button { width:30px; height:30px; }
+
+  /* Modal — full-screen vertical sheet */
+  .scrim { background:var(--ink); }
+  .modal { margin:0; width:100%; height:100dvh; border:0; max-width:none;
+    grid-template-columns:1fr; grid-template-rows:auto 1fr; }
+  .modal .stage { padding:0; min-height:32vh; max-height:56vh; }
+  .modal .stage img, .modal .stage video { max-height:56vh; }
+  .modal .stage .nav { width:38px; height:38px; font-size:18px; }
+  .modal .stage .nav.prev { left:10px; }
+  .modal .stage .nav.next { right:10px; }
+  .modal .info { border-left:0; border-top:1px solid var(--line);
+    min-height:0; overflow:hidden; }
+  .modal .info-head { padding:14px 16px 12px; }
+  .modal .info-head h2 { font-size:19px; }
+  .modal .info-head .close { top:10px; right:10px; width:36px; height:36px; }
+  .modal .info-body { padding:14px 16px 24px; }
+  .modal .field { grid-template-columns:92px 1fr; gap:12px; padding:8px 0; }
+  .modal .info-foot { padding:10px 14px calc(10px + env(safe-area-inset-bottom));
+    flex-wrap:wrap; gap:8px; }
+  .modal .info-foot button { flex:1; padding:11px 10px; justify-content:center; }
+
+  /* Toast — edge-to-edge, clears the iOS home indicator */
+  .toast { left:14px; right:14px; transform:none;
+    bottom:calc(14px + env(safe-area-inset-bottom)); padding:11px 16px; font-size:14px; }
+
+  /* Empty + pager */
+  .empty { padding:56px 20px; }
+  .empty .e-title { font-size:22px; }
+  .pager { padding:14px 0; }
+}
+
+/* Extra-small phones — keep the layout from cramming */
+@media (max-width:380px) {
+  .hdr .title { font-size:28px; }
+  .tab { padding:12px 4px 10px; font-size:9px; letter-spacing:.16em; }
+  .tab .count { font-size:9px; }
+}
 </style>
 <script src="config.js"></script>
 <script src="auth.js"></script>
