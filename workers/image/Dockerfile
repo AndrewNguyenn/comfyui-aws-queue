@@ -135,6 +135,14 @@ RUN pip uninstall -y torchaudio 2>/dev/null || true \
          > /usr/local/lib/python3.10/dist-packages/torchaudio/__init__.py \
     && python -c "import torchaudio; print('torchaudio OK:', torchaudio.__version__)"
 
+# ---------- Patch SaveImageWithMetaData ----------
+# comfyui_image_metadata_extension's metadata capture introspects ComfyUI's
+# now-async execution cache synchronously → crashes → the image never saves.
+# Make the capture non-fatal so the image always saves. Build-verified: the
+# script exits non-zero (fails the build) if the anchor is missing.
+COPY workers/image/patch_metadata_ext.py /tmp/patch_metadata_ext.py
+RUN python3 /tmp/patch_metadata_ext.py
+
 # Per-job scratch dir (output_uploader watches this)
 RUN mkdir -p /opt/comfy/output
 
