@@ -48,36 +48,106 @@ a { color:var(--pond-dk); }
 .hdr .stamp .dot { width:5px; height:5px; background:var(--pine); margin-right:6px;
   display:inline-block; }
 
-/* ===== Pending strip (kept at top) ===== */
-#pending { margin-top:16px; }
-#pending .pend-card { border:1px solid var(--line); background:var(--paper-2); }
-#pending .pend-head { display:flex; align-items:baseline; justify-content:space-between;
-  padding:11px 14px; border-bottom:1px solid var(--line); font-size:9px; font-weight:600;
-  letter-spacing:.22em; text-transform:uppercase; color:var(--ink-3); }
-#pending .pend-head .live { color:var(--pond-dk); display:flex; align-items:center; gap:6px; }
-#pending .pend-head .live .dot { width:6px; height:6px; border-radius:50%;
-  background:var(--pond); animation:pulse 1.2s ease-in-out infinite; }
-#pending .pend-row { display:grid; grid-template-columns:auto 1fr auto; gap:14px;
-  align-items:center; padding:11px 14px; border-bottom:1px solid var(--line-2); }
-#pending .pend-row:last-child { border-bottom:0; }
-#pending .pend-kind { font-family:var(--font-display); font-style:italic; font-size:15px;
-  color:var(--ink); }
-#pending .pend-stamp { font-size:8.5px; font-weight:600; letter-spacing:.2em;
-  text-transform:uppercase; padding:3px 7px; border:1px solid currentColor; }
-#pending .pend-stamp.running { color:var(--pond-dk); }
-#pending .pend-stamp.queued { color:var(--stone); }
-#pending .pend-bar { height:4px; background:var(--line); overflow:hidden; position:relative; }
-#pending .pend-bar > i { position:absolute; inset:0; width:40%; background:var(--pond);
-  animation:slide 1.5s ease-in-out infinite; }
-#pending .pend-bar.queued > i { background:var(--stone); width:100%;
-  animation:none; opacity:.35; }
-#pending .pend-bar.det > i { animation:none; left:0; width:0;
-  transition:width .5s ease; }
-#pending .pend-elapsed { font-family:var(--font-mono); font-size:11px; color:var(--ink-2);
-  letter-spacing:.04em; white-space:nowrap; }
-#pending .pend-empty { padding:12px 14px; font-size:12px; color:var(--ink-3); }
-@keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.25;} }
-@keyframes slide { 0%{left:-40%;} 100%{left:100%;} }
+/* ===========================================================
+   Pending workflows panel — the running job featured with a
+   live progress meter, the queue collapsed to one row per
+   model. Every row carries a cancel (×) action.
+   =========================================================== */
+.pending { margin-top:18px; border:1px solid var(--line); background:var(--paper); }
+.pending-hd { display:flex; align-items:baseline; justify-content:space-between;
+  padding:12px 16px; background:var(--paper-2); border-bottom:1px solid var(--line); }
+.pending-hd .lhs { display:flex; align-items:baseline; gap:14px; min-width:0; }
+.pending-hd .eyebrow { font-size:9px; font-weight:600; letter-spacing:.22em;
+  text-transform:uppercase; color:var(--ink-3); flex-shrink:0; }
+.pending-hd .summary { font-family:var(--font-display); font-style:italic;
+  font-weight:500; font-size:16px; color:var(--ink); line-height:1.2;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.pending-hd .summary .sep { color:var(--ink-3); font-style:normal; margin:0 6px; }
+.pending-hd .summary .eta { font-family:var(--font-mono); font-style:normal;
+  font-size:11px; color:var(--ink-3); letter-spacing:.04em; margin-left:6px; }
+.pending-hd .rhs { display:flex; align-items:center; gap:12px; flex-shrink:0; }
+.pending-hd .status-stamp { display:inline-flex; align-items:center; font-size:9px;
+  font-weight:600; letter-spacing:.22em; text-transform:uppercase; color:var(--pine);
+  border:1px solid var(--pine); padding:4px 8px; }
+.pending-hd .status-stamp .dot { width:5px; height:5px; background:var(--pine);
+  margin-right:6px; display:inline-block; animation:pulse-dot 1.6s ease-in-out infinite; }
+@keyframes pulse-dot { 0%,100%{opacity:1;} 50%{opacity:.3;} }
+.pending-hd .collapse { font-size:10px; font-weight:600; letter-spacing:.22em;
+  text-transform:uppercase; color:var(--pond-dk); padding:4px 0 4px 12px;
+  border-left:1px solid var(--line); transition:color .12s; }
+.pending-hd .collapse:hover { color:var(--ink); }
+.pending.collapsed .pending-body, .pending.collapsed .pq-foot { display:none; }
+
+/* One row — running or queued — on a 5-col rhythm:
+   stamp | name + meta | progress meter | eta | cancel */
+.pq-row { display:grid;
+  grid-template-columns:72px minmax(0,1fr) minmax(140px,220px) 80px 32px;
+  gap:18px; align-items:center; padding:11px 16px; max-height:90px;
+  border-bottom:1px solid var(--line-2); transition:background .1s; }
+.pq-row:last-child { border-bottom:0; }
+.pq-row.queued:hover { background:var(--paper-2); }
+.pq-stamp { font-size:9px; font-weight:600; letter-spacing:.22em;
+  text-transform:uppercase; border:1px solid currentColor; padding:4px 7px;
+  text-align:center; width:fit-content; color:var(--ink-3); }
+.pq-row.running .pq-stamp { color:var(--pond-dk); }
+.pq-row.cancelling .pq-stamp { color:var(--maple); }
+.pq-name { display:flex; align-items:baseline; gap:10px; min-width:0; }
+.pq-name .kindchip { font-size:8px; font-weight:600; letter-spacing:.22em;
+  text-transform:uppercase; color:var(--ink-3); border:1px solid var(--line);
+  padding:2px 5px; flex-shrink:0; align-self:center; }
+.pq-name .kindchip.vid { color:var(--maple); border-color:var(--maple); }
+.pq-name .kindchip.img { color:var(--pond-dk); border-color:var(--pond-lt); }
+.pq-name .model { font-family:var(--font-display); font-style:italic; font-weight:500;
+  font-size:16px; color:var(--ink); line-height:1.2; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis; min-width:0; }
+.pq-name .batchchip { font-family:var(--font-mono); font-size:10px; color:var(--ink-3);
+  letter-spacing:.04em; flex-shrink:0; }
+.pq-name .batchchip .ct { color:var(--pond-dk); }
+.pq-meter { position:relative; height:3px; background:var(--line-2); width:100%;
+  overflow:hidden; }
+.pq-meter .fill { position:absolute; inset:0; background:var(--pond);
+  width:var(--pct,0%); transition:width .4s ease; }
+.pq-meter .fill::after { content:""; position:absolute; top:0; bottom:0; right:-10px;
+  width:20px; background:linear-gradient(90deg,transparent,var(--pond-lt) 60%,transparent);
+  animation:shimmer 1.6s ease-in-out infinite; }
+/* No progress yet — an indeterminate sliding bar. */
+.pq-meter.indet .fill { width:38%; animation:pq-slide 1.5s ease-in-out infinite; }
+.pq-meter.indet .fill::after { display:none; }
+@keyframes shimmer { 0%{opacity:0;transform:translateX(-8px);} 50%{opacity:.8;}
+  100%{opacity:0;transform:translateX(8px);} }
+@keyframes pq-slide { 0%{left:-38%;} 100%{left:100%;} }
+.pq-row.queued .pq-meter { background:var(--line-2); height:1px; }
+.pq-row.cancelling .pq-meter .fill { background:var(--stone); }
+.pq-row.cancelling .pq-meter .fill::after { display:none; }
+.pq-eta { font-family:var(--font-mono); font-size:11px; color:var(--ink-2);
+  letter-spacing:.04em; text-align:right; white-space:nowrap; }
+.pq-row.running .pq-eta { color:var(--ink); }
+.pq-row.running .pq-eta .step { display:block; font-family:var(--font-ui); font-size:9px;
+  font-weight:600; letter-spacing:.22em; text-transform:uppercase; color:var(--ink-3);
+  margin-bottom:2px; }
+.pq-row.queued .pq-eta { color:var(--ink-3); }
+/* Cancel / remove action — on every row. Maple on hover. */
+.pq-act { width:28px; height:28px; display:flex; align-items:center;
+  justify-content:center; border:1px solid var(--line); color:var(--ink-3); opacity:0;
+  transition:opacity .12s,color .12s,border-color .12s,background .12s; }
+.pq-row:hover .pq-act { opacity:1; }
+.pq-act:hover:not(:disabled) { color:var(--maple); border-color:var(--maple); }
+.pq-act:active:not(:disabled) { background:var(--maple); color:var(--cream); }
+.pq-act:disabled { opacity:.35; cursor:default; }
+.pq-act svg { width:13px; height:13px; }
+.pq-row.removing { animation:pq-collapse .26s ease-in forwards; pointer-events:none; }
+@keyframes pq-collapse { to { opacity:0; padding-top:0; padding-bottom:0;
+  max-height:0; transform:translateX(-8px); } }
+/* Reveal-more footer */
+.pq-foot { display:flex; align-items:center; justify-content:space-between;
+  padding:10px 16px 12px; border-top:1px solid var(--line-2); background:var(--paper-2); }
+.pq-foot .more { font-size:10px; font-weight:600; letter-spacing:.22em;
+  text-transform:uppercase; color:var(--pond-dk); }
+.pq-foot .more:hover { color:var(--ink); }
+.pq-foot .total { font-family:var(--font-mono); font-size:10px; color:var(--ink-3);
+  letter-spacing:.06em; }
+.pq-empty { padding:13px 16px; font-size:12px; color:var(--ink-3);
+  font-family:var(--font-display); font-style:italic; }
 
 /* ===== Tabs ===== */
 .tabs { display:flex; border-bottom:1px solid var(--line); margin-top:18px; }
@@ -263,10 +333,25 @@ a { color:var(--pond-dk); }
     font-size:10px; line-height:1.4; margin-top:10px; }
   .hdr .stamp { margin-left:0; }
 
-  /* Pending strip — tighter rows */
-  #pending { margin-top:12px; }
-  #pending .pend-row { padding:9px 12px; gap:10px; }
-  #pending .pend-kind { font-size:14px; }
+  /* Pending panel — stack the header, wrap rows onto a meter line */
+  .pending { margin-top:14px; }
+  .pending-hd { padding:10px 12px; flex-wrap:wrap; gap:6px 10px; }
+  .pending-hd .lhs { flex:1 1 100%; gap:10px; }
+  .pending-hd .summary { font-size:14px; }
+  .pending-hd .summary .eta { font-size:10px; display:block; margin-left:0; }
+  .pq-row { grid-template-columns:60px minmax(0,1fr) auto 32px;
+    grid-template-areas:"stamp name eta act" "meter meter meter meter";
+    gap:8px 12px; padding:10px 12px; }
+  .pq-stamp { grid-area:stamp; font-size:8.5px; padding:3px 6px; }
+  .pq-name { grid-area:name; gap:8px; }
+  .pq-name .model { font-size:14px; }
+  .pq-name .kindchip { font-size:7.5px; padding:2px 4px; }
+  .pq-meter { grid-area:meter; }
+  .pq-eta { grid-area:eta; font-size:10px; }
+  .pq-act { grid-area:act; opacity:1; }
+  .pq-row.running .pq-eta .step { font-size:8.5px; letter-spacing:.18em; }
+  .pq-row.queued .pq-meter { display:none; }
+  .pq-row.queued { grid-template-areas:"stamp name eta act"; }
 
   /* Tabs — equal-width touch targets */
   .tabs { border-top:1px solid var(--line); margin-top:14px; }

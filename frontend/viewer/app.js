@@ -81,17 +81,20 @@
     const m = Math.floor(s / 60);
     return `${m}:${String(Math.floor(s - m * 60)).padStart(2, "0")}`;
   }
-  function agoShort(iso) {
-    if (!iso) return "";
-    const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
-    if (s < 60) return `${Math.floor(s)}s`;
-    if (s < 3600) return `${Math.floor(s / 60)}m`;
-    return `${Math.floor(s / 3600)}h`;
+  // Minutes a job has been waiting, and a compact "39m" / "1h 12m" rendering.
+  const ageMin = (iso) =>
+    iso ? Math.floor(Math.max(0, Date.now() - new Date(iso).getTime()) / 60000) : 0;
+  function fmtWait(min) {
+    if (min < 1) return "<1m";
+    if (min < 60) return `${min}m`;
+    return `${Math.floor(min / 60)}h ${min % 60}m`;
   }
   const SVG_TRASH =
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12"/><path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>';
   const SVG_PLAY =
     '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5l13 7.5-13 7.5v-15z"/></svg>';
+  const SVG_CLOSE =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
 
   /* ---------- data ---------- */
   function filtered() {
@@ -205,8 +208,203 @@
     return el;
   }
 
-  /* ---------- pending strip ---------- */
+  /* ---------- pending workflows panel ----------
+     The running job is featured with a live progress meter; the queue is
+     collapsed to one row per model (consecutive same-model jobs read as one
+     batched intent). Every row carries a cancel (×) action. */
   let lastPendingIds = null;
+  let pendCollapsed = false;   // Hide/Show toggle
+  let pendShowAll = false;     // "+ N more queued" reveal
+  let pendGroups = [];         // queue groups for the current render (wired below)
+  const cancelling = new Set(); // job_ids the user has cancelled, awaiting feed drop
+
+  // Collapse consecutive same-(type, model) queued jobs into one ledger row.
+  // `oldest` is kept as an ISO created_at string — ISO timestamps sort
+  // lexically, so a string compare finds the earliest, and ageMin() consumes
+  // it directly (no second time representation to drift from).
+  function groupQueue(queued) {
+    const out = [];
+    for (const j of queued) {
+      const model = j.model || j.type || "job";
+      const last = out[out.length - 1];
+      if (last && last.model === model && last.kind === j.type) {
+        last.ids.push(j.job_id);
+        last.count += 1;
+        if (j.created_at && (!last.oldest || j.created_at < last.oldest)) {
+          last.oldest = j.created_at;
+        }
+      } else {
+        out.push({
+          ids: [j.job_id], kind: j.type, model, count: 1,
+          oldest: j.created_at || "",
+        });
+      }
+    }
+    return out;
+  }
+
+  // Rough "time remaining" — projects the running job's full duration from its
+  // observed sampling pace, then assumes each queued job takes about as long.
+  // Returns "" when there's no running job with progress to estimate from.
+  function pendingEta(running, queuedCount) {
+    const r = running.find(
+      (j) => j.progress && j.progress.includes("/") && (j.started_at || j.created_at));
+    if (!r) return "";
+    const [v, m] = r.progress.split("/").map(Number);
+    if (!(v > 0 && m > 0)) return "";
+    const elapsedSec = Math.max(
+      1, (Date.now() - new Date(r.started_at || r.created_at).getTime()) / 1000);
+    const perJobSec = (elapsedSec / v) * m;
+    const totalSec = Math.max(0, perJobSec - elapsedSec) + queuedCount * perJobSec;
+    const min = Math.round(totalSec / 60);
+    return min < 1 ? "<1m" : `${min}m`;
+  }
+
+  function runningRow(j) {
+    const cancel = cancelling.has(j.job_id);
+    const isVid = j.type === "video";
+    const model = j.model || j.type || "job";
+    let pct = null, frac = "";
+    if (j.progress && j.progress.includes("/")) {
+      const [v, m] = j.progress.split("/").map(Number);
+      if (m > 0) { pct = Math.min(100, Math.round((v / m) * 100)); frac = `${v}/${m}`; }
+    }
+    const meter = pct != null
+      ? `<div class="pq-meter"><div class="fill" style="--pct:${pct}%"></div></div>`
+      : `<div class="pq-meter indet"><div class="fill"></div></div>`;
+    const step = cancel ? "Stopping" : frac ? `Step ${frac}` : "Sampling";
+    return `<div class="pq-row running${cancel ? " cancelling" : ""}">` +
+      `<div class="pq-stamp">${cancel ? "Cancelling" : "Running"}</div>` +
+      `<div class="pq-name">` +
+        `<span class="kindchip ${isVid ? "vid" : "img"}">${isVid ? "Vid" : "Img"}</span>` +
+        `<span class="model" title="${esc(model)}">${esc(model)}</span></div>` +
+      meter +
+      `<div class="pq-eta"><span class="step">${esc(step)}</span>` +
+        `${esc(elapsed(j.started_at || j.created_at))}</div>` +
+      `<button class="pq-act" data-act="cancel-run" data-id="${esc(j.job_id)}"` +
+        `${cancel ? " disabled" : ""} aria-label="Cancel running workflow"` +
+        ` title="Cancel running workflow">${SVG_CLOSE}</button>` +
+    `</div>`;
+  }
+
+  function queuedRow(g, idx) {
+    const isVid = g.kind === "video";
+    const wait = fmtWait(ageMin(g.oldest));
+    const batch = g.count > 1
+      ? `<span class="batchchip">× <span class="ct">${g.count}</span></span>` : "";
+    const label = g.count > 1
+      ? `Remove ${g.count} queued items` : "Remove from queue";
+    return `<div class="pq-row queued">` +
+      `<div class="pq-stamp">Queued</div>` +
+      `<div class="pq-name">` +
+        `<span class="kindchip ${isVid ? "vid" : "img"}">${isVid ? "Vid" : "Img"}</span>` +
+        `<span class="model" title="${esc(g.model)}">${esc(g.model)}</span>${batch}</div>` +
+      `<div class="pq-meter"></div>` +
+      `<div class="pq-eta">${esc(wait)}</div>` +
+      `<button class="pq-act" data-act="cancel-group" data-group="${idx}"` +
+        ` aria-label="${esc(label)}" title="${esc(label)}">${SVG_CLOSE}</button>` +
+    `</div>`;
+  }
+
+  function buildPendingHtml(running, queued) {
+    if (!running.length && !queued.length) {
+      pendGroups = [];
+      return `<section class="pending"><header class="pending-hd"><div class="lhs">` +
+        `<span class="eyebrow">Pending</span>` +
+        `<span class="summary">No active generations</span></div></header>` +
+        `<div class="pq-empty">Idle — generations queue here as you run workflows.</div>` +
+        `</section>`;
+    }
+    const groups = groupQueue(queued);
+    const VISIBLE = 3;
+    const visible = pendShowAll ? groups : groups.slice(0, VISIBLE);
+    pendGroups = visible;
+    const hidden = groups.slice(visible.length);
+    const hiddenCount = hidden.reduce((s, g) => s + g.count, 0);
+
+    const eta = pendingEta(running, queued.length);
+    const summary =
+      `${queued.length} in queue<span class="sep">·</span>${running.length} running` +
+      (eta ? `<span class="eta">~${esc(eta)} remaining</span>` : "");
+
+    const longestWait = groups.reduce(
+      (m, g) => (g.oldest && (!m || g.oldest < m) ? g.oldest : m), "");
+    const foot = hidden.length
+      ? `<footer class="pq-foot">` +
+        `<button class="more" data-act="more">` +
+        `${pendShowAll ? "Show fewer" : "+ " + hiddenCount + " more queued"}</button>` +
+        `<span class="total">${queued.length} queued · longest wait ` +
+        `${esc(fmtWait(ageMin(longestWait)))}</span></footer>`
+      : "";
+
+    return `<section class="pending${pendCollapsed ? " collapsed" : ""}">` +
+      `<header class="pending-hd"><div class="lhs">` +
+        `<span class="eyebrow">Pending</span>` +
+        `<span class="summary">${summary}</span></div>` +
+        `<div class="rhs">` +
+          `<span class="status-stamp"><span class="dot"></span>` +
+          `${running.length + queued.length} Active</span>` +
+          `<button class="collapse" data-act="collapse">` +
+          `${pendCollapsed ? "Show" : "Hide"}</button></div></header>` +
+      `<div class="pending-body">` +
+        running.map(runningRow).join("") +
+        visible.map(queuedRow).join("") +
+      `</div>${foot}</section>`;
+  }
+
+  // POST a cancel for one job; resolves true on success.
+  async function cancelJob(jobId) {
+    try {
+      const r = await authedFetch(
+        `/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
+      return r.ok;
+    } catch (_e) { return false; }
+  }
+
+  // Cancel the running job — hold its row in a "cancelling" state until the
+  // worker actually interrupts ComfyUI and the job drops out of the feed.
+  async function cancelRunning(jobId) {
+    cancelling.add(jobId);
+    renderPending();
+    if (!(await cancelJob(jobId))) {
+      cancelling.delete(jobId);
+      showToast("Couldn't cancel — try again.");
+      renderPending();
+    }
+  }
+
+  // Cancel a whole queued group — every job collapsed into the row. Optimistic:
+  // collapse the row out, then re-render once the requests land. Rollback is
+  // per-id: a job whose cancel succeeded stays hidden even if a sibling failed.
+  async function cancelGroup(group, rowEl) {
+    group.ids.forEach((id) => cancelling.add(id));
+    if (rowEl) rowEl.classList.add("removing");
+    const results = await Promise.all(
+      group.ids.map(async (id) => [id, await cancelJob(id)]));
+    const failed = results.filter(([, ok]) => !ok).map(([id]) => id);
+    if (failed.length) {
+      failed.forEach((id) => cancelling.delete(id));
+      showToast("Couldn't cancel — try again.");
+    }
+    setTimeout(renderPending, rowEl ? 260 : 0);
+  }
+
+  function wirePending() {
+    const collapseBtn = pending.querySelector('[data-act="collapse"]');
+    if (collapseBtn) collapseBtn.onclick = () => { pendCollapsed = !pendCollapsed; renderPending(); };
+    const moreBtn = pending.querySelector('[data-act="more"]');
+    if (moreBtn) moreBtn.onclick = () => { pendShowAll = !pendShowAll; renderPending(); };
+    pending.querySelectorAll('[data-act="cancel-run"]').forEach((btn) => {
+      btn.onclick = () => cancelRunning(btn.dataset.id);
+    });
+    pending.querySelectorAll('[data-act="cancel-group"]').forEach((btn) => {
+      btn.onclick = () => {
+        const g = pendGroups[Number(btn.dataset.group)];
+        if (g) cancelGroup(g, btn.closest(".pq-row"));
+      };
+    });
+  }
+
   async function renderPending() {
     if (!(await ensureAuth())) return;
     let jobs;
@@ -215,46 +413,22 @@
       if (!r.ok) return;
       jobs = (await r.json()).jobs || [];
     } catch (_e) { return; }
-    jobs.sort((a, b) =>
-      a.status === b.status
-        ? (a.created_at || "").localeCompare(b.created_at || "")
-        : a.status === "running" ? -1 : 1);
 
-    let rows;
-    if (!jobs.length) {
-      rows = `<div class="pend-empty">Idle — no active generations.</div>`;
-    } else {
-      rows = jobs.map((j) => {
-        const running = j.status === "running";
-        const since = running ? (j.started_at || j.created_at) : j.created_at;
-        // Live sampling progress — j.progress is "value/max" (e.g. "7/20").
-        let pct = null, frac = "";
-        if (running && j.progress && j.progress.includes("/")) {
-          const [v, m] = j.progress.split("/").map(Number);
-          if (m > 0) { pct = Math.min(100, Math.round((v / m) * 100)); frac = `${v}/${m}`; }
-        }
-        const right = running
-          ? elapsed(since) + (frac ? ` · ${frac}` : "")
-          : `waiting ${agoShort(j.created_at)}`;
-        const bar = !running
-          ? `<div class="pend-bar queued"><i></i></div>`
-          : pct != null
-          ? `<div class="pend-bar det"><i style="width:${pct}%"></i></div>`
-          : `<div class="pend-bar"><i></i></div>`; // indeterminate until 1st progress event
-        return `<div class="pend-row">` +
-          `<span class="pend-stamp ${running ? "running" : "queued"}">${running ? "running" : "queued"}</span>` +
-          `<div><div class="pend-kind">${esc(j.type || "job")}${j.model ? " · " + esc(j.model) : ""}</div>` +
-          `${bar}</div>` +
-          `<div class="pend-elapsed">${esc(right)}</div></div>`;
-      }).join("");
-    }
-    pending.innerHTML =
-      `<div class="pend-card"><div class="pend-head">` +
-      `<span>Pending</span>` +
-      `<span class="live"><span class="dot"></span>${jobs.length} active</span>` +
-      `</div>${rows}</div>`;
+    // Forget cancelling-ids that have left the feed (the cancel finished).
+    const feedIds = new Set(jobs.map((j) => j.job_id));
+    for (const id of [...cancelling]) if (!feedIds.has(id)) cancelling.delete(id);
 
-    // a job leaving the queue (likely) finished — refresh the gallery
+    const running = jobs.filter((j) => j.status === "running");
+    // Drop queued jobs the user just cancelled — gives instant feedback before
+    // the server-side status flip lands in the next poll.
+    const queued = jobs
+      .filter((j) => j.status === "queued" && !cancelling.has(j.job_id))
+      .sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
+
+    pending.innerHTML = buildPendingHtml(running, queued);
+    wirePending();
+
+    // A job leaving the queue (likely) finished — refresh the gallery.
     const cur = new Set(jobs.map((j) => j.job_id));
     if (lastPendingIds && [...lastPendingIds].some((id) => !cur.has(id))) loadJobs();
     lastPendingIds = cur;
