@@ -105,18 +105,19 @@ _OPENCV_PKGS = (
     "opencv-python", "opencv-python-headless",
     "opencv-contrib-python", "opencv-contrib-python-headless",
 )
-# Single known-good OpenCV. Custom-node installs (and the base image) end up
-# with MULTIPLE opencv variants whose typing stub and compiled binary
-# mismatch — 'cv2/typing/__init__.py: LayerId = cv2.dnn.DictValue' →
-# AttributeError, which crashes the whole ComfyUI process on startup.
-_OPENCV_PIN = "opencv-python-headless==4.10.0.84"
+_OPENCV_PIN = "opencv-python-headless==4.11.0.86"
 
 
 def _force_clean_opencv() -> None:
-    """Leave exactly ONE consistent OpenCV installed. Run after all node
-    installs: uninstall every variant, then install a single pinned one so
-    cv2's Python stubs and its compiled extension always come from the same
-    package."""
+    """Make `import cv2` reliably work. Two failure modes, both fixed here:
+
+    1. Custom-node installs leave MULTIPLE opencv variants (-python /
+       -headless / -contrib) clobbering one cv2/ dir → mismatched stub vs
+       binary. Fix: uninstall every variant, install exactly one.
+    2. Several opencv-python releases ship a cv2/typing/__init__.py that does
+       `LayerId = cv2.dnn.DictValue`, but the binary lacks DictValue →
+       AttributeError on import → the whole ComfyUI process crashes on
+       startup. Fix: patch that file to tolerate the missing attribute."""
     log.info("forcing clean opencv → %s", _OPENCV_PIN)
     try:
         _run(["pip", "uninstall", "-y", *_OPENCV_PKGS])
@@ -126,6 +127,30 @@ def _force_clean_opencv() -> None:
         _run(["pip", "install", "--no-input", _OPENCV_PIN])
     except subprocess.CalledProcessError as e:
         log.error("opencv reinstall failed (rc=%d)", e.returncode)
+    _patch_cv2_typing()
+
+
+def _patch_cv2_typing() -> None:
+    """Neutralise the `cv2.dnn.DictValue` reference in cv2/typing/__init__.py
+    so `import cv2` can't crash on it (version-independent)."""
+    import sysconfig
+    seen = set()
+    for key in ("platlib", "purelib"):
+        base = sysconfig.get_path(key)
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        f = Path(base) / "cv2" / "typing" / "__init__.py"
+        try:
+            if not f.is_file():
+                continue
+            txt = f.read_text()
+            if "cv2.dnn.DictValue" in txt:
+                f.write_text(txt.replace("cv2.dnn.DictValue",
+                                         'getattr(cv2.dnn, "DictValue", int)'))
+                log.info("patched cv2/typing DictValue reference at %s", f)
+        except Exception as e:  # noqa: BLE001
+            log.error("cv2 typing patch failed: %r", e)
 
 
 def _install_one(name: str, url: str, commit: Optional[str]) -> str:
