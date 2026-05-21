@@ -14,10 +14,19 @@ build (and the build's smoke test still catches a broken ComfyUI).
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import manifest_installer as mi
+
+# The metadata container (workers/metadata/Dockerfile) sets COMFY_METADATA=1.
+# It runs ComfyUI in CPU mode off a vanilla python:3.12-slim base with a real
+# CPU-built torch + torchaudio — NOT the NGC GPU image. The torchaudio re-stub
+# only exists to work around NGC shipping no torchaudio; on the metadata image
+# the real CPU torchaudio is fine, so stubbing it would be needlessly
+# destructive. Skip that one repair when baking the metadata image.
+IS_METADATA = os.environ.get("COMFY_METADATA") == "1"
 
 
 def main(list_path: str) -> int:
@@ -47,7 +56,9 @@ def main(list_path: str) -> int:
     # node). See manifest_installer for the details.
     mi._force_clean_opencv()
     mi._force_transformers()
-    mi._restore_torchaudio_stub()
+    # torchaudio re-stub is GPU-image-only — see IS_METADATA note above.
+    if not IS_METADATA:
+        mi._restore_torchaudio_stub()
     mi._patch_image_metadata_extension()
 
     print(f"[bake] done — {len(entries) - len(failed)} ok, {len(failed)} failed: {failed}",

@@ -2,10 +2,21 @@
 #
 # Metadata instance container — runs ComfyUI in CPU mode just to serve
 # /object_info, /extensions, and Manager UI to the editor. No GPU deps,
-# no Wan/sage/xformers. Small image (~1 GB) sized for t3.small.
+# no Wan/sage/xformers.
 #
 # Same ComfyUI version + Manager as the image worker so the node menu
 # the editor sees matches what the GPU workers will actually run.
+#
+# Custom nodes are BAKED IN AT BUILD TIME (same as the image worker — see
+# workers/image/Dockerfile). The old design ran manifest_installer at every
+# container boot, cloning + pip-installing all ~38 manifest packs on the
+# 2 GB t3.small. Newer packs pull heavy dependency trees (llama-cpp-python
+# built from source, voxcpm, funasr, gradio) — the box ran out of memory,
+# ComfyUI never started, and the editor showed "metadata unreachable".
+# Baking moves that work to build time (where it has CodeBuild's RAM and
+# any dependency conflict fails the build visibly); the runtime
+# manifest_installer then skips every pack carrying a .baked marker and
+# only clones genuinely net-new packs.
 
 # Pull from AWS's ECR Public mirror — same upstream image, but bypasses
 # Docker Hub's 100-pulls-per-6h unauthenticated cap that CodeBuild's NAT
@@ -19,10 +30,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git curl ca-certificates \
+        git curl ca-certificates build-essential cmake \
         libgl1 libglib2.0-0 \
+        ffmpeg \
         nginx-light \
     && rm -rf /var/lib/apt/lists/*
+
+# build-essential + cmake: some baked custom nodes pip-build native wheels
+# from source (llama-cpp-python, insightface, etc.). Without a compiler the
+# bake's pip install of those packs fails. ffmpeg: required by a handful of
+# video/image custom nodes at import time.
 
 # entrypoint.sh runs nginx as an auth gate in front of ComfyUI: it listens on
 # 8188 (the public port) and 403s any request lacking the X-Comfy-Auth shared
@@ -55,11 +72,26 @@ RUN mkdir -p ComfyUI-Manager && \
 COPY workers/shared/requirements.txt /tmp/req.txt
 RUN pip install -r /tmp/req.txt && rm /tmp/req.txt
 
-# Worker shared code (object_info_publisher, extensions_publisher).
+# Worker shared code (object_info_publisher, extensions_publisher,
+# manifest_installer, bake_nodes).
 WORKDIR /opt/worker
 COPY workers/shared/ /opt/worker/
 COPY workers/metadata/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+# ---------- Bake the custom-node set ----------
+# Clone + install every pack in baked_nodes.txt at BUILD time so the metadata
+# container does NOT clone/pip-install on every boot (which OOM-killed the
+# 2 GB t3.small). bake_nodes.py drops a .baked marker per pack; the runtime
+# manifest_installer skips anything baked. Net-new packs the user installs
+# later still go through the runtime manifest path.
+#
+# COMFY_METADATA=1 tells bake_nodes.py this is the CPU metadata image: it
+# skips the torchaudio re-stub (the image ships real CPU torchaudio; only the
+# NGC GPU worker needs the stub).
+ENV COMFY_METADATA=1
+COPY workers/image/baked_nodes.txt /tmp/baked_nodes.txt
+RUN cd /opt/worker && python3 bake_nodes.py /tmp/baked_nodes.txt
 
 # Per-job scratch dir — never used in metadata mode but ComfyUI checks for it.
 RUN mkdir -p /opt/comfy/output

@@ -46,9 +46,13 @@ INI
 fi
 
 # Sync custom nodes from the S3 manifest BEFORE starting ComfyUI so the node
-# defs surface in /object_info on first publish. Best-effort: a failing node
-# logs and we continue with the rest. See workers/shared/manifest_installer.py.
-echo "  syncing custom nodes from manifest..."
+# defs surface in /object_info on first publish. The common set is BAKED into
+# this image at build time (workers/metadata/Dockerfile runs bake_nodes.py) —
+# manifest_installer skips every pack carrying a .baked marker, so this is a
+# fast no-op on a normal boot and only clones genuinely net-new packs the user
+# installed via Manager since the last image build. Best-effort: a failing
+# node logs and we continue. See workers/shared/manifest_installer.py.
+echo "  syncing custom nodes from manifest (baked packs skipped)..."
 ( cd /opt/worker && python -m manifest_installer 2>&1 ) || \
   echo "  WARN: manifest_installer exited non-zero (continuing)"
 

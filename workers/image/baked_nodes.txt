@@ -36,3 +36,8 @@ controlaltai-nodes https://github.com/gseth/ControlAltAI-Nodes
 comfyui-cyberdelia-z-engineer https://github.com/cyberdeliaAI/comfyui-cyberdelia-z-engineer
 comfyui-cyberdelia-metadata https://github.com/cyberdeliaAI/comfyui-cyberdelia-metadata
 vrgamedev_video_nodes https://github.com/vrgamegirl19/comfyui-vrgamedevgirl
+comfyui_ipadapter_plus https://github.com/cubiq/ComfyUI_IPAdapter_plus
+comfyui-lora-manager https://github.com/willmiao/ComfyUI-Lora-Manager
+z-tipo-extension https://github.com/KohakuBlueleaf/z-tipo-extension
+comfyui-ppm https://github.com/pamparamm/ComfyUI-ppm
+comfyui-fbcnn https://github.com/Miosp/ComfyUI-FBCNN
