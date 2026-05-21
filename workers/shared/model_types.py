@@ -35,6 +35,9 @@ TYPE_DIR: dict[str, str] = {
     "vae_approx": "vae_approx",
     "model_patches": "model_patches",
     "unet": "unet",
+    # Impact-Pack / Impact-Subpack detector models (face_yolov8m-seg etc.).
+    # ComfyUI reads models/ultralytics/{bbox,segm}/.
+    "ultralytics": "ultralytics",
 }
 
 

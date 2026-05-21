@@ -50,6 +50,7 @@ ALLOWED_TYPES = (
     "audio_encoders",    # → models/audio_encoders — for audio-conditioned video
     "model_patches",     # → models/model_patches
     "unet",              # → models/unet — deprecated alias for diffusion_models
+    "ultralytics",       # → models/ultralytics — Impact-Pack detector models
 )
 DOWNLOAD_TTL = timedelta(hours=24)
 
