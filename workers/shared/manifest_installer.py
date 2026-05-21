@@ -84,10 +84,6 @@ def sync() -> dict[str, str]:
     CUSTOM_NODES_DIR.mkdir(parents=True, exist_ok=True)
     log.info("syncing %d custom nodes from manifest", len(nodes))
 
-    # Snapshot OpenCV before installs — custom nodes routinely pull conflicting
-    # opencv variants and the result crashes ComfyUI on startup.
-    opencv_snapshot = _opencv_snapshot()
-
     for entry in nodes:
         name = entry.get("name") or _name_from_url(entry.get("url", ""))
         url = entry.get("url")
@@ -101,7 +97,7 @@ def sync() -> dict[str, str]:
             log.exception("install %s crashed", name)
             results[name] = f"failed: {e!r}"
 
-    _restore_opencv(opencv_snapshot)
+    _force_clean_opencv()
     return results
 
 
@@ -109,36 +105,27 @@ _OPENCV_PKGS = (
     "opencv-python", "opencv-python-headless",
     "opencv-contrib-python", "opencv-contrib-python-headless",
 )
+# Single known-good OpenCV. Custom-node installs (and the base image) end up
+# with MULTIPLE opencv variants whose typing stub and compiled binary
+# mismatch — 'cv2/typing/__init__.py: LayerId = cv2.dnn.DictValue' →
+# AttributeError, which crashes the whole ComfyUI process on startup.
+_OPENCV_PIN = "opencv-python-headless==4.10.0.84"
 
 
-def _opencv_snapshot() -> list[str]:
-    """`pkg==version` for every OpenCV variant the (working) image shipped."""
-    import importlib.metadata as md
-    snap = []
-    for pkg in _OPENCV_PKGS:
-        try:
-            snap.append(f"{pkg}=={md.version(pkg)}")
-        except Exception:  # noqa: BLE001
-            pass
-    return snap
-
-
-def _restore_opencv(snapshot: list[str]) -> None:
-    """Force OpenCV back to exactly what the image shipped. Node installs mix
-    opencv-python / -headless / -contrib at clashing versions, which raises
-    'cv2.dnn has no attribute DictValue' and crashes the whole ComfyUI
-    process. Uninstall every variant, reinstall the snapshot."""
-    if not snapshot:
-        return
-    log.info("restoring opencv: %s", ", ".join(snapshot))
+def _force_clean_opencv() -> None:
+    """Leave exactly ONE consistent OpenCV installed. Run after all node
+    installs: uninstall every variant, then install a single pinned one so
+    cv2's Python stubs and its compiled extension always come from the same
+    package."""
+    log.info("forcing clean opencv → %s", _OPENCV_PIN)
     try:
         _run(["pip", "uninstall", "-y", *_OPENCV_PKGS])
     except subprocess.CalledProcessError:
         pass
     try:
-        _run(["pip", "install", "--no-input", "--no-deps", *snapshot])
+        _run(["pip", "install", "--no-input", _OPENCV_PIN])
     except subprocess.CalledProcessError as e:
-        log.error("opencv restore failed (rc=%d)", e.returncode)
+        log.error("opencv reinstall failed (rc=%d)", e.returncode)
 
 
 def _install_one(name: str, url: str, commit: Optional[str]) -> str:
