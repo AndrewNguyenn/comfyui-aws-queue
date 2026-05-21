@@ -36,9 +36,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         nginx-light \
     && rm -rf /var/lib/apt/lists/*
 
-# build-essential + cmake: some baked custom nodes pip-build native wheels
-# from source (llama-cpp-python, insightface, etc.). Without a compiler the
-# bake's pip install of those packs fails. ffmpeg: required by a handful of
+# build-essential + cmake: several baked custom-node packs (comfyui-impact-pack
+# and others) pip-build native wheels from source during the bake; without a
+# C/C++ toolchain those installs fail. ffmpeg: required by a handful of
 # video/image custom nodes at import time.
 
 # entrypoint.sh runs nginx as an auth gate in front of ComfyUI: it listens on
@@ -93,11 +93,18 @@ ENV COMFY_METADATA=1
 COPY workers/image/baked_nodes.txt /tmp/baked_nodes.txt
 RUN cd /opt/worker && python3 bake_nodes.py /tmp/baked_nodes.txt
 
+# Build-verify the torch foundation after the bake. A baked pack's
+# requirements.txt can pull a CUDA torchaudio (which needs a libcudart this
+# CPU-only slim image lacks) over the real CPU one. Fail the BUILD here rather
+# than ship a metadata image whose ComfyUI crashes on boot — which surfaces in
+# production as "metadata unreachable" in the editor.
+RUN python -c "import torch, torchaudio; print('torch', torch.__version__, 'torchaudio', torchaudio.__version__, 'import OK')"
+
 # Per-job scratch dir — never used in metadata mode but ComfyUI checks for it.
 RUN mkdir -p /opt/comfy/output
 
-# Smoke test: can ComfyUI import in CPU mode + Manager loads?
-RUN cd /opt/comfy && python -c "import sys; sys.path.insert(0,'.'); import comfy" \
-    || echo "WARNING: comfy import quick-check failed"
+# Smoke test: ComfyUI must import in CPU mode. Fatal — a broken import would
+# otherwise ship and surface as "metadata unreachable".
+RUN cd /opt/comfy && python -c "import sys; sys.path.insert(0,'.'); import comfy"
 
 ENTRYPOINT ["/entrypoint.sh"]

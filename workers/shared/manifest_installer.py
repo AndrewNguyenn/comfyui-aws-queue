@@ -79,6 +79,15 @@ def load_manifest() -> dict:
         return {"version": 1, "nodes": []}
 
 
+# The metadata container (workers/metadata/Dockerfile) sets COMFY_METADATA=1.
+# It runs ComfyUI on a vanilla python:3.12-slim base with a real CPU-built
+# torchaudio — NOT the NGC GPU image. The torchaudio re-stub only exists to
+# work around NGC shipping no torchaudio; on the metadata image the real CPU
+# torchaudio is correct and stubbing it breaks audio nodes. Both the runtime
+# sync() below and the build-time bake_nodes.py gate the re-stub on this.
+IS_METADATA = os.environ.get("COMFY_METADATA") == "1"
+
+
 def sync() -> dict[str, str]:
     """Sync /opt/comfy/custom_nodes against the manifest.
 
@@ -117,7 +126,11 @@ def sync() -> dict[str, str]:
     if installed_any:
         _force_clean_opencv()
         _force_transformers()
-        _restore_torchaudio_stub()
+        # GPU-image-only — the metadata image ships real CPU torchaudio and
+        # re-stubbing it here (on every boot a net-new pack is installed)
+        # would destroy it. See IS_METADATA above.
+        if not IS_METADATA:
+            _restore_torchaudio_stub()
         _patch_image_metadata_extension()
     return results
 

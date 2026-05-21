@@ -1,7 +1,8 @@
 """
 Build-time custom-node baker.
 
-Run during `docker build` (see workers/image/Dockerfile). Clones + installs
+Run during `docker build` — by both workers/image/Dockerfile (GPU worker)
+and workers/metadata/Dockerfile (CPU metadata image). Clones + installs
 every pack listed in baked_nodes.txt into /opt/comfy/custom_nodes/, reusing
 manifest_installer's install logic (numpy/torch pin constraint, single clean
 OpenCV, cv2 typing patch). Drops a `.baked` marker in each pack dir so the
@@ -14,19 +15,15 @@ build (and the build's smoke test still catches a broken ComfyUI).
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
 import manifest_installer as mi
 
-# The metadata container (workers/metadata/Dockerfile) sets COMFY_METADATA=1.
-# It runs ComfyUI in CPU mode off a vanilla python:3.12-slim base with a real
-# CPU-built torch + torchaudio — NOT the NGC GPU image. The torchaudio re-stub
-# only exists to work around NGC shipping no torchaudio; on the metadata image
-# the real CPU torchaudio is fine, so stubbing it would be needlessly
-# destructive. Skip that one repair when baking the metadata image.
-IS_METADATA = os.environ.get("COMFY_METADATA") == "1"
+# mi.IS_METADATA (set from COMFY_METADATA=1, the metadata image) — single
+# source of truth lives in manifest_installer; see the note there. When set,
+# the torchaudio re-stub is skipped (the metadata image keeps real CPU
+# torchaudio).
 
 
 def main(list_path: str) -> int:
@@ -56,8 +53,8 @@ def main(list_path: str) -> int:
     # node). See manifest_installer for the details.
     mi._force_clean_opencv()
     mi._force_transformers()
-    # torchaudio re-stub is GPU-image-only — see IS_METADATA note above.
-    if not IS_METADATA:
+    # torchaudio re-stub is GPU-image-only — skipped on the metadata image.
+    if not mi.IS_METADATA:
         mi._restore_torchaudio_stub()
     mi._patch_image_metadata_extension()
 
