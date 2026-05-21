@@ -65,15 +65,35 @@
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const isVideoKey = (k) => /\.(mp4|webm|mov|gif|mkv)$/i.test(k);
   const fmtWhen = (iso) => (iso ? iso.replace("T", " ").slice(0, 16) : "");
-  // A titled prompt block for the modal info panel. The positive prompt always
-  // renders (with a muted fallback); a missing negative prompt is common
-  // (Flux/SDXL graphs often have none) so that section is simply omitted.
-  function promptSection(label, text, cls) {
+  // A titled prompt block for the modal info panel. `neg`-styled when the
+  // label reads as a negative prompt (the label text comes from the API).
+  function promptSection(label, text) {
     text = (text || "").trim();
-    if (!text && cls === "neg") return "";
-    const ttl = `<div class="section-ttl">${label}</div>`;
-    if (!text) return ttl + `<div class="prompt muted">Not recorded for this generation.</div>`;
-    return ttl + `<div class="prompt ${cls}">${esc(text)}</div>`;
+    if (!text) return "";
+    const neg = /negative/i.test(label) ? " neg" : "";
+    return `<div class="section-ttl">${esc(label)}</div>` +
+      `<div class="prompt${neg}">${esc(text)}</div>`;
+  }
+  // All prompt sections for a job — one per distinct prompt the workflow used
+  // (detailer graphs carry several). Empty → a single muted note.
+  function promptsBlock(prompts) {
+    const blocks = (prompts || []).map((p) => promptSection(p.label, p.text)).join("");
+    return blocks || (`<div class="section-ttl">Prompt</div>` +
+      `<div class="prompt muted">Not recorded for this generation.</div>`);
+  }
+  // Generation parameters — only the fields the workflow actually carried.
+  function paramsSection(params) {
+    params = params || {};
+    const rows = [
+      ["Steps", params.steps], ["CFG", params.cfg],
+      ["Sampler", params.sampler_name], ["Scheduler", params.scheduler],
+      ["Denoise", params.denoise], ["Seed", params.seed],
+    ].filter(([, v]) => v != null && v !== "");
+    if (!rows.length) return "";
+    return `<div class="section-ttl">Parameters</div>` +
+      rows.map(([k, v]) =>
+        `<div class="field"><div class="k">${k}</div>` +
+        `<div class="v">${esc(String(v))}</div></div>`).join("");
   }
   function elapsed(iso) {
     if (!iso) return "";
@@ -569,8 +589,8 @@
             `<div class="field"><div class="k">Type</div><div class="v">${esc(job.type || "—")}</div></div>` +
             `<div class="field"><div class="k">Created</div><div class="v">${esc(fmtWhen(job.created_at))}</div></div>` +
             `<div class="field"><div class="k">Job</div><div class="v">${esc(job.job_id.slice(0, 8))}</div></div>` +
-            promptSection("Prompt", job.positive_prompt, "") +
-            promptSection("Negative prompt", job.negative_prompt, "neg") +
+            paramsSection(job.params) +
+            promptsBlock(job.prompts) +
           `</div>` +
           `<div class="info-foot">` +
             `<button class="dl">Download</button>` +
