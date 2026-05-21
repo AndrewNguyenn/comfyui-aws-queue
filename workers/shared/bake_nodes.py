@@ -41,9 +41,12 @@ def main(list_path: str) -> int:
             failed.append(name)
             print(f"[bake] FAIL {name}: {e!r}", flush=True)
 
-    # One clean OpenCV + cv2 typing patch for the whole set (see
-    # manifest_installer — mixed opencv variants crash ComfyUI on startup).
+    # Repair the foundation after the whole set is installed: one clean
+    # OpenCV (mixed variants crash ComfyUI) + transformers pinned to a
+    # torch-2.5-compatible release (newer ones break every transformers
+    # node). See manifest_installer for the details.
     mi._force_clean_opencv()
+    mi._force_transformers()
 
     print(f"[bake] done — {len(entries) - len(failed)} ok, {len(failed)} failed: {failed}",
           flush=True)

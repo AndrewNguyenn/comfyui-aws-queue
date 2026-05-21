@@ -112,10 +112,11 @@ def sync() -> dict[str, str]:
             log.exception("install %s crashed", name)
             results[name] = f"failed: {e!r}"
 
-    # Only re-clean OpenCV if a net-new pack was actually installed — an
-    # all-baked boot already has a clean image, no need to churn.
+    # Only re-repair the foundation if a net-new pack was actually installed
+    # — an all-baked boot already has a clean image, no need to churn.
     if installed_any:
         _force_clean_opencv()
+        _force_transformers()
     return results
 
 
@@ -146,6 +147,24 @@ def _force_clean_opencv() -> None:
     except subprocess.CalledProcessError as e:
         log.error("opencv reinstall failed (rc=%d)", e.returncode)
     _patch_cv2_typing()
+
+
+_TRANSFORMERS_PIN = "transformers==4.46.3"
+
+
+def _force_transformers() -> None:
+    """transformers >=4.54 ships generation/continuous_batching/distributed.py
+    which does `from torch.distributed.tensor.device_mesh import DeviceMesh` —
+    a path absent from NGC's torch 2.5. transformers' lazy import machinery
+    then fails for AutoModel / BlipProcessor / etc., so every node that
+    touches transformers (Easy-Use, WAS, LayerStyle, Florence2…) IMPORT
+    FAILS. Node installs keep upgrading transformers; force it back to a
+    torch-2.5-era release as the last step, after everything else."""
+    log.info("forcing transformers → %s", _TRANSFORMERS_PIN)
+    try:
+        _run(["pip", "install", "--no-input", _TRANSFORMERS_PIN])
+    except subprocess.CalledProcessError as e:
+        log.error("transformers pin failed (rc=%d)", e.returncode)
 
 
 def _patch_cv2_typing() -> None:
