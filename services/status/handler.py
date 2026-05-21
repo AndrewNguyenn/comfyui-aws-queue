@@ -373,8 +373,8 @@ def _list_jobs(event: dict) -> dict:
     """GET /jobs?status=complete,failed,cancelled&limit=64&offset=0
 
     Queries the status-index GSI (paginated — see _query_newest) once per
-    requested status, merges, sorts by completion time newest-first, then
-    applies offset/limit in Python.
+    requested status, merges, sorts by submission time (created_at)
+    newest-first, then applies offset/limit in Python.
     """
     qs = event.get("queryStringParameters") or {}
     statuses = [s.strip() for s in (qs.get("status") or "").split(",") if s.strip()]
@@ -394,24 +394,15 @@ def _list_jobs(event: dict) -> dict:
         offset = 0
 
     # Each status contributes its newest (offset+limit) records by created_at
-    # (the GSI sort key); the merge is then re-sorted by completed_at. The page
-    # is exact whenever each status fits within offset+limit rows — true for
-    # the gallery (limit=500, ~128 complete jobs). If a status ever exceeds
-    # that, a job created early but completed late could fall just outside the
-    # fetched window; acceptable best-effort until volume warrants real paging.
+    # (the GSI sort key). Since the merge below also sorts by created_at, the
+    # fetch order and sort order match, so the top (offset+limit) of the merge
+    # is exactly the global newest however the statuses interleave.
     items: list[dict] = []
     for status in statuses:
         items.extend(_query_newest(status, offset + limit))
 
-    # Sort by completion time — the worker stamps completed_at right after it
-    # uploads the outputs to S3, so it is the closest proxy to "S3 insert time"
-    # without a HeadObject per image. Fall back to created_at for records with
-    # no completed_at (still queued/running, or an older failed record).
-    items.sort(
-        key=lambda it: (it.get("completed_at", {}).get("S", "")
-                        or it.get("created_at", {}).get("S", "")),
-        reverse=True,
-    )
+    # Newest first by submission time (created_at).
+    items.sort(key=lambda it: it.get("created_at", {}).get("S", ""), reverse=True)
     page = items[offset : offset + limit]
 
     jobs = [_serialize_job(it) for it in page]
