@@ -270,19 +270,32 @@ export class ComputeStack extends Stack {
           })),
         ],
         instancesDistribution: {
-          // Pure spot — user explicitly never wants on-demand. The ASG
-          // spreads across AZs (and any fallback instance types a fleet
-          // defines) using capacity-optimized; if every pool is
-          // unfulfillable in every AZ, jobs queue until capacity returns.
-          // The image fleet has no fallback type (g5.2xlarge only).
+          // Pure spot — user explicitly never wants on-demand (and the
+          // account's on-demand G/VT quota is 0 anyway).
           onDemandBaseCapacity: 0,
           onDemandPercentageAboveBaseCapacity: 0,
-          spotAllocationStrategy: autoscaling.SpotAllocationStrategy.CAPACITY_OPTIMIZED,
+          // capacity-optimized-PRIORITIZED — honors the launchTemplate
+          // overrides order as a preference (primaryInstanceType first),
+          // optimizing for capacity only as the tiebreak. So each fleet
+          // sticks to its primary type whenever that pool has spot capacity
+          // and only walks down the fallback list during a drought.
+          // (Plain capacity-optimized ignores order and picks raw capacity.)
+          spotAllocationStrategy:
+            autoscaling.SpotAllocationStrategy.CAPACITY_OPTIMIZED_PRIORITIZED,
         },
       },
       minCapacity,
       maxCapacity,
-      capacityRebalance: true,
+      // capacityRebalance:false — with it on, AWS rebalance recommendations
+      // made the ASG terminate at-risk spot instances, but during a capacity
+      // drought the replacement launch fails (UnfulfillableCapacity) and the
+      // fleet churns to zero. Off: an instance runs until an actual spot
+      // interruption (with its 2-minute warning) — strictly better than
+      // being pre-emptively killed with no replacement available.
+      capacityRebalance: false,
+      // Grace period so a freshly-launched spot instance has time to boot
+      // and register before EC2 health checks can act on it.
+      healthCheck: autoscaling.HealthCheck.ec2({ grace: Duration.seconds(300) }),
       newInstancesProtectedFromScaleIn: false,
     });
 
@@ -351,16 +364,20 @@ export class ComputeStack extends Stack {
       // if we ever need to drop CAP_SYS_ADMIN — currently requires a host-side
       // helper we don't have.
       linuxParameters: new ecs.LinuxParameters(this, `${fleetName}LinuxParams`, {}),
-      // Memory caps:
-      //   - memoryReservationMiB (soft / placement): 11264 fits both .xlarge
-      //     (16 GB) and .2xlarge (32 GB) with ECS agent + OS headroom.
-      //   - memoryLimitMiB (hard cap): bounded so the container can't compete
-      //     with the OS or with mount-s3's host-side RSS for sys RAM. On the
-      //     .xlarge fallback this means big checkpoints OOM mid-load (known
-      //     trade-off — better than being unschedulable). On .2xlarge we leave
-      //     some headroom for mount-s3's page cache + writeback buffers.
+      // Memory:
+      //   - memoryReservationMiB (soft / used for ECS placement): 11264 fits
+      //     both .xlarge (16 GB) and .2xlarge (32 GB) with ECS-agent + OS
+      //     headroom.
+      //   - image: NO hard memoryLimitMiB. A hard cap sized for .2xlarge
+      //     (28672) exceeds what a .xlarge fallback even has, making the task
+      //     unschedulable there — which silently stranded the fleet. Without
+      //     a hard cap the container uses whatever the instance provides; a
+      //     20 GB+ FLOW checkpoint landing on a .xlarge will still OOM the
+      //     box (accepted — see config.ts fallbackInstanceTypes).
+      //   - video: keep the 28672 hard cap — always runs on instances with
+      //     enough RAM; bounds it against mount-s3's host-side RSS.
       memoryReservationMiB: fleetName === 'image' ? 11264 : 24576,
-      memoryLimitMiB: fleetName === 'image' ? 28672 : 28672,
+      memoryLimitMiB: fleetName === 'image' ? undefined : 28672,
       essential: true,
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: fleetName,

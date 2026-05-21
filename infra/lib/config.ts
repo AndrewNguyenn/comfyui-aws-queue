@@ -106,14 +106,22 @@ export const APP_CONFIG: AppConfig = {
       // blows the worker timeout. On an A10G the same model runs in bf16,
       // mostly in-VRAM: ~2-3 min/image.
       primaryInstanceType: 'g5.2xlarge',
-      // No fallback. g5.xlarge / g4dn.xlarge (16 GB sys RAM) can't mmap the
-      // 20 GB+ checkpoints — the kernel overcommit heuristic refuses a
-      // mapping larger than physical RAM. g4dn.2xlarge has the RAM but its
-      // T4 is too slow for Flux (see above). A fallback that's guaranteed to
-      // fail (or take 40 min) is worse than waiting — it burns a spot launch
-      // before erroring. g5.2xlarge only; if A10G spot is unavailable the
-      // job waits in SQS. 8 vCPU = the full us-east-1 G/VT spot quota.
-      fallbackInstanceTypes: [],
+      // Fallbacks across the g5 (A10G) and g6 (L4) families — added after a
+      // us-east-1 g5 spot drought left the fleet unable to launch anything
+      // (UnfulfillableCapacity in every g5 pool). All four are bf16-capable.
+      // ORDER IS PRIORITY: the ASG uses capacity-optimized-PRIORITIZED, so
+      // g5.2xlarge (the intended main: A10G, 8 vCPU, 32 GB) is used whenever
+      // it has spot capacity; the fleet only falls to g5.xlarge, then the g6
+      // (L4) sizes, during a drought. g6 is actually cheaper than g5, so
+      // falling back never raises cost.
+      // Trade-off: the .xlarge sizes have 16 GB sys RAM — fine for SDXL
+      // (~7 GB checkpoints) but they CANNOT mmap 20 GB+ FLOW checkpoints
+      // (kernel overcommit refuses a mapping > physical RAM), so a heavy
+      // FLOW job that lands on a .xlarge will OOM mid-load. Accepted: a
+      // worker running SDXL beats no worker at all during a drought.
+      // The container has no hard memory cap (see makeTaskDefinition) so it
+      // schedules on both .xlarge (16 GB) and .2xlarge (32 GB).
+      fallbackInstanceTypes: ['g5.xlarge', 'g6.2xlarge', 'g6.xlarge'],
       rootVolumeGb: 150,
     },
     video: {
