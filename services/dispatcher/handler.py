@@ -446,16 +446,31 @@ def _build_object_info() -> dict:
         for input_name, spec in inputs.items():
             if not isinstance(spec, list) or not spec:
                 continue
-            choices_or_type = spec[0]
-            if not isinstance(choices_or_type, list):
+            # ComfyUI reports a dropdown's choices in one of two schemas:
+            #   old:  [[choice, ...], {opts}]                  — choices at spec[0]
+            #   new:  ["COMBO", {"options": [choice, ...], ...}] — choices at spec[1].options
+            # Core nodes (e.g. UpscaleModelLoader) emit the new schema; many
+            # custom nodes still emit the old one. Handle both, else the
+            # editor's dropdown never gets the catalog (it stayed empty).
+            s0 = spec[0]
+            if isinstance(s0, list):
+                choices, new_schema = s0, False
+            elif (isinstance(s0, str) and len(spec) > 1 and isinstance(spec[1], dict)
+                  and isinstance(spec[1].get("options"), list)):
+                choices, new_schema = spec[1]["options"], True
+            else:
                 continue
-            # If non-empty, require all-strings (a real dropdown, not e.g.
-            # a tuple type like ["INT", {...}]).
-            if choices_or_type and not all(isinstance(x, str) for x in choices_or_type):
+            # If non-empty, require all-strings (a real model dropdown, not
+            # e.g. an enum of ints).
+            if choices and not all(isinstance(x, str) for x in choices):
                 continue
             model_type = _guess_model_type_from_input(node_class, input_name)
             if model_type and model_type in catalog_by_type:
-                spec[0] = sorted(catalog_by_type[model_type])
+                new_choices = sorted(catalog_by_type[model_type])
+                if new_schema:
+                    spec[1]["options"] = new_choices
+                else:
+                    spec[0] = new_choices
 
     return merged
 
