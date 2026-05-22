@@ -557,7 +557,17 @@ def _view(event: dict) -> dict:
     try:
         url = s3.generate_presigned_url(
             "get_object",
-            Params={"Bucket": OUTPUTS_BUCKET, "Key": key},
+            # ResponseCacheControl makes S3 return a real Cache-Control on the
+            # image response (the objects themselves carry none). Output PNGs
+            # are immutable — a generation's file never changes — so the
+            # browser can cache hard and never revalidate within the URL's
+            # life. Without this the browser only heuristic-caches, which is
+            # near-useless for freshly-generated images.
+            Params={
+                "Bucket": OUTPUTS_BUCKET,
+                "Key": key,
+                "ResponseCacheControl": "public, max-age=31536000, immutable",
+            },
             ExpiresIn=PRESIGNED_GET_TTL,
         )
     except ClientError as e:
