@@ -94,6 +94,38 @@ else
     done
 fi
 
+# ----- 1b. mount-s3 for prompt wildcards -----
+# Wildcards aren't a models/ type — they're prompt .txt files. Impact-Pack
+# loads them from its default custom_wildcards path (<node>/custom_wildcards —
+# the node dir name comes from baked_nodes.txt), so mount the wildcards/ S3
+# prefix straight there; downloaded packs are then picked up with no
+# Impact-Pack config. Impact-Pack scans this dir once at startup, so a pack
+# downloaded after a worker is running needs a worker rotation to be seen.
+# Tiny cache — these are text files.
+if [ -n "$MODELS_BUCKET" ]; then
+    WC_AT=/opt/comfy/custom_nodes/comfyui-impact-pack/custom_wildcards
+    WC_CACHE="$CACHE_ROOT/mount-s3/wildcards"
+    mkdir -p "$WC_AT" "$WC_CACHE"
+    if mountpoint -q "$WC_AT"; then
+        MOUNTS+=("$WC_AT")
+    else
+        find "$WC_AT" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
+        if mount-s3 \
+                --prefix wildcards/ \
+                --cache "$WC_CACHE" \
+                --max-cache-size 256 \
+                --allow-other \
+                --metadata-ttl 60 \
+                --read-only \
+                "$MODELS_BUCKET" "$WC_AT"; then
+            echo "  mounted s3://$MODELS_BUCKET/wildcards/ at $WC_AT"
+            MOUNTS+=("$WC_AT")
+        else
+            echo "  WARN: mount-s3 failed for wildcards (continuing)"
+        fi
+    fi
+fi
+
 # ----- 2. Barrier: wait until every mount is visible -----
 # mount-s3 daemonizes when it succeeds, but FUSE may need a moment for the
 # mountpoint to be visible to other processes. Without this, ComfyUI's

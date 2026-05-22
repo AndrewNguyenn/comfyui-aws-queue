@@ -48,6 +48,11 @@ TYPE_DIR: dict[str, str] = {
     # nodes load these from models/insightface/. The buffalo_l set lives at
     # models/insightface/models/buffalo_l/.
     "insightface": "insightface",
+    # NOTE: the 'wildcards' catalog type is deliberately NOT here. Wildcards
+    # are prompt .txt files, not a models/ subdir — workers/image/entrypoint.sh
+    # mounts the wildcards/ S3 prefix at Impact-Pack's custom_wildcards path
+    # instead. kickoff.py ALLOWED_TYPES still lists it so the downloader
+    # accepts the type.
 }
 
 

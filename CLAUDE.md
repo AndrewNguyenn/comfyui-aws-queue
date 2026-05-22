@@ -126,6 +126,12 @@ ComfyUI `/history` `outputs` shows which nodes actually ran.
   seeds within that — a larger value fails `prompt_outputs_failed_validation`.
 - **API Gateway leaves `%2F` encoded** in `{proxy+}` greedy path params —
   decode it (this broke userdata/workflow save+load).
+- **Wildcards** download via the `wildcards` catalog type (a `.zip` pack is
+  unzipped by `services/downloader/worker.py`). They are NOT a `models/` type:
+  `workers/image/entrypoint.sh` mounts the `wildcards/` S3 prefix at
+  Impact-Pack's `custom_wildcards` dir. Impact-Pack scans that dir once at
+  startup — a pack downloaded *after* a worker is already running won't be
+  seen until the worker is rotated.
 - **Worker rotation strands in-flight jobs** as zombie `running` records — when
   rotating the `comfy-image` task definition, expect to clean those up.
 - The image fleet runs a **mixed-instance spot ASG** across the g5 (A10G) and
