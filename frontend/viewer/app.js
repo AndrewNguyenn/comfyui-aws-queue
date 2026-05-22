@@ -25,7 +25,7 @@
   // button can write to the clipboard synchronously inside the click gesture
   // (execCommand — the only option on this plain-HTTP viewer — won't copy
   // outside an active user gesture, so it can't run after an awaited fetch).
-  let modalWf = { jobId: null, wf: null };
+  let modalWf = { jobId: null, wf: null, full: false };
 
   /* ---------- auth ---------- */
   function authHeaders() {
@@ -615,10 +615,16 @@
     const copyBtn = scrim.querySelector(".copywf");
     copyBtn.onclick = () => doCopyWorkflow(job, copyBtn);
     // Pre-fetch the workflow so the copy is gesture-synchronous (see modalWf).
-    modalWf = { jobId: job.job_id, wf: null };
+    modalWf = { jobId: job.job_id, wf: null, full: false };
     authedFetch(`/jobs/${encodeURIComponent(job.job_id)}`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d && modalWf.jobId === job.job_id) modalWf.wf = d.workflow || null; })
+      .then((d) => {
+        if (d && modalWf.jobId === job.job_id) {
+          // Prefer the full editor workflow; older jobs only have the API prompt.
+          modalWf.wf = d.workflow_ui || d.workflow || null;
+          modalWf.full = !!d.workflow_ui;
+        }
+      })
       .catch(() => {});
     presignedUrl(key).then((url) => {
       const slot = scrim.querySelector(".media-slot");
@@ -656,21 +662,45 @@
   }
 
   /* ---------- copy workflow (seed-randomized) ---------- */
-  // The seed lives on different node types depending on the graph — KSampler
-  // `seed`, custom samplers `noise_seed`, an rgthree Seed node, an "Input
-  // Parameters" node. Replace every literal seed (a number — not a
-  // [nodeId, idx] link) so the copy is seed-canonical: copying any of N
+  // < 2^50 — within rgthree's Seed-node cap (1125899906842624).
+  const randSeed = () => Math.floor(Math.random() * 0x4000000000000);
+  // Replace every seed so the copy is seed-canonical: copying any of N
   // identical-but-different-seed runs yields the same workflow, with a fresh
-  // random seed each click.
+  // random seed each click. Handles both shapes the button may receive:
+  //   - full editor workflow: { nodes: [ { type, widgets_values:[...] } ] } —
+  //     the seed is a positional widget value (first integer on a sampler /
+  //     seed / noise node).
+  //   - API prompt: { nodeId: { inputs:{ seed|noise_seed } } } — a named input
+  //     (skip [nodeId, idx] link arrays — those aren't literal seeds).
   function randomizeSeeds(wf) {
     let n = 0;
+    if (Array.isArray(wf.nodes)) {
+      // The UI workflow carries no widget names — match known seed-bearing
+      // node types and take the first integer widget (the seed slot for all
+      // of them). Anchored/exact rather than a loose substring so a non-seed
+      // integer on an unrelated node isn't randomized by mistake.
+      const isSeedNode = (t) =>
+        /^(KSampler|KSamplerAdvanced|SamplerCustom|SamplerCustomAdvanced|RandomNoise)$/i.test(t) ||
+        /seed/i.test(t);
+      for (const node of wf.nodes) {
+        const wv = node && node.widgets_values;
+        if (!Array.isArray(wv) || !isSeedNode(node.type || "")) continue;
+        for (let i = 0; i < wv.length; i++) {
+          if (typeof wv[i] === "number" && Number.isInteger(wv[i]) && wv[i] >= 0) {
+            wv[i] = randSeed(); // first non-negative integer widget is the seed
+            n++;
+            break;
+          }
+        }
+      }
+      return n;
+    }
     for (const node of Object.values(wf)) {
       const inp = node && node.inputs;
       if (!inp || typeof inp !== "object") continue;
       for (const k of ["seed", "noise_seed"]) {
         if (typeof inp[k] === "number") {
-          // < 2^50 — within rgthree's Seed-node cap (1125899906842624).
-          inp[k] = Math.floor(Math.random() * 0x4000000000000);
+          inp[k] = randSeed();
           n++;
         }
       }
@@ -710,9 +740,12 @@
     }
     btn.textContent = "Copied ✓";
     setTimeout(() => { if (btn.isConnected) btn.textContent = "Copy JSON"; }, 2000);
-    showToast(n
-      ? `Workflow copied — ${n} seed${n > 1 ? "s" : ""} randomized`
-      : "Workflow copied — no literal seed found (it may be wired through another node)");
+    const seeds = n
+      ? `${n} seed${n > 1 ? "s" : ""} randomized`
+      : "no seed found to randomize";
+    showToast(modalWf.full
+      ? `Full workflow copied — ${seeds}`
+      : `Copied API prompt (full graph unavailable for this run) — ${seeds}`);
   }
 
   /* ---------- wiring ---------- */
