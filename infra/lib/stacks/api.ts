@@ -69,7 +69,11 @@ export class ApiStack extends Stack {
       timeout: Duration.seconds(29), // Just under API GW 30s timeout
       memorySize: 512,
       logRetention: logs.RetentionDays.ONE_WEEK,
-      tracing: lambda.Tracing.ACTIVE,
+      // X-Ray disabled: ACTIVE records a trace per invocation, and the
+      // editor's constant polling (job status, /object_info, /view) burned
+      // the 100k-traces/month free tier for traces nobody reads. Flip back
+      // to lambda.Tracing.ACTIVE temporarily if you need to debug latency.
+      tracing: lambda.Tracing.DISABLED,
       environment: {
         REGION: this.region,
         MODELS_BUCKET: storage.modelsBucket.bucketName,
