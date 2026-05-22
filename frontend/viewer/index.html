@@ -181,6 +181,43 @@ a { color:var(--pond-dk); }
   font-family:var(--font-display); font-style:italic; font-size:17px; color:var(--ink);
   min-width:0; }
 .search input::placeholder { color:var(--ink-3); font-style:italic; }
+.tool-btn { font-family:var(--font-ui); font-size:10px; font-weight:600;
+  letter-spacing:.18em; text-transform:uppercase; padding:9px 16px;
+  border:1px solid var(--line); color:var(--ink-2); background:transparent;
+  cursor:pointer; white-space:nowrap; flex-shrink:0; }
+.tool-btn:hover { border-color:var(--ink); color:var(--ink); }
+.tool-btn.active { border-color:var(--pond-dk); color:var(--pond-dk);
+  background:var(--cream); }
+
+/* ===== Multi-select ===== */
+.card .checkbox { position:absolute; top:8px; left:8px; width:22px; height:22px;
+  border:1px solid var(--ink); background:var(--paper); display:flex;
+  align-items:center; justify-content:center; opacity:0; transition:opacity .12s;
+  cursor:pointer; z-index:3; }
+.card:hover .checkbox, .grid.selectmode .card .checkbox,
+.card.selected .checkbox { opacity:1; }
+.card .checkbox svg { width:13px; height:13px; color:var(--paper); }
+.card.selected .checkbox { background:var(--pond-dk); border-color:var(--pond-dk); }
+.card.selected { outline:2px solid var(--pond-dk); outline-offset:-2px; }
+.thumb-wrap .ph.ph-failed { color:var(--maple); cursor:pointer; }
+.selbar { position:fixed; left:50%; bottom:22px; transform:translateX(-50%);
+  z-index:60; display:flex; align-items:center; gap:22px; background:var(--ink);
+  border:1px solid var(--ink); padding:12px 20px; }
+.selbar .sb-lhs { font-family:var(--font-ui); font-size:11px; font-weight:500;
+  letter-spacing:.14em; text-transform:uppercase; color:var(--paper-2); }
+.selbar .sb-ct { font-family:var(--font-display); font-style:italic;
+  font-size:20px; font-weight:600; color:var(--cream); margin-right:5px;
+  font-variant-numeric:tabular-nums; }
+.selbar .sb-rhs { display:flex; gap:8px; }
+.selbar button { font-family:var(--font-ui); font-size:10px; font-weight:600;
+  letter-spacing:.18em; text-transform:uppercase; padding:9px 15px;
+  border:1px solid rgba(246,248,243,.32); background:transparent;
+  color:var(--cream); cursor:pointer; }
+.selbar button:hover { border-color:var(--cream); }
+.selbar button.primary { border-color:var(--pond-lt); color:var(--pond-lt); }
+.selbar button.primary:hover { background:var(--pond-lt); color:var(--ink);
+  border-color:var(--pond-lt); }
+.selbar button:disabled { opacity:.4; pointer-events:none; }
 
 /* ===== Grid + cards ===== */
 .grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:14px;
@@ -479,6 +516,7 @@ a { color:var(--pond-dk); }
       </svg>
       <input id="search" placeholder="Filter by filename…" />
     </div>
+    <button id="select-toggle" class="tool-btn" type="button">Select</button>
   </div>
 
   <div id="grid" class="grid"></div>

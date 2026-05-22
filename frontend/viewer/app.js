@@ -26,6 +26,15 @@
   // (execCommand — the only option on this plain-HTTP viewer — won't copy
   // outside an active user gesture, so it can't run after an awaited fetch).
   let modalWf = { jobId: null, wf: null, full: false };
+  // Multi-select. `selected` holds image keys; `selectMode` keeps the
+  // checkboxes always visible; `lastSelIdx` anchors shift-click range select.
+  let selectMode = false;
+  const selected = new Set();
+  let lastSelIdx = -1;
+  // Bumped on every grid render; queued presign calls for a superseded
+  // render are skipped so a fast pager doesn't back the queue up with
+  // requests for cards that are no longer on screen.
+  let gridGen = 0;
 
   /* ---------- auth ---------- */
   function authHeaders() {
@@ -53,15 +62,58 @@
     try { return JSON.parse(localStorage.getItem(URL_CACHE_KEY) || "{}"); }
     catch (_e) { return {}; }
   })();
-  async function presignedUrl(key) {
-    const hit = urlCache[key];
-    if (hit && hit.exp > Date.now()) return hit.url;
-    const r = await authedFetch(`/view?key=${encodeURIComponent(key)}&json=1`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const url = (await r.json()).url;
-    urlCache[key] = { url, exp: Date.now() + URL_CACHE_TTL };
-    try { localStorage.setItem(URL_CACHE_KEY, JSON.stringify(urlCache)); }
-    catch (_e) { urlCache = {}; }
+  // /view presign calls are concurrency-limited + retried. A grid page fires
+  // one per card; bursting 75+ at once made some fail — and the failures were
+  // silent (blank cards that only a page refresh recovered). Cap the in-flight
+  // count and retry transient failures.
+  const VIEW_MAX = 6;
+  let _viewActive = 0;
+  const _viewQ = [];
+  function _viewRun(fn, stale) {
+    return new Promise((resolve, reject) => {
+      _viewQ.push({ fn, resolve, reject, stale });
+      _viewPump();
+    });
+  }
+  function _viewPump() {
+    while (_viewActive < VIEW_MAX && _viewQ.length) {
+      const { fn, resolve, reject, stale } = _viewQ.shift();
+      if (stale && stale()) { reject(new Error("stale")); continue; }
+      _viewActive++;
+      fn().then(resolve, reject).finally(() => { _viewActive--; _viewPump(); });
+    }
+  }
+  async function _fetchPresign(path) {
+    let lastErr;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const r = await authedFetch(path);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const u = (await r.json()).url;
+        if (!u) throw new Error("no url");
+        return u;
+      } catch (e) {
+        lastErr = e;
+        await new Promise((res) => setTimeout(res, 250 * (attempt + 1)));
+      }
+    }
+    throw lastErr;
+  }
+  async function presignedUrl(key, download, stale) {
+    // Display URLs are cached (stable URL → the browser image cache hits);
+    // download URLs carry a content-disposition and are one-shot — skip cache.
+    if (!download) {
+      const hit = urlCache[key];
+      if (hit && hit.exp > Date.now()) return hit.url;
+    }
+    const path = `/view?key=${encodeURIComponent(key)}&json=1` +
+      (download ? "&download=1" : "");
+    const url = await _viewRun(() => _fetchPresign(path), stale);
+    if (!download) {
+      urlCache[key] = { url, exp: Date.now() + URL_CACHE_TTL };
+      try { localStorage.setItem(URL_CACHE_KEY, JSON.stringify(urlCache)); }
+      catch (_e) { urlCache = {}; }
+    }
     return url;
   }
 
@@ -120,6 +172,8 @@
     '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5l13 7.5-13 7.5v-15z"/></svg>';
   const SVG_CLOSE =
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+  const SVG_CHECK =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l5 5 9-11"/></svg>';
 
   /* ---------- data ---------- */
   function filtered() {
@@ -159,6 +213,14 @@
           allItems.push({ key, job, isVideo: isVideoKey(key) });
         }
       }
+      // Drop any selected keys that no longer exist after the reload, and
+      // reset the shift-select anchor — filtered() indices have shifted.
+      lastSelIdx = -1;
+      if (selected.size) {
+        const live = new Set(allItems.map((it) => it.key));
+        for (const k of [...selected]) if (!live.has(k)) selected.delete(k);
+        renderSelbar();
+      }
       refreshCounts();
       renderGrid();
     } catch (e) {
@@ -184,7 +246,9 @@
   }
 
   function renderGrid() {
+    gridGen++; // supersede any in-flight presign calls from the previous render
     const items = filtered();
+    grid.classList.toggle("selectmode", selectMode);
     const pages = Math.max(1, Math.ceil(items.length / PER_PAGE));
     if (page >= pages) page = pages - 1;
     if (page < 0) page = 0;
@@ -220,14 +284,48 @@
     });
   }
 
+  function loadCardMedia(el, item) {
+    const { key, isVideo } = item;
+    const filename = key.split("/").pop();
+    const gen = gridGen; // the render this card belongs to
+    presignedUrl(key, false, () => gen !== gridGen)
+      .then((url) => {
+        if (gen !== gridGen) return; // grid re-rendered — this card is gone
+        const ph = el.querySelector(".thumb-wrap .ph");
+        if (!ph) return;
+        const media = isVideo
+          ? `<video src="${url}#t=0.1" preload="metadata" muted></video>`
+          : `<img src="${url}" loading="lazy" alt="${esc(filename)}" />`;
+        ph.insertAdjacentHTML("beforebegin", media);
+        ph.remove();
+      })
+      .catch(() => {
+        if (gen !== gridGen) return; // superseded render — nothing to show
+        // Presign failed even after retries — surface it instead of leaving a
+        // dead "loading…" placeholder; one click retries this card.
+        const ph = el.querySelector(".thumb-wrap .ph");
+        if (!ph) return;
+        ph.textContent = "failed — click to retry";
+        ph.classList.add("ph-failed");
+        ph.onclick = (e) => {
+          e.stopPropagation();
+          ph.textContent = "loading…";
+          ph.classList.remove("ph-failed");
+          ph.onclick = null;
+          loadCardMedia(el, item);
+        };
+      });
+  }
   function makeCard(item, filteredIdx) {
     const { key, job, isVideo } = item;
     const filename = key.split("/").pop();
     const el = document.createElement("div");
-    el.className = "card";
+    el.className = "card" + (selected.has(key) ? " selected" : "");
+    el.dataset.key = key;
     el.innerHTML =
       `<div class="thumb-wrap">` +
         `<div class="ph">loading…</div>` +
+        `<div class="checkbox" title="Select">${SVG_CHECK}</div>` +
         `<div class="typestamp ${isVideo ? "vid" : "img"}">${isVideo ? "MP4" : "PNG"}</div>` +
         (isVideo ? `<div class="play">${SVG_PLAY}</div>` : "") +
         `<div class="thumb-actions"><button class="danger" title="Delete">${SVG_TRASH}</button></div>` +
@@ -242,19 +340,100 @@
       e.stopPropagation();
       doDelete(job.job_id);
     });
-    el.addEventListener("click", () => openModal(filteredIdx));
-    presignedUrl(key)
-      .then((url) => {
-        const wrap = el.querySelector(".thumb-wrap");
-        const ph = wrap.querySelector(".ph");
-        const media = isVideo
-          ? `<video src="${url}#t=0.1" preload="metadata" muted></video>`
-          : `<img src="${url}" loading="lazy" alt="${esc(filename)}" />`;
-        ph.insertAdjacentHTML("beforebegin", media);
-        ph.remove();
-      })
-      .catch(() => {});
+    el.querySelector(".checkbox").addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (!selectMode) setSelectMode(true);
+      toggleSelect(key, filteredIdx, e.shiftKey);
+    });
+    el.addEventListener("click", (e) => {
+      if (e.target.closest(".thumb-actions") || e.target.closest(".checkbox")) return;
+      if (selectMode) toggleSelect(key, filteredIdx, e.shiftKey);
+      else openModal(filteredIdx);
+    });
+    loadCardMedia(el, item);
     return el;
+  }
+
+  /* ---------- multi-select ---------- */
+  function setSelectMode(on) {
+    selectMode = on;
+    grid.classList.toggle("selectmode", on);
+    const btn = document.getElementById("select-toggle");
+    if (btn) btn.classList.toggle("active", on);
+    if (!on) clearSelection();
+  }
+  function syncSelectionClasses() {
+    grid.querySelectorAll(".card").forEach((el) => {
+      el.classList.toggle("selected", selected.has(el.dataset.key));
+    });
+  }
+  function clearSelection() {
+    selected.clear();
+    lastSelIdx = -1;
+    syncSelectionClasses();
+    renderSelbar();
+  }
+  function toggleSelect(key, idx, shift) {
+    if (shift && lastSelIdx >= 0) {
+      // Range-select across the filtered list from the last anchor.
+      const items = filtered();
+      const lo = Math.min(lastSelIdx, idx), hi = Math.max(lastSelIdx, idx);
+      for (let i = lo; i <= hi && i < items.length; i++) selected.add(items[i].key);
+    } else {
+      if (selected.has(key)) selected.delete(key);
+      else selected.add(key);
+      lastSelIdx = idx;
+    }
+    syncSelectionClasses();
+    renderSelbar();
+  }
+  function renderSelbar() {
+    let bar = document.getElementById("selbar");
+    if (!selected.size) { if (bar) bar.remove(); return; }
+    if (!bar) {
+      bar = document.createElement("div");
+      bar.id = "selbar";
+      bar.className = "selbar";
+      document.body.appendChild(bar);
+    }
+    const n = selected.size;
+    bar.innerHTML =
+      `<div class="sb-lhs"><span class="sb-ct">${n}</span>selected</div>` +
+      `<div class="sb-rhs">` +
+        `<button class="sb-clear" type="button">Clear</button>` +
+        `<button class="sb-dl primary" type="button">Download ${n}</button>` +
+      `</div>`;
+    bar.querySelector(".sb-clear").onclick = clearSelection;
+    bar.querySelector(".sb-dl").onclick = (e) => downloadSelected(e.currentTarget);
+  }
+  async function downloadSelected(btn) {
+    const keys = [...selected];
+    if (!keys.length) return;
+    const orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Preparing…";
+    // Resolve every download URL first (concurrency-limited).
+    const urls = (await Promise.all(
+      keys.map((k) => presignedUrl(k, true).catch(() => null))
+    )).filter(Boolean);
+    btn.disabled = false;
+    btn.textContent = orig;
+    // Fire the downloads in one tight burst so the browser treats them as a
+    // single batch — it shows one "allow multiple downloads" prompt and lets
+    // them all through. Spacing the clicks with timers makes the browser see
+    // separate requests and block all but the first.
+    for (const url of urls) {
+      const a = document.createElement("a");
+      a.href = url;
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+    showToast(urls.length < keys.length
+      ? `Downloading ${urls.length} of ${keys.length} — ${keys.length - urls.length} failed`
+      : `Downloading ${urls.length} file${urls.length !== 1 ? "s" : ""}` +
+        (urls.length > 1 ? " — allow multiple downloads if asked" : ""));
   }
 
   /* ---------- pending workflows panel ----------
@@ -671,7 +850,11 @@
     try {
       const r = await authedFetch(`/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      allItems
+        .filter((it) => it.job.job_id === jobId)
+        .forEach((it) => selected.delete(it.key));
       allItems = allItems.filter((it) => it.job.job_id !== jobId);
+      renderSelbar();
       refreshCounts();
       if (modalIdx >= 0) closeModal();
       renderGrid();
@@ -782,15 +965,21 @@
     if (!t) return;
     tab = t.dataset.tab;
     page = 0;
+    lastSelIdx = -1; // filtered() changed — the shift-select anchor is stale
     tabsEl.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x === t));
     renderGrid();
   });
   searchEl.addEventListener("input", () => {
     query = searchEl.value.trim();
     page = 0;
+    lastSelIdx = -1; // filtered() changed — the shift-select anchor is stale
     renderGrid();
   });
+  document.getElementById("select-toggle").addEventListener("click", () => {
+    setSelectMode(!selectMode);
+  });
   document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && selectMode) { setSelectMode(false); return; }
     if (modalIdx < 0) return;
     if (e.key === "Escape") closeModal();
     else if (e.key === "ArrowLeft" && modalIdx > 0) { modalIdx--; drawModal(); }
