@@ -129,7 +129,9 @@
     text = (text || "").trim();
     if (!text) return "";
     const neg = /negative/i.test(label) ? " neg" : "";
-    return `<div class="section-ttl">${esc(label)}</div>` +
+    return `<div class="section-ttl prompt-ttl">${esc(label)}` +
+      `<button class="prompt-copy" type="button" title="Copy ${esc(label)}">${SVG_COPY}</button>` +
+      `</div>` +
       `<div class="prompt${neg}">${esc(text)}</div>`;
   }
   // All prompt sections for a job — one per distinct prompt the workflow used
@@ -175,6 +177,9 @@
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
   const SVG_CHECK =
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l5 5 9-11"/></svg>';
+  // Canonical copy glyph — front square + offset back sheet.
+  const SVG_COPY =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="1.5"/><path d="M5 15V6.5A1.5 1.5 0 0 1 6.5 5H15"/></svg>';
 
   /* ---------- data ---------- */
   function filtered() {
@@ -842,7 +847,30 @@
           modalWf.full = !!d.workflow_ui;
           // Fill the params/prompts sections — the /jobs list is lite.
           const det = scrim.querySelector(".m-detail");
-          if (det) det.innerHTML = paramsSection(d.params) + promptsBlock(d.prompts);
+          if (det) {
+            det.innerHTML = paramsSection(d.params) + promptsBlock(d.prompts);
+            det.querySelectorAll(".prompt-copy").forEach((btn) => {
+              btn.onclick = (e) => {
+                e.stopPropagation();
+                // The prompt body is the element right after the title row.
+                const body = btn.closest(".prompt-ttl") &&
+                  btn.closest(".prompt-ttl").nextElementSibling;
+                const text = body ? body.textContent : "";
+                if (text && copyText(text)) {
+                  btn.innerHTML = SVG_CHECK;
+                  btn.classList.add("copied");
+                  setTimeout(() => {
+                    if (!btn.isConnected) return;
+                    btn.innerHTML = SVG_COPY;
+                    btn.classList.remove("copied");
+                  }, 1400);
+                  showToast("Prompt copied");
+                } else {
+                  showToast("Couldn't copy the prompt");
+                }
+              };
+            });
+          }
         }
       })
       .catch(() => {});
