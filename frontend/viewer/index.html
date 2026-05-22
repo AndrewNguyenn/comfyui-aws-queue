@@ -239,6 +239,11 @@ a { color:var(--pond-dk); }
   text-transform:uppercase; }
 .pager button:hover:not(:disabled) { background:var(--pond-dk); color:var(--paper); }
 .pager button:disabled { opacity:.35; cursor:default; }
+.pg-nums { display:flex; gap:4px; }
+.pager .pg-num { padding:7px 10px; min-width:34px; letter-spacing:0; text-align:center; }
+.pager .pg-num.active { background:var(--pond-dk); color:var(--paper); cursor:default; }
+.pg-gap { color:var(--ink-3); padding:0 2px; align-self:center; }
+.pg-count { color:var(--ink-3); }
 
 /* ===== Modal =====
    The stage and the info panel are independent scroll regions. The grid row
