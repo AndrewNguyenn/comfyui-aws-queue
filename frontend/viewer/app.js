@@ -150,7 +150,7 @@
       return;
     }
     try {
-      const r = await authedFetch(`/jobs?status=complete&limit=500`);
+      const r = await authedFetch(`/jobs?status=complete&limit=8000`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const jobs = ((await r.json()).jobs || []).filter((j) => (j.output_keys || []).length);
       allItems = [];
@@ -622,8 +622,9 @@
             `<div class="field"><div class="k">Type</div><div class="v">${esc(job.type || "—")}</div></div>` +
             `<div class="field"><div class="k">Created</div><div class="v">${esc(fmtWhen(job.created_at))}</div></div>` +
             `<div class="field"><div class="k">Job</div><div class="v">${esc(job.job_id.slice(0, 8))}</div></div>` +
-            paramsSection(job.params) +
-            promptsBlock(job.prompts) +
+            // Filled in by the /jobs/{id} pre-fetch below — the /jobs list
+            // response is lite and carries no prompts/params.
+            `<div class="m-detail"></div>` +
           `</div>` +
           `<div class="info-foot">` +
             `<button class="dl">Download</button>` +
@@ -647,6 +648,9 @@
           // Prefer the full editor workflow; older jobs only have the API prompt.
           modalWf.wf = d.workflow_ui || d.workflow || null;
           modalWf.full = !!d.workflow_ui;
+          // Fill the params/prompts sections — the /jobs list is lite.
+          const det = scrim.querySelector(".m-detail");
+          if (det) det.innerHTML = paramsSection(d.params) + promptsBlock(d.prompts);
         }
       })
       .catch(() => {});
