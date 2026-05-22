@@ -21,6 +21,11 @@
   let query = "";
   let page = 0;
   let modalIdx = -1;
+  // Workflow for the open modal's job, pre-fetched on open so the "Copy JSON"
+  // button can write to the clipboard synchronously inside the click gesture
+  // (execCommand — the only option on this plain-HTTP viewer — won't copy
+  // outside an active user gesture, so it can't run after an awaited fetch).
+  let modalWf = { jobId: null, wf: null };
 
   /* ---------- auth ---------- */
   function authHeaders() {
@@ -598,6 +603,7 @@
           `</div>` +
           `<div class="info-foot">` +
             `<button class="dl">Download</button>` +
+            `<button class="copywf">Copy JSON</button>` +
             `<button class="danger del">Delete</button>` +
           `</div>` +
         `</div>` +
@@ -606,6 +612,14 @@
     scrim.querySelector(".nav.prev").onclick = () => { if (modalIdx > 0) { modalIdx--; drawModal(); } };
     scrim.querySelector(".nav.next").onclick = () => { if (modalIdx < items.length - 1) { modalIdx++; drawModal(); } };
     scrim.querySelector(".del").onclick = () => doDelete(job.job_id);
+    const copyBtn = scrim.querySelector(".copywf");
+    copyBtn.onclick = () => doCopyWorkflow(job, copyBtn);
+    // Pre-fetch the workflow so the copy is gesture-synchronous (see modalWf).
+    modalWf = { jobId: job.job_id, wf: null };
+    authedFetch(`/jobs/${encodeURIComponent(job.job_id)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d && modalWf.jobId === job.job_id) modalWf.wf = d.workflow || null; })
+      .catch(() => {});
     presignedUrl(key).then((url) => {
       const slot = scrim.querySelector(".media-slot");
       if (slot) {
@@ -639,6 +653,66 @@
     t.textContent = msg;
     document.body.appendChild(t);
     setTimeout(() => t.remove(), 3500);
+  }
+
+  /* ---------- copy workflow (seed-randomized) ---------- */
+  // The seed lives on different node types depending on the graph — KSampler
+  // `seed`, custom samplers `noise_seed`, an rgthree Seed node, an "Input
+  // Parameters" node. Replace every literal seed (a number — not a
+  // [nodeId, idx] link) so the copy is seed-canonical: copying any of N
+  // identical-but-different-seed runs yields the same workflow, with a fresh
+  // random seed each click.
+  function randomizeSeeds(wf) {
+    let n = 0;
+    for (const node of Object.values(wf)) {
+      const inp = node && node.inputs;
+      if (!inp || typeof inp !== "object") continue;
+      for (const k of ["seed", "noise_seed"]) {
+        if (typeof inp[k] === "number") {
+          // < 2^50 — within rgthree's Seed-node cap (1125899906842624).
+          inp[k] = Math.floor(Math.random() * 0x4000000000000);
+          n++;
+        }
+      }
+    }
+    return n;
+  }
+  // Synchronous so it runs inside the click gesture. The async Clipboard API
+  // needs a secure context, which this plain-HTTP viewer is not — execCommand
+  // is the only option and it must not be reached via an await.
+  function copyText(text) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.top = "0";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (_e) { ok = false; }
+    ta.remove();
+    return ok;
+  }
+  function doCopyWorkflow(job, btn) {
+    const wf = modalWf.jobId === job.job_id ? modalWf.wf : null;
+    if (!wf || typeof wf !== "object" || !Object.keys(wf).length) {
+      // Either the pre-fetch is still in flight, or the job has no workflow.
+      showToast("Workflow still loading — try again in a moment");
+      return;
+    }
+    // Clone so the seed randomization never mutates the cached workflow.
+    const copy = JSON.parse(JSON.stringify(wf));
+    const n = randomizeSeeds(copy);
+    if (!copyText(JSON.stringify(copy, null, 2))) {
+      showToast("Couldn't write to clipboard");
+      return;
+    }
+    btn.textContent = "Copied ✓";
+    setTimeout(() => { if (btn.isConnected) btn.textContent = "Copy JSON"; }, 2000);
+    showToast(n
+      ? `Workflow copied — ${n} seed${n > 1 ? "s" : ""} randomized`
+      : "Workflow copied — no literal seed found (it may be wired through another node)");
   }
 
   /* ---------- wiring ---------- */
