@@ -116,15 +116,37 @@
     }
 
     const r = await origFetch(newUrl, opts);
-    // Only sign out on 401 (Cognito authorizer rejected the token).
-    // 403 is NOT a sign-out signal: API Gateway returns 403 for unmatched
-    // routes ("Missing Authentication Token") and per-IP throttling, neither
-    // of which means the user's session is bad. Treating 403 as auth failure
-    // caused immediate post-login bounces because the editor pings endpoints
-    // we don't implement, gets a 403, and the shim signed the user out.
-    if (r.status === 401) {
-      console.warn("auth rejected (401); signing out");
-      if (window.comfyAuth) window.comfyAuth.signOut();
+    // A 401 means the ID token expired or was rejected. Try the refresh token
+    // before giving up — the ID token only lives ~a day but the refresh token
+    // is good for weeks, so an expired ID token should be renewed silently,
+    // NOT treated as a sign-out. Only sign out if the refresh itself fails
+    // (refresh token expired/revoked) — that's a genuinely dead session.
+    //
+    // 403 is NOT handled here: API Gateway returns 403 for unmatched routes
+    // ("Missing Authentication Token") and per-IP throttling, neither of which
+    // means the session is bad.
+    if (r.status === 401 && window.comfyAuth) {
+      const refreshed = await window.comfyAuth.refreshToken();
+      if (!refreshed) {
+        console.warn("auth rejected (401) and refresh failed; signing out");
+        window.comfyAuth.signOut();
+        return r;
+      }
+      // Retry once with the fresh token — but only when the request is safely
+      // replayable. A FormData/Blob/stream body is consumed by the first send
+      // and can't be re-fetched (image uploads), and a Request-object `input`
+      // isn't fully captured by `opts`. In those cases the token is still
+      // refreshed so the next request succeeds; this one is returned as-is.
+      const body = opts.body;
+      const replayable =
+        typeof input === "string" &&
+        (body == null || typeof body === "string" || body instanceof URLSearchParams);
+      if (!replayable) return r;
+      const fresh = window.comfyAuth.getIdToken();
+      if (fresh) opts.headers.set("Authorization", fresh);
+      const retry = await origFetch(newUrl, opts);
+      if (retry.status === 401) console.warn("request still 401 after token refresh");
+      return retry;
     }
     return r;
   };
@@ -136,10 +158,13 @@
   // against the S3 frontend origin and 404. We patch XMLHttpRequest.prototype
   // to apply the same rewriteUrl + Authorization header logic as fetch above.
   //
-  // We DON'T attempt sign-out on 401 here: XHR can race in ways fetch can't
-  // (multiple in-flight axios calls firing on page load), and treating any of
-  // them as auth failure would bounce the user to login. The fetch path
-  // already handles sign-out for the primary signal.
+  // We DON'T touch 401s on the XHR path: XHR can race in ways fetch can't
+  // (multiple in-flight axios calls firing on page load), and re-sending an
+  // XHR with a fresh token is awkward (XHR isn't promise-based, body replay
+  // is worse). Known limitation: XHR requests (the axios-based queue/history
+  // menu) don't get the refresh-and-retry the fetch path does — an expired
+  // token makes them fail silently until the next page load refreshes it.
+  // With a 24 h token that window is small. The fetch path carries sign-out.
   const XHRProto = XMLHttpRequest.prototype;
   const origOpen = XHRProto.open;
   const origSend = XHRProto.send;
