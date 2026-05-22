@@ -54,6 +54,8 @@ ALLOWED_TYPES = (
     "sams",              # → models/sams — Segment Anything models (FaceDetailer)
     "ipadapter",         # → models/ipadapter — IPAdapter model weights
     "insightface",       # → models/insightface — InsightFace face-analysis sets (FaceID)
+    "wildcards",         # → models/wildcards — prompt wildcard .txt files (a .zip
+                         #   pack is unzipped by the download worker)
 )
 DOWNLOAD_TTL = timedelta(hours=24)
 

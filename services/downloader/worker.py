@@ -53,15 +53,21 @@ def lambda_handler(event: dict, _context: Any) -> dict:
         version_id = _parse_version_id(civitai_url, token)
         meta = _fetch_metadata(version_id, token)
         file_meta = _pick_primary_file(meta)
-        s3_key = f"{model_type}/{file_meta['name']}"
         total_bytes = int(file_meta["sizeKB"] * 1024)
-
         _set_total(download_id, total_bytes, file_meta["name"])
+
+        # Wildcards aren't catalog models — they're prompt .txt files, often a
+        # .zip pack. Handle separately: unzip + upload each .txt, no catalog row.
+        if model_type == "wildcards":
+            count = _handle_wildcards(file_meta, token, total_bytes, download_id)
+            _set_status(download_id, "complete")
+            return {"ok": True, "download_id": download_id, "wildcards": count}
+
+        s3_key = f"{model_type}/{file_meta['name']}"
         _set_status(download_id, "downloading")
-
-        download_url = file_meta["downloadUrl"]
-        bytes_done = _stream_to_s3(download_url, token, s3_key, total_bytes, download_id)
-
+        bytes_done = _stream_to_s3(
+            file_meta["downloadUrl"], token, s3_key, total_bytes, download_id
+        )
         _add_to_catalog(file_meta, model_type, s3_key, bytes_done, version_id, meta)
         _set_status(download_id, "complete")
         return {"ok": True, "download_id": download_id, "s3_key": s3_key}
@@ -70,6 +76,66 @@ def lambda_handler(event: dict, _context: Any) -> dict:
         print(f"download {download_id} failed: {e!r}")
         _set_error(download_id, str(e))
         return {"ok": False, "download_id": download_id, "error": str(e)}
+
+
+# Wildcard packs are small text archives. Cap the in-memory download — a file
+# far past this isn't wildcards, and refusing beats OOM-ing the Lambda.
+_WILDCARDS_MAX_BYTES = 100 * 1024 * 1024
+
+
+def _handle_wildcards(file_meta: dict, token: str, total_bytes: int, download_id: str) -> int:
+    """Download a CivitAI wildcards file into wildcards/ on the models bucket.
+    A .zip pack is unzipped — each .txt member uploaded under its in-pack path
+    (Impact-Pack supports nested __folder/name__); a bare file goes up as-is.
+    Returns the number of .txt files written."""
+    if total_bytes and total_bytes > _WILDCARDS_MAX_BYTES:
+        raise RuntimeError(
+            f"wildcards file is {total_bytes // 1024 // 1024} MB — too large; "
+            "wildcard packs are small text archives"
+        )
+    _set_status(download_id, "downloading")
+    headers = {"User-Agent": "comfyui-aws-queue/1.0"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    r = http.request("GET", file_meta["downloadUrl"], headers=headers)
+    if r.status >= 400:
+        raise RuntimeError(f"civitai download failed: HTTP {r.status}")
+    data = r.data
+    if len(data) > _WILDCARDS_MAX_BYTES:
+        raise RuntimeError("wildcards download exceeded the size cap")
+
+    name = file_meta["name"]
+    if name.lower().endswith(".zip"):
+        import io
+        import zipfile
+
+        count = 0
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            for member in zf.namelist():
+                if member.endswith("/") or not member.lower().endswith(".txt"):
+                    continue
+                rel = member.lstrip("/")
+                if not rel or ".." in rel.split("/"):
+                    continue  # never let an archive path escape wildcards/
+                s3.put_object(
+                    Bucket=MODELS_BUCKET,
+                    Key=f"wildcards/{rel}",
+                    Body=zf.read(member),
+                    ContentType="text/plain; charset=utf-8",
+                )
+                count += 1
+        if not count:
+            raise RuntimeError("zip contained no .txt wildcard files")
+        return count
+
+    # A bare file (a single .txt, usually).
+    s3.put_object(
+        Bucket=MODELS_BUCKET,
+        Key=f"wildcards/{name}",
+        Body=data,
+        ContentType="text/plain; charset=utf-8",
+    )
+    return 1
 
 
 def _civitai_token() -> str:
