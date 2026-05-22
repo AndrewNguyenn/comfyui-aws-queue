@@ -339,24 +339,36 @@ def _extract_params(wf: dict) -> dict:
     return params
 
 
+# Attributes the list endpoint needs (see _serialize_job lite=True) —
+# everything EXCEPT the bulky workflow_ui (only _get_job uses that; it can be
+# ~90 KB/record and would otherwise dominate the GSI read) and attempt_count.
+_LIST_PROJECTION_ATTRS = (
+    "job_id", "type", "status", "created_at", "started_at", "completed_at",
+    "output_keys", "error", "workflow_json", "progress", "instance_type",
+    "cancel_requested",
+)
+
+
 def _query_newest(status: str, n: int) -> list:
     """The `n` newest job records in `status`, via the status-index GSI.
 
-    A single DynamoDB Query returns only one ~1 MB page — and because each job
-    record carries the full workflow_json, that page can hold far fewer than
-    `n` items (≈50). This is the bug that hid every generation past the newest
-    ~50: the query was issued once and never followed past the first page. So
-    here we page through LastEvaluatedKey until we have `n` items or the
-    status is exhausted."""
+    Pages through LastEvaluatedKey until it has `n` items or the status is
+    exhausted (a single Query returns only one ~1 MB page). Projects only the
+    attributes the list needs — crucially NOT workflow_ui — so a record's size
+    on the wire stays small even as workflows grow."""
     items: list = []
     kwargs: dict = {}
+    names = {f"#p{i}": a for i, a in enumerate(_LIST_PROJECTION_ATTRS)}
+    names["#s"] = "status"  # alias for the key condition
+    projection = ", ".join(f"#p{i}" for i in range(len(_LIST_PROJECTION_ATTRS)))
     while len(items) < n:
         r = ddb.query(
             TableName=JOBS_TABLE,
             IndexName="status-index",
             KeyConditionExpression="#s = :s",
-            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeNames=names,
             ExpressionAttributeValues={":s": {"S": status}},
+            ProjectionExpression=projection,
             ScanIndexForward=False,  # newest (highest created_at) first
             Limit=n - len(items),
             **kwargs,
@@ -385,7 +397,11 @@ def _list_jobs(event: dict) -> dict:
         statuses = ["complete", "failed", "cancelled", "running", "queued"]
 
     try:
-        limit = max(1, min(int(qs.get("limit") or 64), 500))
+        # 8000 cap: the lite list job is ~600 B, so even a full 8000-job
+        # response stays well under Lambda's 6 MB limit. The viewer's gallery
+        # fetches the lot in one call so its client-side paging/search see
+        # every generation.
+        limit = max(1, min(int(qs.get("limit") or 64), 8000))
     except ValueError:
         limit = 64
     try:
@@ -405,19 +421,23 @@ def _list_jobs(event: dict) -> dict:
     items.sort(key=lambda it: it.get("created_at", {}).get("S", ""), reverse=True)
     page = items[offset : offset + limit]
 
-    jobs = [_serialize_job(it) for it in page]
+    jobs = [_serialize_job(it, lite=True) for it in page]
     # `total` is the size of the fetched candidate pool (capped per status at
     # offset+limit), not a true count of all matching jobs. Fine for the
     # current callers — none of them page on it.
     return _resp(200, {"jobs": jobs, "limit": limit, "offset": offset, "total": len(items)})
 
 
-def _serialize_job(it: dict) -> dict:
+def _serialize_job(it: dict, lite: bool = False) -> dict:
     """Shape a raw DDB job item into the API job object. `model`, the prompt
     sections and the generation params are all derived on the fly from the
-    stored `workflow_json` (the job record itself never carries them)."""
+    stored `workflow_json` (the job record itself never carries them).
+
+    lite=True skips the heavy prompt/param sections — the list endpoint
+    doesn't need them (the viewer's modal fetches /jobs/{id} for those), and
+    dropping them keeps a large /jobs response well under Lambda's 6 MB cap."""
     wf = _parse_workflow(it.get("workflow_json", {}).get("S", ""))
-    return {
+    out = {
         "job_id": it["job_id"]["S"],
         "type": it.get("type", {"S": ""})["S"],
         "status": it.get("status", {"S": ""})["S"],
@@ -427,10 +447,6 @@ def _serialize_job(it: dict) -> dict:
         "output_keys": json.loads(it.get("output_keys", {"S": "[]"})["S"]),
         "error": it.get("error", {"S": ""})["S"],
         "model": _extract_model(wf),
-        # All distinct prompts (txt2img → Positive/Negative; detailer graphs
-        # add their own sections) + best-effort generation params.
-        "prompts": _extract_prompts(wf),
-        "params": _extract_params(wf),
         "progress": it.get("progress", {}).get("S", ""),
         # The GPU instance type the worker recorded when it claimed the job.
         # Both fleets run mixed instance types (a spot-capacity ASG), so this
@@ -442,6 +458,12 @@ def _serialize_job(it: dict) -> dict:
         # actually stops it (a running cancel is not instantaneous).
         "cancel_requested": it.get("cancel_requested", {}).get("BOOL", False),
     }
+    if not lite:
+        # All distinct prompts (txt2img → Positive/Negative; detailer graphs
+        # add their own sections) + best-effort generation params.
+        out["prompts"] = _extract_prompts(wf)
+        out["params"] = _extract_params(wf)
+    return out
 
 
 def _get_job(event: dict) -> dict:
