@@ -61,8 +61,11 @@ export class AuthStack extends Stack {
         userSrp: true, // SRP is preferred — frontend lib supports it
       },
       preventUserExistenceErrors: true, // Don't leak whether a username exists
-      idTokenValidity: Duration.hours(1),
-      accessTokenValidity: Duration.hours(1),
+      // 24 h is Cognito's max for ID/access tokens. Long-lived so an active
+      // session rarely needs a mid-use refresh; the 30-day refresh token
+      // (renewed on 401 — see api-shim.js) carries the login for weeks.
+      idTokenValidity: Duration.hours(24),
+      accessTokenValidity: Duration.hours(24),
       refreshTokenValidity: Duration.days(30),
       readAttributes: new cognito.ClientAttributes().withStandardAttributes({ email: true }),
     });
