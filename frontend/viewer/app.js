@@ -7,6 +7,7 @@
 
   const grid = document.getElementById("grid");
   const pager = document.getElementById("pager");
+  const pagerTop = document.getElementById("pager-top");
   const pending = document.getElementById("pending");
   const tabsEl = document.getElementById("tabs");
   const searchEl = document.getElementById("search");
@@ -230,13 +231,14 @@
   }
 
   /* ---------- grid ---------- */
-  // Page numbers to show in the pager. <=7 pages: all. More: first, last,
-  // current ±1, with null marking an ellipsis gap.
   function pageWindow(cur, total) {
-    if (total <= 7) return Array.from({ length: total }, (_, i) => i);
-    const keep = [...new Set([0, total - 1, cur - 1, cur, cur + 1])]
-      .filter((n) => n >= 0 && n < total)
-      .sort((a, b) => a - b);
+    // Show every page number when there aren't many; past that, a wide window
+    // (±5 around the current page) plus the first and last, with … gaps.
+    if (total <= 16) return Array.from({ length: total }, (_, i) => i);
+    const keep = [...new Set([
+      0, total - 1,
+      ...Array.from({ length: 11 }, (_, i) => cur - 5 + i),
+    ])].filter((n) => n >= 0 && n < total).sort((a, b) => a - b);
     const out = [];
     keep.forEach((n, i) => {
       if (i > 0 && n - keep[i - 1] > 1) out.push(null);
@@ -261,26 +263,37 @@
         `<div class="e-title">${query ? "Nothing matches that filter." : "Nothing here yet."}</div>` +
         `<div class="e-body">${query ? "Try a different filename or model." : "Generations land here as you run workflows."}</div></div>`;
       pager.innerHTML = "";
+      pagerTop.innerHTML = "";
       return;
     }
     grid.innerHTML = "";
     slice.forEach((item, i) => grid.appendChild(makeCard(item, page * PER_PAGE + i)));
 
+    renderPager(pagerTop, pages, items.length);
+    renderPager(pager, pages, items.length);
+  }
+
+  // The pager is rendered both above and below the grid — both call this.
+  function renderPager(el, pages, total) {
     const nums = pageWindow(page, pages).map((p) =>
       p === null
         ? `<span class="pg-gap">…</span>`
         : `<button class="pg-num${p === page ? " active" : ""}" data-pg="${p}">${p + 1}</button>`
     ).join("");
-    pager.innerHTML =
-      `<button id="pg-prev"${page <= 0 ? " disabled" : ""}>‹ Prev</button>` +
+    el.innerHTML =
+      `<button class="pg-prev"${page <= 0 ? " disabled" : ""}>‹ Prev</button>` +
       `<span class="pg-nums">${nums}</span>` +
-      `<button id="pg-next"${page >= pages - 1 ? " disabled" : ""}>Next ›</button>` +
-      `<span class="pg-count">${items.length} item${items.length !== 1 ? "s" : ""}</span>`;
-    const pv = document.getElementById("pg-prev"), nx = document.getElementById("pg-next");
-    if (pv) pv.onclick = () => { page--; renderGrid(); window.scrollTo(0, 0); };
-    if (nx) nx.onclick = () => { page++; renderGrid(); window.scrollTo(0, 0); };
-    pager.querySelectorAll(".pg-num").forEach((b) => {
-      b.onclick = () => { page = +b.dataset.pg; renderGrid(); window.scrollTo(0, 0); };
+      `<button class="pg-next"${page >= pages - 1 ? " disabled" : ""}>Next ›</button>` +
+      `<span class="pg-count">${total} item${total !== 1 ? "s" : ""}</span>`;
+    const go = (p) => {
+      page = Math.max(0, Math.min(pages - 1, p));
+      renderGrid();
+      window.scrollTo(0, 0);
+    };
+    el.querySelector(".pg-prev").onclick = () => go(page - 1);
+    el.querySelector(".pg-next").onclick = () => go(page + 1);
+    el.querySelectorAll(".pg-num").forEach((b) => {
+      b.onclick = () => go(+b.dataset.pg);
     });
   }
 

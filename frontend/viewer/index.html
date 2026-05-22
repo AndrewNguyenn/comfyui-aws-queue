@@ -276,7 +276,8 @@ a { color:var(--pond-dk); }
   text-transform:uppercase; }
 .pager button:hover:not(:disabled) { background:var(--pond-dk); color:var(--paper); }
 .pager button:disabled { opacity:.35; cursor:default; }
-.pg-nums { display:flex; gap:4px; }
+.pg-nums { display:flex; flex-wrap:wrap; gap:4px; justify-content:center; }
+.pager-top { border-bottom:1px solid var(--line); }
 .pager .pg-num { padding:7px 10px; min-width:34px; letter-spacing:0; text-align:center; }
 .pager .pg-num.active { background:var(--pond-dk); color:var(--paper); cursor:default; }
 .pg-gap { color:var(--ink-3); padding:0 2px; align-self:center; }
@@ -519,6 +520,7 @@ a { color:var(--pond-dk); }
     <button id="select-toggle" class="tool-btn" type="button">Select</button>
   </div>
 
+  <div id="pager-top" class="pager pager-top"></div>
   <div id="grid" class="grid"></div>
   <div id="pager" class="pager"></div>
 </div>
