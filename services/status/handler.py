@@ -585,21 +585,22 @@ def _view(event: dict) -> dict:
 
     # SECURITY: only allow keys under outputs bucket. The key is opaque to us
     # but we don't expose models/uploads buckets through this path.
+    # ResponseCacheControl makes S3 return a real Cache-Control on the image
+    # response (the objects carry none); output PNGs are immutable so the
+    # browser can cache hard. ?download=1 additionally forces a save-as with a
+    # filename — the viewer's bulk download needs it, since the `download` <a>
+    # attribute is ignored for cross-origin S3 URLs.
+    params = {
+        "Bucket": OUTPUTS_BUCKET,
+        "Key": key,
+        "ResponseCacheControl": "public, max-age=31536000, immutable",
+    }
+    if qs.get("download") in ("1", "true"):
+        fname = key.rsplit("/", 1)[-1].replace('"', "").replace("\\", "") or "download"
+        params["ResponseContentDisposition"] = f'attachment; filename="{fname}"'
     try:
         url = s3.generate_presigned_url(
-            "get_object",
-            # ResponseCacheControl makes S3 return a real Cache-Control on the
-            # image response (the objects themselves carry none). Output PNGs
-            # are immutable — a generation's file never changes — so the
-            # browser can cache hard and never revalidate within the URL's
-            # life. Without this the browser only heuristic-caches, which is
-            # near-useless for freshly-generated images.
-            Params={
-                "Bucket": OUTPUTS_BUCKET,
-                "Key": key,
-                "ResponseCacheControl": "public, max-age=31536000, immutable",
-            },
-            ExpiresIn=PRESIGNED_GET_TTL,
+            "get_object", Params=params, ExpiresIn=PRESIGNED_GET_TTL,
         )
     except ClientError as e:
         print(f"presign error: {e}")
