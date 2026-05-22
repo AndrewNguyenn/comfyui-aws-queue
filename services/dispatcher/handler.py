@@ -253,21 +253,29 @@ def _post_prompt(event: dict) -> dict:
     queue_url = IMAGE_QUEUE_URL if job_type == "image" else VIDEO_QUEUE_URL
 
     # Write job record FIRST so even if SQS send fails the job is recoverable.
-    ddb.put_item(
-        TableName=JOBS_TABLE,
-        Item={
-            "job_id": {"S": job_id},
-            "type": {"S": job_type},
-            "status": {"S": "queued"},
-            "workflow_json": {"S": json.dumps(workflow)},
-            "client_id": {"S": body.get("client_id", "")},
-            "created_at": {"S": now.isoformat()},
-            "expire_at": {"N": str(expire_at)},
-            # Reaper-owned: only the reaper increments this (once per zombie
-            # re-queue). The worker never touches it.
-            "attempt_count": {"N": "0"},
-        },
-    )
+    item = {
+        "job_id": {"S": job_id},
+        "type": {"S": job_type},
+        "status": {"S": "queued"},
+        "workflow_json": {"S": json.dumps(workflow)},
+        "client_id": {"S": body.get("client_id", "")},
+        "created_at": {"S": now.isoformat()},
+        "expire_at": {"N": str(expire_at)},
+        # Reaper-owned: only the reaper increments this (once per zombie
+        # re-queue). The worker never touches it.
+        "attempt_count": {"N": "0"},
+    }
+    # workflow_json above is the API-format prompt (what the worker executes).
+    # The editor also sends its full UI workflow — node layout, groups, the
+    # UI-only nodes — at extra_data.extra_pnginfo.workflow. Keep it so the
+    # viewer's "Copy JSON" can hand back the real editable graph. Best-effort
+    # and size-guarded: a giant graph must never fail the job submit.
+    ui_workflow = ((body.get("extra_data") or {}).get("extra_pnginfo") or {}).get("workflow")
+    if isinstance(ui_workflow, dict):
+        ui_json = json.dumps(ui_workflow)
+        if len(ui_json) <= 350_000:  # headroom under DynamoDB's 400 KB item cap
+            item["workflow_ui"] = {"S": ui_json}
+    ddb.put_item(TableName=JOBS_TABLE, Item=item)
 
     # SQS message: small (just job_id + type). Worker reads full workflow from DDB.
     # Pure SQS body avoids hitting the 256 KB SQS message limit on big workflows.

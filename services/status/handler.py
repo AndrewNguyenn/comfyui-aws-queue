@@ -453,10 +453,15 @@ def _get_job(event: dict) -> dict:
     item = r["Item"]
     output = _serialize_job(item)
     output["attempt_count"] = int(item.get("attempt_count", {"N": "0"})["N"])
-    # Raw workflow graph — the viewer's "copy workflow" button needs the full
-    # node dict. Deliberately not in the /jobs list response (too large ×N);
-    # callers fetch it per-job here.
+    # Workflow graphs for the viewer's "Copy JSON" button. Deliberately not in
+    # the /jobs list response (too large ×N); callers fetch them per-job here.
+    #   workflow    — API-format prompt, always present.
+    #   workflow_ui — full editor graph, present only for jobs submitted after
+    #                 the dispatcher started capturing it.
     output["workflow"] = _parse_workflow(item.get("workflow_json", {}).get("S", ""))
+    ui = item.get("workflow_ui", {}).get("S", "")
+    if ui:
+        output["workflow_ui"] = _parse_workflow(ui)
     return _resp(200, output)
 
 
