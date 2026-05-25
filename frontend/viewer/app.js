@@ -14,6 +14,11 @@
   const hdrCount = document.getElementById("hdr-count");
 
   const PER_PAGE = 75; // 5 across × 15 rows
+  // Jobs are fetched lazily: a small first batch paints the gallery fast,
+  // then larger batches in the background until the tail is reached. Keeps
+  // first-paint cost flat as the job history grows.
+  const INITIAL_FETCH = 150;  // enough to fill page 1 + a buffer for filters
+  const BG_FETCH = 1000;
   const URL_CACHE_KEY = "viewer.urlcache";
   const URL_CACHE_TTL = 3300 * 1000; // ~55 min (presign lives 1 h)
 
@@ -36,6 +41,10 @@
   // render are skipped so a fast pager doesn't back the queue up with
   // requests for cards that are no longer on screen.
   let gridGen = 0;
+  // Bumped on every loadJobs() — the background-loader loop checks it and
+  // aborts when a fresh reload supersedes it (e.g. a pending job completed
+  // and triggered a refetch).
+  let loadGen = 0;
 
   /* ---------- auth ---------- */
   function authHeaders() {
@@ -203,22 +212,37 @@
     hdrCount.textContent = `${allItems.length} file${allItems.length !== 1 ? "s" : ""}`;
   }
 
+  // Returns the raw job list for the page (no client filtering). offset is
+  // over raw jobs so the caller's offset arithmetic and EOF check stay
+  // aligned with what the API paginated.
+  async function _fetchJobsPage(offset, limit) {
+    const r = await authedFetch(
+      `/jobs?status=complete&limit=${limit}&offset=${offset}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return (await r.json()).jobs || [];
+  }
+  function _appendJobsAsItems(jobs) {
+    for (const job of jobs) {
+      if (!(job.output_keys || []).length) continue;
+      for (const key of job.output_keys) {
+        allItems.push({ key, job, isVideo: isVideoKey(key) });
+      }
+    }
+  }
+
   async function loadJobs() {
+    const myGen = ++loadGen;
     if (!(await ensureAuth())) {
+      if (myGen !== loadGen) return;
       grid.outerHTML = '<div class="empty"><div class="e-title">Not signed in</div>' +
         '<div class="e-body"><a href="/login.html">Log in</a> and reopen.</div></div>';
       return;
     }
     try {
-      const r = await authedFetch(`/jobs?status=complete&limit=8000`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const jobs = ((await r.json()).jobs || []).filter((j) => (j.output_keys || []).length);
+      const initial = await _fetchJobsPage(0, INITIAL_FETCH);
+      if (myGen !== loadGen) return;
       allItems = [];
-      for (const job of jobs) {
-        for (const key of job.output_keys) {
-          allItems.push({ key, job, isVideo: isVideoKey(key) });
-        }
-      }
+      _appendJobsAsItems(initial);
       // Drop any selected keys that no longer exist after the reload, and
       // reset the shift-select anchor — filtered() indices have shifted.
       lastSelIdx = -1;
@@ -229,9 +253,55 @@
       }
       refreshCounts();
       renderGrid();
+      // Tail of the history streams in below the fold. A short initial fetch
+      // means filter tabs / search start sparse and fill as batches arrive.
+      if (initial.length >= INITIAL_FETCH) _bgLoadRest(myGen, initial.length);
     } catch (e) {
+      if (myGen !== loadGen) return;
       grid.innerHTML = `<div class="empty"><div class="e-title">Couldn't load</div>` +
         `<div class="e-body">${esc(e.message)}</div></div>`;
+    }
+  }
+
+  // Page through the rest of the job history in the background. Stops when
+  // an empty batch comes back (table exhausted) or a fresh loadJobs()
+  // supersedes this run. After each batch, re-renders the grid only when
+  // the user's current page slice actually gains items — appended items are
+  // older than everything in allItems, so a slice that's already full of
+  // newer items is byte-identical; just the pagers update.
+  //
+  // Cost note: offset/limit pagination re-queries the per-status pool of
+  // size (offset + limit) per request, so total backend work grows with N
+  // batches — the tradeoff for fast first paint.
+  async function _bgLoadRest(myGen, startOffset) {
+    let offset = startOffset;
+    while (true) {
+      let batch;
+      try { batch = await _fetchJobsPage(offset, BG_FETCH); }
+      catch (_e) { return; } // give up silently — the page already painted
+      if (myGen !== loadGen) return;
+      if (!batch.length) return;
+      const sliceStart = page * PER_PAGE;
+      const sliceEnd = sliceStart + PER_PAGE;
+      const beforeFiltered = filtered().length;
+      const beforePages = Math.max(1, Math.ceil(beforeFiltered / PER_PAGE));
+      const beforeInSlice = Math.max(
+        0, Math.min(beforeFiltered, sliceEnd) - sliceStart);
+      _appendJobsAsItems(batch);
+      refreshCounts();
+      const afterFiltered = filtered().length;
+      const afterPages = Math.max(1, Math.ceil(afterFiltered / PER_PAGE));
+      const afterInSlice = Math.max(
+        0, Math.min(afterFiltered, sliceEnd) - sliceStart);
+      if (afterInSlice !== beforeInSlice) {
+        // Current page slice grew — re-render the grid so the new cards land.
+        renderGrid();
+      } else if (afterPages !== beforePages) {
+        // Slice unchanged, just more pages now — update the pagers in place.
+        renderPager(pagerTop, afterPages, afterFiltered);
+        renderPager(pager, afterPages, afterFiltered);
+      }
+      offset += batch.length;
     }
   }
 
@@ -291,8 +361,15 @@
       `<button class="pg-next"${page >= pages - 1 ? " disabled" : ""}>Next ›</button>` +
       `<span class="pg-count">${total} item${total !== 1 ? "s" : ""}</span>`;
     const go = (p) => {
+      const prev = page;
       page = Math.max(0, Math.min(pages - 1, p));
       renderGrid();
+      // Coming back to page 0 picks up anything the pending-poll's refresh
+      // was suppressing while we were away (see the page === 0 guard in
+      // renderPending). renderGrid() above paints with current data first
+      // so the user sees something immediately; loadJobs() re-renders when
+      // the response lands.
+      if (prev !== 0 && page === 0) loadJobs();
       window.scrollTo(0, 0);
     };
     el.querySelector(".pg-prev").onclick = () => go(page - 1);
@@ -775,9 +852,14 @@
     pending.innerHTML = buildPendingHtml(running, queued, failed);
     wirePending();
 
-    // A job leaving the queue (likely) finished — refresh the gallery.
+    // A job leaving the queue (likely) finished — refresh the gallery. Skip
+    // when the user is past page 0: the new job lands at the top of page 0,
+    // and loadJobs() resets allItems to the initial-fetch window — too small
+    // to cover a late page, so we'd bump the user back. A later return to
+    // page 0 (or the next completion while there) picks the new job up.
     const cur = new Set(jobs.map((j) => j.job_id));
-    if (lastPendingIds && [...lastPendingIds].some((id) => !cur.has(id))) loadJobs();
+    if (page === 0 && lastPendingIds &&
+        [...lastPendingIds].some((id) => !cur.has(id))) loadJobs();
     lastPendingIds = cur;
   }
 
