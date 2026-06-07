@@ -136,7 +136,7 @@ ComfyUI `/history` `outputs` shows which nodes actually ran.
   rotating the `comfy-image` task definition, expect to clean those up.
 - The image fleet is a **cost-optimized mixed-instance spot ASG**: `g4dn.2xlarge`
   (T4: 16 GB VRAM, sm_75 — cheapest GPU spot) primary, then `g4dn.xlarge`, with
-  `g5.2xlarge`/`g5.xlarge` (A10G) as fallbacks (`capacity-optimized-prioritized`,
+  `g5.xlarge` (A10G) as the only fallback (`capacity-optimized-prioritized`,
   so g4dn is preferred and the fleet only walks to g5 during a g4 drought). The
   image worker image is built for T4 (xformers, not SageAttention — see
   `workers/image/Dockerfile`). **g4 has no hardware bf16 and only 16 GB VRAM, so

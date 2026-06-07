@@ -107,9 +107,10 @@ export const APP_CONFIG: AppConfig = {
       primaryInstanceType: 'g4dn.2xlarge',
       // ORDER IS PRIORITY: the ASG uses capacity-optimized-PRIORITIZED, so
       // g4dn.2xlarge is used whenever its spot pool has capacity; the fleet
-      // walks down to g4dn.xlarge, then the g5 (A10G) sizes, only during a g4
-      // drought. g5 stays in the list as a bf16/24 GB safety net and extra
-      // spot pools for capacity. (g6 was removed — see the trade-off below.)
+      // walks down to g4dn.xlarge, then g5.xlarge (A10G), only during a g4
+      // drought. g5.xlarge stays as a bf16/24 GB-VRAM safety net and an extra
+      // spot pool for capacity. (g6 and g5.2xlarge removed for cost — g5.2xlarge
+      // was the priciest size in the set; see the trade-off below.)
       //
       // ACCEPTED TRADE-OFF — FLOW/Flux-class jobs are UNRELIABLE on this fleet.
       // A T4 has no hardware bf16 (ComfyUI falls back to fp32) and can't fit a
@@ -123,7 +124,7 @@ export const APP_CONFIG: AppConfig = {
       // SDXL (~7 GB checkpoints) but they CANNOT mmap 20 GB+ checkpoints. The
       // container has no hard memory cap (see makeTaskDefinition) so it
       // schedules on both 16 GB and 32 GB sizes.
-      fallbackInstanceTypes: ['g4dn.xlarge', 'g5.2xlarge', 'g5.xlarge'],
+      fallbackInstanceTypes: ['g4dn.xlarge', 'g5.xlarge'],
       rootVolumeGb: 150,
     },
     video: {
