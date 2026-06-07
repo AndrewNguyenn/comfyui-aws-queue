@@ -84,11 +84,11 @@ export const APP_CONFIG: AppConfig = {
   region: 'us-east-1',
   availabilityZone: 'us-east-1a',
   // Span all five GPU-capable us-east-1 AZs for the widest spot-pool spread.
-  // a/b/c/d/f all offer g5.xlarge/g5.2xlarge (image fleet is g5.2xlarge-only,
-  // so pool depth directly drives how long a job waits during a spot
-  // drought); g6e.xlarge is offered in a/b/c/d — capacity-optimized simply
-  // skips f for that type. 1e is excluded (no GPU capacity). Extra public
-  // subnets are free here — no NAT GW, no interface endpoints.
+  // a/b/c/d/f all offer the g4dn and g5 sizes the image fleet uses, so pool
+  // depth directly drives how long a job waits during a spot drought;
+  // g6e.xlarge (video fallback) is offered in a/b/c/d — capacity-optimized
+  // simply skips f for that type. 1e is excluded (no GPU capacity). Extra
+  // public subnets are free here — no NAT GW, no interface endpoints.
   additionalAvailabilityZones: ['us-east-1b', 'us-east-1c', 'us-east-1d', 'us-east-1f'],
   tags: {
     Project: 'comfyui-aws-queue',
@@ -99,30 +99,31 @@ export const APP_CONFIG: AppConfig = {
   fleets: {
     image: {
       fleetName: 'image',
-      // g5.2xlarge: A10G (24 GB VRAM, native bf16, sm_86) + 32 GB sys RAM.
-      // The catalog now includes Flux-class FLOW checkpoints (e.g. the 20 GB
-      // redcraft model). A T4 (g4dn) has no hardware bf16 — ComfyUI falls
-      // back to fp32 — and a 20 GB model can't fit the T4's 16 GB VRAM, so
-      // it offloads every step: a single generation takes 25-40 min and
-      // blows the worker timeout. On an A10G the same model runs in bf16,
-      // mostly in-VRAM: ~2-3 min/image.
-      primaryInstanceType: 'g5.2xlarge',
-      // Fallbacks across the g5 (A10G) and g6 (L4) families — added after a
-      // us-east-1 g5 spot drought left the fleet unable to launch anything
-      // (UnfulfillableCapacity in every g5 pool). All four are bf16-capable.
+      // COST-OPTIMIZED for SDXL. g4dn (T4: 16 GB VRAM, sm_75) is the cheapest
+      // GPU spot, and the image worker image is BUILT for it — xformers, not
+      // SageAttention (which needs Ampere sm_80+); see workers/image/Dockerfile.
+      // SDXL/Illustrious throughput on T4 comfortably clears the 100 imgs/hr
+      // target, so g4dn.2xlarge (8 vCPU, 32 GB sys RAM) is the primary.
+      primaryInstanceType: 'g4dn.2xlarge',
       // ORDER IS PRIORITY: the ASG uses capacity-optimized-PRIORITIZED, so
-      // g5.2xlarge (the intended main: A10G, 8 vCPU, 32 GB) is used whenever
-      // it has spot capacity; the fleet only falls to g5.xlarge, then the g6
-      // (L4) sizes, during a drought. g6 is actually cheaper than g5, so
-      // falling back never raises cost.
-      // Trade-off: the .xlarge sizes have 16 GB sys RAM — fine for SDXL
-      // (~7 GB checkpoints) but they CANNOT mmap 20 GB+ FLOW checkpoints
-      // (kernel overcommit refuses a mapping > physical RAM), so a heavy
-      // FLOW job that lands on a .xlarge will OOM mid-load. Accepted: a
-      // worker running SDXL beats no worker at all during a drought.
-      // The container has no hard memory cap (see makeTaskDefinition) so it
-      // schedules on both .xlarge (16 GB) and .2xlarge (32 GB).
-      fallbackInstanceTypes: ['g5.xlarge', 'g6.2xlarge', 'g6.xlarge'],
+      // g4dn.2xlarge is used whenever its spot pool has capacity; the fleet
+      // walks down to g4dn.xlarge, then the g5 (A10G) sizes, only during a g4
+      // drought. g5 stays in the list as a bf16/24 GB safety net and extra
+      // spot pools for capacity. (g6 was removed — see the trade-off below.)
+      //
+      // ACCEPTED TRADE-OFF — FLOW/Flux-class jobs are UNRELIABLE on this fleet.
+      // A T4 has no hardware bf16 (ComfyUI falls back to fp32) and can't fit a
+      // 20 GB FLOW checkpoint in 16 GB VRAM, so it offloads every step → 25-40
+      // min/image, which blows the 15-min SQS visibility timeout (the job
+      // retries, then DLQs). There is ONE image queue and any worker grabs any
+      // job, so a FLOW job may land on a g4 worker and fail. This fleet is
+      // intentionally tuned for SDXL cost; run FLOW-class models elsewhere.
+      //
+      // The .xlarge sizes (g4dn.xlarge, g5.xlarge) have 16 GB sys RAM — fine for
+      // SDXL (~7 GB checkpoints) but they CANNOT mmap 20 GB+ checkpoints. The
+      // container has no hard memory cap (see makeTaskDefinition) so it
+      // schedules on both 16 GB and 32 GB sizes.
+      fallbackInstanceTypes: ['g4dn.xlarge', 'g5.2xlarge', 'g5.xlarge'],
       rootVolumeGb: 150,
     },
     video: {
