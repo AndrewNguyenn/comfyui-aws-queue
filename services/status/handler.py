@@ -25,10 +25,15 @@ from botocore.exceptions import ClientError
 
 ddb = boto3.client("dynamodb")
 s3 = boto3.client("s3", config=Config(signature_version="s3v4"))
+sqs = boto3.client("sqs")
 
 JOBS_TABLE = os.environ["JOBS_TABLE"]
 OUTPUTS_BUCKET = os.environ["OUTPUTS_BUCKET"]
 UPLOADS_BUCKET = os.environ["UPLOADS_BUCKET"]
+# Already provided to every API Lambda (see api.ts commonLambdaProps). .get so
+# a missing env never breaks the other routes — /backlog just reports 0.
+IMAGE_QUEUE_URL = os.environ.get("IMAGE_QUEUE_URL", "")
+VIDEO_QUEUE_URL = os.environ.get("VIDEO_QUEUE_URL", "")
 
 PRESIGNED_GET_TTL = 3600  # 1 h — lets the viewer reuse a URL (browser image
 # cache stays warm) across reloads instead of re-presigning every render.
@@ -48,6 +53,8 @@ def lambda_handler(event: dict, _context: Any) -> dict:
             return _delete_job(event)
         if method == "POST" and path == "/jobs/{id}/cancel":
             return _cancel_job(event)
+        if method == "GET" and path == "/backlog":
+            return _queue_depth()
         if method == "GET" and path == "/view":
             return _view(event)
         if method == "POST" and path == "/upload/image":
@@ -347,6 +354,42 @@ _LIST_PROJECTION_ATTRS = (
     "output_keys", "error", "workflow_json", "progress", "instance_type",
     "cancel_requested",
 )
+
+
+def _queue_depth() -> dict:
+    """GET /backlog — live backlog straight from SQS.
+
+    ApproximateNumberOfMessages = jobs waiting to be claimed (queued);
+    NotVisible = in flight (a worker is processing). The viewer's pending strip
+    uses `queued` as an exact, uncapped count — counting fetched job records
+    instead is bounded by the /jobs page limit (and a big queued batch crowds
+    the running rows out of a shared limit). Caveat: SQS counts messages still
+    on the queue, including a job cancelled after enqueue but not yet skipped by
+    a worker, so this can run slightly ahead of the live queued records — close
+    enough for a backlog gauge."""
+    def depth(url: str) -> tuple:
+        if not url:
+            return 0, 0
+        try:
+            a = sqs.get_queue_attributes(
+                QueueUrl=url,
+                AttributeNames=["ApproximateNumberOfMessages",
+                                "ApproximateNumberOfMessagesNotVisible"],
+            ).get("Attributes", {})
+        except ClientError as e:
+            print(f"WARN get_queue_attributes {url}: {e!r}")
+            return 0, 0
+        return (int(a.get("ApproximateNumberOfMessages", 0)),
+                int(a.get("ApproximateNumberOfMessagesNotVisible", 0)))
+
+    iq, ir = depth(IMAGE_QUEUE_URL)
+    vq, vr = depth(VIDEO_QUEUE_URL)
+    return _resp(200, {
+        "queued": iq + vq,
+        "running": ir + vr,
+        "image": {"queued": iq, "running": ir},
+        "video": {"queued": vq, "running": vr},
+    })
 
 
 def _query_newest(status: str, n: int) -> list:

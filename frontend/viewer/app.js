@@ -594,20 +594,29 @@
   }
 
   // Rough "time remaining" — projects the running job's full duration from its
-  // observed sampling pace, then assumes each queued job takes about as long.
-  // Returns "" when there's no running job with progress to estimate from.
-  function pendingEta(running, queuedCount) {
+  // observed sampling pace, then assumes each *same-type* queued job takes about
+  // as long. Image vs video pace differ a lot, so the queued count must match
+  // the running job's type: prefer the SQS per-type backlog (queuedByType),
+  // else fall back to counting the fetched sample by type. Returns "" when
+  // there's no running job with progress to estimate from.
+  function pendingEta(running, queuedSample, queuedByType) {
     const r = running.find(
       (j) => j.progress && j.progress.includes("/") && (j.started_at || j.created_at));
     if (!r) return "";
     const [v, m] = r.progress.split("/").map(Number);
     if (!(v > 0 && m > 0)) return "";
+    const queuedCount = queuedByType && queuedByType[r.type] != null
+      ? queuedByType[r.type]
+      : queuedSample.filter((j) => j.type === r.type).length;
     const elapsedSec = Math.max(
       1, (Date.now() - new Date(r.started_at || r.created_at).getTime()) / 1000);
     const perJobSec = (elapsedSec / v) * m;
     const totalSec = Math.max(0, perJobSec - elapsedSec) + queuedCount * perJobSec;
     const min = Math.round(totalSec / 60);
-    return min < 1 ? "<1m" : `${min}m`;
+    if (min < 1) return "<1m";
+    if (min < 90) return `${min}m`;  // render hours past 90m so a deep backlog
+    const h = Math.floor(min / 60), mm = min % 60;  // doesn't print 4-digit min
+    return mm ? `${h}h${mm}m` : `${h}h`;
   }
 
   function runningRow(j) {
@@ -675,8 +684,8 @@
     `</div>`;
   }
 
-  function buildPendingHtml(running, queued, failed) {
-    if (!running.length && !queued.length && !failed.length) {
+  function buildPendingHtml(running, queued, failed, queuedTotal, queuedByType) {
+    if (!running.length && !queued.length && !failed.length && !queuedTotal) {
       pendGroups = [];
       return `<section class="pending"><header class="pending-hd"><div class="lhs">` +
         `<span class="eyebrow">Pending</span>` +
@@ -688,12 +697,15 @@
     const VISIBLE = 3;
     const visible = pendShowAll ? groups : groups.slice(0, VISIBLE);
     pendGroups = visible;
-    const hidden = groups.slice(visible.length);
-    const hiddenCount = hidden.reduce((s, g) => s + g.count, 0);
+    // Counts come from queuedTotal (the SQS backlog), not the fetched sample.
+    // hiddenCount is the true remainder beyond the visible group chips, so the
+    // chips + "+N more" always reconcile to queuedTotal.
+    const visibleShown = visible.reduce((s, g) => s + g.count, 0);
+    const hiddenCount = Math.max(0, queuedTotal - visibleShown);
 
-    const eta = pendingEta(running, queued.length);
+    const eta = pendingEta(running, queued, queuedByType);
     const summary =
-      `${queued.length} in queue<span class="sep">·</span>${running.length} running` +
+      `${queuedTotal} in queue<span class="sep">·</span>${running.length} running` +
       (failed.length
         ? `<span class="sep">·</span><span class="failnote">${failed.length} failed</span>`
         : "") +
@@ -701,11 +713,18 @@
 
     const longestWait = groups.reduce(
       (m, g) => (g.oldest && (!m || g.oldest < m) ? g.oldest : m), "");
-    const foot = hidden.length
-      ? `<footer class="pq-foot">` +
-        `<button class="more" data-act="more">` +
-        `${pendShowAll ? "Show fewer" : "+ " + hiddenCount + " more queued"}</button>` +
-        `<span class="total">${queued.length} queued · longest wait ` +
+    // The expand/collapse toggle only makes sense when there are extra sample
+    // groups to reveal. A remainder that ISN'T a collapsible group — the sample
+    // truncated at 500, or a small SQS overcount — gets no button (clicking
+    // would reveal nothing); the foot's queuedTotal still tells the true count.
+    const hasCollapsible = groups.length > VISIBLE;
+    const moreBtn = hasCollapsible
+      ? `<button class="more" data-act="more">` +
+        `${pendShowAll ? "Show fewer" : "+ " + hiddenCount + " more queued"}</button>`
+      : "";
+    const foot = (hasCollapsible || hiddenCount > 0)
+      ? `<footer class="pq-foot">${moreBtn}` +
+        `<span class="total">${queuedTotal} queued · longest wait ` +
         `${esc(fmtWait(ageMin(longestWait)))}</span></footer>`
       : "";
 
@@ -715,7 +734,7 @@
         `<span class="summary">${summary}</span></div>` +
         `<div class="rhs">` +
           `<span class="status-stamp"><span class="dot"></span>` +
-          `${running.length + queued.length} Active</span>` +
+          `${running.length + queuedTotal} Active</span>` +
           `<button class="collapse" data-act="collapse">` +
           `${pendCollapsed ? "Show" : "Hide"}</button></div></header>` +
       `<div class="pending-body">` +
@@ -800,11 +819,37 @@
 
   async function renderPending() {
     if (!(await ensureAuth())) return;
-    let jobs;
+    let jobs, queuedTotal, queuedByType;
     try {
-      const r = await authedFetch(`/jobs?status=queued,running,failed&limit=100`);
-      if (!r.ok) return;
-      jobs = (await r.json()).jobs || [];
+      // The "in queue" count comes from the live SQS backlog (/backlog) — exact
+      // and uncapped. Counting fetched job records instead clamps at the page
+      // limit, and a single combined /jobs query let a big queued batch (newest
+      // created_at) crowd the running/failed rows out of the window ("0
+      // running"). So: /backlog gives the count; per-status /jobs queries give
+      // the rows — running/failed in full (only a handful exist), queued as a
+      // display sample (500) for the grouped rows. The four calls are a
+      // non-atomic snapshot (a job mid-flip can be briefly absent from all of
+      // them) — fine; the gallery refresh below is best-effort and self-corrects.
+      const [qDepth, qd, rn, fl] = await Promise.all([
+        authedFetch(`/backlog`),
+        authedFetch(`/jobs?status=queued&limit=500`),
+        authedFetch(`/jobs?status=running&limit=50`),
+        authedFetch(`/jobs?status=failed&limit=50`),
+      ]);
+      // Degrade per status: a hiccup on the low-value running/failed list
+      // shouldn't blank the whole strip. But if the queued rows fail, skip the
+      // tick — the gallery-refresh diff below would otherwise read "every queued
+      // job left" and fire a spurious reload.
+      if (!qd.ok) return;
+      const bucket = async (r) => (r.ok ? ((await r.json()).jobs || []) : []);
+      const [qj, rj, fj] = await Promise.all([bucket(qd), bucket(rn), bucket(fl)]);
+      jobs = [...rj, ...qj, ...fj];
+      // SQS backlog: total drives the count, per-type drives the ETA. null if
+      // /backlog failed → both fall back to the fetched sample downstream.
+      const depth = qDepth.ok ? await qDepth.json() : null;
+      queuedTotal = depth ? (depth.queued ?? null) : null;
+      queuedByType = depth
+        ? { image: depth.image?.queued, video: depth.video?.queued } : null;
     } catch (_e) { return; }
 
     // Forget cancelling-ids that have left the feed (the cancel finished).
@@ -849,7 +894,12 @@
       .sort((a, b) => (b.started_at || b.created_at || "")
         .localeCompare(a.started_at || a.created_at || ""));
 
-    pending.innerHTML = buildPendingHtml(running, queued, failed);
+    // Authoritative queue count from SQS; if /backlog failed, fall back to the
+    // fetched sample. Never show fewer than we actually fetched (guards the
+    // case where SQS lags behind the freshly-written queued records).
+    const qTotal = queuedTotal == null
+      ? queued.length : Math.max(queuedTotal, queued.length);
+    pending.innerHTML = buildPendingHtml(running, queued, failed, qTotal, queuedByType);
     wirePending();
 
     // A job leaving the queue (likely) finished — refresh the gallery. Skip

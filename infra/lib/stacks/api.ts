@@ -148,6 +148,12 @@ export class ApiStack extends Stack {
     storage.jobsTable.grantReadWriteData(this.statusFn);
     storage.outputsBucket.grantReadWrite(this.statusFn);
     storage.uploadsBucket.grantPut(this.statusFn);
+    // GET /backlog reads the live queue depth (ApproximateNumberOfMessages) so
+    // the viewer's pending strip shows an exact, uncapped "in queue" count
+    // instead of counting fetched job records. Queue URLs are already in env
+    // (commonLambdaProps); this adds the read permission.
+    queue.imageJobsQueue.grant(this.statusFn, 'sqs:GetQueueAttributes');
+    queue.videoJobsQueue.grant(this.statusFn, 'sqs:GetQueueAttributes');
 
     // ----- Lambda: Catalog -----
     this.catalogFn = new lambda.Function(this, 'CatalogFn', {
@@ -362,6 +368,11 @@ export class ApiStack extends Stack {
     jobs.addMethod('DELETE', statusIntegration, authMethodOptions);
     // /jobs/{id}/cancel — cancel a queued or running job
     jobs.addResource('cancel').addMethod('POST', statusIntegration, authMethodOptions);
+
+    // /backlog — live SQS backlog depth for the pending strip's count.
+    // (/queue is taken by the ComfyUI editor-compat stub below.)
+    const backlog = root.addResource('backlog');
+    backlog.addMethod('GET', statusIntegration, authMethodOptions);
 
     // /view
     const view = root.addResource('view');
