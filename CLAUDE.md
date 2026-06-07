@@ -134,15 +134,19 @@ ComfyUI `/history` `outputs` shows which nodes actually ran.
   seen until the worker is rotated.
 - **Worker rotation strands in-flight jobs** as zombie `running` records — when
   rotating the `comfy-image` task definition, expect to clean those up.
-- The image fleet runs a **mixed-instance spot ASG** across the g5 (A10G) and
-  g6 (L4) families — `g5.2xlarge` primary, then `g5.xlarge`/`g6.2xlarge`/
-  `g6.xlarge` fallbacks (`capacity-optimized-prioritized`, so g5.2xlarge is
-  preferred and the fleet only walks down during a spot drought). All four are
-  bf16-capable. The `.xlarge` sizes have 16 GB sys RAM — fine for SDXL but they
-  can't mmap 20 GB+ FLOW checkpoints, so a heavy FLOW job landing on one OOMs.
-  See `infra/lib/config.ts` for the canonical list. The us-east-1 G/VT spot
-  vCPU quota (raised to **24**, approved 2026-05-10) gates how many workers run
-  concurrently — at 8 vCPU per 2xlarge that's 3 image workers (`scaling.imageMax`
-  is 3, = the full 24-vCPU pool). That pool is **shared with the video fleet**,
-  so 3 image workers leave nothing for video; going past 3 (or wanting
-  image+video headroom) needs another quota increase.
+- The image fleet is a **cost-optimized mixed-instance spot ASG**: `g4dn.2xlarge`
+  (T4: 16 GB VRAM, sm_75 — cheapest GPU spot) primary, then `g4dn.xlarge`, with
+  `g5.2xlarge`/`g5.xlarge` (A10G) as fallbacks (`capacity-optimized-prioritized`,
+  so g4dn is preferred and the fleet only walks to g5 during a g4 drought). The
+  image worker image is built for T4 (xformers, not SageAttention — see
+  `workers/image/Dockerfile`). **g4 has no hardware bf16 and only 16 GB VRAM, so
+  FLOW/Flux-class jobs (20 GB checkpoints) are UNRELIABLE here** — a T4 offloads
+  every step (~25-40 min) and blows the 15-min SQS visibility timeout; one image
+  queue means any worker grabs any job, so a FLOW job may land on g4 and DLQ.
+  This fleet is intentionally tuned for SDXL/Illustrious; the g5 fallbacks are
+  the bf16/24 GB safety net. The `.xlarge` sizes have 16 GB sys RAM — fine for
+  SDXL but can't mmap 20 GB+ checkpoints. See `infra/lib/config.ts` for the
+  canonical list. The us-east-1 G/VT spot vCPU quota (raised to **24**, approved
+  2026-05-10) gates concurrency — at 8 vCPU per 2xlarge that's 3 image workers
+  (`scaling.imageMax` is 3, = the full 24-vCPU pool), **shared with the video
+  fleet**, so 3 image workers leave nothing for video.
