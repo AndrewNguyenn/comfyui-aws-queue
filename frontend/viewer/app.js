@@ -653,10 +653,16 @@
   function queuedRow(g, idx) {
     const isVid = g.kind === "video";
     const wait = fmtWait(ageMin(g.oldest));
-    const batch = g.count > 1
-      ? `<span class="batchchip">× <span class="ct">${g.count}</span></span>` : "";
-    const label = g.count > 1
-      ? `Remove ${g.count} queued items` : "Remove from queue";
+    // g.shown is the true depth (scaled to the SQS backlog); g.count/g.ids are
+    // the actual sampled rows the cancel button can act on. When the displayed
+    // count exceeds what one cancel can remove, keep the label generic.
+    const n = g.shown != null ? g.shown : g.count;
+    const removable = g.ids ? g.ids.length : g.count;
+    const batch = n > 1
+      ? `<span class="batchchip">× <span class="ct">${n}</span></span>` : "";
+    const label = n > 1
+      ? (n > removable ? "Remove queued items" : `Remove ${n} queued items`)
+      : "Remove from queue";
     return `<div class="pq-row queued">` +
       `<div class="pq-stamp">Queued</div>` +
       `<div class="pq-name">` +
@@ -694,13 +700,28 @@
         `</section>`;
     }
     const groups = groupQueue(queued);
+    // The fetched sample caps at 500 rows, but queuedTotal is the true SQS
+    // backlog. Scale each group's *displayed* count up to that total so the
+    // chips reflect real queue depth — exact for a single-model batch, a
+    // proportional estimate from the newest-sample when models are mixed.
+    // g.count/g.ids stay the real sampled rows so the cancel button still acts
+    // on actual job ids. (scale == 1 when the sample already covers the queue.)
+    const sampleTotal = queued.length || 1;
+    let assigned = 0;
+    groups.forEach((g) => {
+      g.shown = Math.round(g.count * queuedTotal / sampleTotal);
+      assigned += g.shown;
+    });
+    if (groups.length) {  // park rounding drift on the largest group
+      const big = groups.reduce((a, b) => (b.shown > a.shown ? b : a));
+      big.shown += queuedTotal - assigned;
+    }
     const VISIBLE = 3;
     const visible = pendShowAll ? groups : groups.slice(0, VISIBLE);
     pendGroups = visible;
-    // Counts come from queuedTotal (the SQS backlog), not the fetched sample.
-    // hiddenCount is the true remainder beyond the visible group chips, so the
-    // chips + "+N more" always reconcile to queuedTotal.
-    const visibleShown = visible.reduce((s, g) => s + g.count, 0);
+    // hiddenCount is the true remainder beyond the visible chips (their scaled
+    // counts), so chips + "+N more" reconcile to queuedTotal.
+    const visibleShown = visible.reduce((s, g) => s + g.shown, 0);
     const hiddenCount = Math.max(0, queuedTotal - visibleShown);
 
     const eta = pendingEta(running, queued, queuedByType);
@@ -722,7 +743,9 @@
       ? `<button class="more" data-act="more">` +
         `${pendShowAll ? "Show fewer" : "+ " + hiddenCount + " more queued"}</button>`
       : "";
-    const foot = (hasCollapsible || hiddenCount > 0)
+    // Show the foot whenever there's a queue (it carries the longest-wait); the
+    // toggle/“+N more” only appears when there are collapsible groups.
+    const foot = groups.length
       ? `<footer class="pq-foot">${moreBtn}` +
         `<span class="total">${queuedTotal} queued · longest wait ` +
         `${esc(fmtWait(ageMin(longestWait)))}</span></footer>`
