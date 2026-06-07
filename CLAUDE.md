@@ -141,5 +141,8 @@ ComfyUI `/history` `outputs` shows which nodes actually ran.
   bf16-capable. The `.xlarge` sizes have 16 GB sys RAM — fine for SDXL but they
   can't mmap 20 GB+ FLOW checkpoints, so a heavy FLOW job landing on one OOMs.
   See `infra/lib/config.ts` for the canonical list. The us-east-1 G/VT spot
-  vCPU quota still gates how many workers run concurrently — at 8 vCPU/instance
-  that's ~1; a 2nd in-flight worker needs the quota raised.
+  vCPU quota (raised to **24**, approved 2026-05-10) gates how many workers run
+  concurrently — at 8 vCPU per 2xlarge that's 3 image workers (`scaling.imageMax`
+  is 3, = the full 24-vCPU pool). That pool is **shared with the video fleet**,
+  so 3 image workers leave nothing for video; going past 3 (or wanting
+  image+video headroom) needs another quota increase.

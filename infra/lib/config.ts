@@ -152,11 +152,13 @@ export const APP_CONFIG: AppConfig = {
 
   scaling: {
     imageMin: 0,
-    // 2 concurrent image workers. Each g5.2xlarge is 8 vCPU; 2 = 16 vCPU,
-    // which exceeds the current 8-vCPU us-east-1 G/VT spot quota — the 2nd
-    // worker only launches once the pending quota increase (24 vCPU,
-    // CASE_OPENED) is approved. Until then the ASG runs 1 and waits.
-    imageMax: 2,
+    // 3 concurrent image workers. Each 2xlarge (g5/g6) is 8 vCPU; 3 = 24 vCPU,
+    // which exactly equals the us-east-1 G/VT spot quota (raised to 24,
+    // approved 2026-05-10). Note the 24-vCPU pool is SHARED with the video
+    // fleet — running 3 image workers consumes the entire quota, so a
+    // concurrent video job is starved until image scales back in. Raising
+    // imageMax past 3 (or wanting image+video headroom) needs a quota bump.
+    imageMax: 3,
     videoMin: 0,
     videoMax: 3, // v3: lowered from 5 (resolves N2)
     targetBacklogPerTask: 25, // v3: raised from 10 (resolves N2)
