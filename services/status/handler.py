@@ -285,6 +285,9 @@ _NON_CHARACTER_TAGS = frozenset({
     "newest", "recent", "oldest", "early", "mid",
     "source_anime", "source_cartoon", "source_furry", "official_art",
     "rating_safe", "rating_questionable", "rating_explicit",
+    # NoobAI/Illustrious aesthetic-rating vocabulary
+    "very_awa", "worst_aesthetic", "bad_aesthetic", "displeasing",
+    "very_displeasing", "detailed", "very_detailed",
     # angle / viewpoint
     "from_front", "from_behind", "from_back", "from_above", "from_below",
     "from_side", "side_view", "back_view", "front_view", "profile",
@@ -328,10 +331,18 @@ def _norm_tag(t: str) -> str:
         if t and t[-1] in ")]}":
             t = t[:-1]
         t = t.strip()
-    if ":" in t:  # (tag:1.3) / tag::1.3 weight — drop a numeric weight tail
+    if ":" in t:  # (tag:1.3) / tag::1.3 weight — drop a numeric weight tail.
         head, _, tail = t.rpartition(":")
-        if head and tail.strip().replace(".", "", 1).isdigit():
+        # The tail may carry a leaked group-close bracket from a multi-tag
+        # weighted group — "(a,_b,_c:1.2)" comma-splits to ".._c:1.2)" — strip
+        # those before the numeric check so the weight is still recognized.
+        tail = tail.strip().rstrip(")]}").strip()
+        if head and tail.replace(".", "", 1).isdigit():
             t = head.strip().rstrip(":").strip()  # rstrip handles tag::1.3
+    # Stray leading/trailing underscores: some prompts join quality tags as
+    # ",_best_quality,_very_aesthetic" so a tag arrives as "_best_quality".
+    # Internal underscores (narberal_gamma) are untouched.
+    t = t.strip("_").strip()
     return t.lower()
 
 
@@ -346,7 +357,8 @@ def _character_from_prompt(text: str) -> str:
         for piece in chunk.split("BREAK"):
             norm = _norm_tag(piece)
             if (norm and norm not in _NON_CHARACTER_TAGS
-                    and not norm.startswith("<")  # <lora:foo:0.8> etc.
+                    and not norm.endswith("_focus")  # *_focus is always framing
+                    and not norm.startswith("<")     # <lora:foo:0.8> etc.
                     and not _SCORE_RE.match(norm)):
                 return norm
     return ""

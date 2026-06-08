@@ -48,6 +48,11 @@ def test_norm_tag_unwraps_emphasis_but_keeps_internal_parens():
     assert h._norm_tag(":d") == ":d"
     # the `tag::1.3` double-colon weight form must not leave a dangling colon
     assert h._norm_tag("narberal_gamma::1.2") == "narberal_gamma"
+    # leading underscore from a ",_tag" join is stripped (internal _ kept)
+    assert h._norm_tag("_best_quality") == "best_quality"
+    assert h._norm_tag("_very_aesthetic") == "very_aesthetic"
+    # a tag carrying the leaked group-close bracket on its weight: "_c:1.2)"
+    assert h._norm_tag("_absurdres:1.2)") == "absurdres"
 
 
 def test_character_is_first_non_framing_tag():
@@ -78,6 +83,16 @@ def test_character_is_first_non_framing_tag():
             "bronya_rand",
         "face_focus, pov, milf, artoria_pendragon, fate/stay_night":
             "artoria_pendragon",
+        # the real catpony preamble: a weighted quality GROUP joined with ",_"
+        # plus a NoobAI very_awa tag, then a focus tag — the character follows.
+        "from_front, close-up, extreme_close-up, bust_shot, face_focus, breast_focus "
+        "BREAK (masterpiece,_best_quality,_very_aesthetic,_absurdres:1.2), very_awa "
+        "BREAK vanessa_enoteca, black_clover, long_hair, pink_hair":
+            "vanessa_enoteca",
+        # back_focus (and any *_focus) is framing, not a character
+        "back_focus, face_focus, ass_focus BREAK (masterpiece,_best_quality:1.2) "
+        "BREAK ningguang_(genshin_impact), genshin_impact":
+            "ningguang_(genshin_impact)",
     }
     for prompt, expected in cases.items():
         assert h._character_from_prompt(prompt) == expected, (prompt, h._character_from_prompt(prompt))
