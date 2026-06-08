@@ -348,6 +348,54 @@ def _is_appearance(norm: str) -> bool:
             or norm.endswith("_skin") or norm in _APPEARANCE_TAGS)
 
 
+# Known franchise / copyright tags. The character is the tag immediately BEFORE
+# the series tag, so recognizing the series is what pins the character (and lets
+# any number of descriptors — clothing, persona, appearance — sit in front of it
+# without being mistaken for the character). Punctuated series (honkai:_star_rail,
+# fate/stay_night) are detected structurally; the plain-named ones below can't
+# be, so they're listed. SEED FROM THE PROMPTS — add a line when a brand-new
+# franchise first shows up (until then its character falls back to no-character).
+_FRANCHISES = frozenset({
+    "honkai:_star_rail", "honkai_star_rail", "star_rail", "honkai_impact",
+    "honkai_impact_3rd", "genshin_impact", "wuthering_waves", "zenless_zone_zero",
+    "marvel_rivals", "marvel", "overwatch", "league_of_legends", "valorant",
+    "teen_titans", "dc", "dc_comics", "marvel_comics",
+    "nikke", "nikke_goddess_of_victory", "goddess_of_victory:_nikke",
+    "stellar_blade", "blue_archive", "azur_lane", "arknights", "fate",
+    "fate/stay_night", "fate/grand_order", "fire_emblem", "pokemon",
+    "jujutsu_kaisen", "black_clover", "overlord", "overlord_(maruyama)",
+    "danmachi", "dungeon_ni_deai_wo_motomeru_no_wa_machigatteiru_darou_ka",
+    "tensei_shitara_slime_datta_ken", "naruto", "bleach", "one_piece",
+    "spy_x_family", "chainsaw_man", "my_hero_academia", "re:zero",
+})
+
+
+def _series_base(tag: str) -> str:
+    """The token before a trailing _(...) disambiguator — overlord_(maruyama) →
+    'overlord', jingliu_(honkai:_star_rail) → 'jingliu'. Whole tag if no paren."""
+    i = tag.find("_(")
+    return tag[:i] if i > 0 else tag
+
+
+def _is_series(tag: str) -> bool:
+    """A copyright/franchise tag. name_(series) CHARACTER tags are NOT series —
+    their base (the name) isn't a franchise, and the series lives inside the
+    parens, so we ignore paren contents (jingliu_(honkai:_star_rail) → not a
+    series, even though the parens contain one)."""
+    if tag in _FRANCHISES or _series_base(tag) in _FRANCHISES:
+        return True
+    if "_(" in tag:               # a name_(X) tag whose base isn't a franchise
+        return False              # → it's a character, not a series
+    return "/" in tag or (":" in tag and not tag.startswith(":"))
+
+
+def _is_paren_character(tag: str) -> bool:
+    """A name_(franchise) character tag — has the disambiguator parens and a
+    base that is NOT itself a franchise (so overlord_(maruyama) is excluded)."""
+    return ("_(" in tag and tag.endswith(")")
+            and _series_base(tag) not in _FRANCHISES)
+
+
 def _norm_tag(t: str) -> str:
     """Normalize a single booru tag for stoplist comparison / display: strip
     emphasis wrapping and a trailing :weight, lowercase.
@@ -380,23 +428,37 @@ def _norm_tag(t: str) -> str:
 def _character_and_subject(text: str) -> tuple[str, str]:
     """(character, subject) for a booru-style positive prompt.
 
-    Skip the lead tags (quality/framing/focus/count/persona); the FIRST content
-    tag after them is the named character — UNLESS it's an appearance descriptor,
-    in which case the prompt describes an UNNAMED figure: there is no character,
-    but we hand back that descriptor as a `subject` hint (e.g. "black_hair") so
-    the viewer can group/label it ("black_hair figure") instead of a bare model
-    row. Both empty for a scenery-only prompt. Don't scan past the first content
-    tag into the unbounded scene/action vocabulary."""
+    The structural invariant booru prompts follow: the character tag sits
+    immediately BEFORE the series/copyright tag. Anchoring on the series is what
+    makes this robust — any number of leads (quality, framing) AND descriptors
+    (clothing, persona, appearance) can precede the character without being
+    mistaken for it. So:
+      1. character = the (non-lead) tag right before the first series tag;
+      2. else a standalone name_(franchise) parenthetical is still a character;
+      3. else the prompt names no one — hand back the lead appearance tag as a
+         `subject` hint (e.g. "black_hair" → the viewer shows "black_hair figure")
+         so unnamed figures still cluster instead of collapsing to a model row.
+    All empty for a scenery-only prompt."""
     if not text:
         return "", ""
+    content = []
     for chunk in text.replace("\n", " ").split(","):
         for piece in chunk.split("BREAK"):
             norm = _norm_tag(piece)
-            if not norm or _is_lead_tag(norm):
-                continue
-            # First content tag: a character leads here; an appearance tag means
-            # an unnamed figure (return it as a subject hint, not a character).
-            return ("", norm) if _is_appearance(norm) else (norm, "")
+            if norm and not _is_lead_tag(norm):
+                content.append(norm)
+    # 1. The character is the content tag immediately before the first series.
+    for i, tag in enumerate(content):
+        if _is_series(tag):
+            return (content[i - 1], "") if i > 0 else ("", "")
+    # 2. No series anchor — a name_(franchise) parenthetical is still a character
+    #    (covers a character whose series tag was omitted from the prompt).
+    for tag in content:
+        if _is_paren_character(tag):
+            return tag, ""
+    # 3. No character. Offer the leading appearance tag as a subject hint.
+    if content and _is_appearance(content[0]):
+        return "", content[0]
     return "", ""
 
 

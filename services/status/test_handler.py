@@ -76,13 +76,26 @@ def test_character_is_first_non_framing_tag():
         "score_9_up, very_aesthetic, from_front, nobara_kugisaki, jujutsu_kaisen":
             "nobara_kugisaki",
         # inline LoRA/embedding tokens aren't a character
-        "<lora:detail:0.8>, masterpiece, narberal_gamma":
+        "<lora:detail:0.8>, masterpiece, narberal_gamma, overlord_(maruyama)":
             "narberal_gamma",
         # persona/age descriptors lead before the character in this template
         "breast_focus, from_front, upper_body, mature_female, bronya_rand, honkai:_star_rail":
             "bronya_rand",
         "face_focus, pov, milf, artoria_pendragon, fate/stay_night":
             "artoria_pendragon",
+        # series-anchor: ANY descriptors (here CLOTHING) may precede the
+        # character; it's pinned as the (non-lead) tag right before the series.
+        "breast_focus, from_front, upper_body BREAK crop_top, "
+        "jingliu_(honkai:_star_rail), honkai:_star_rail, very_long_hair, white_hair":
+            "jingliu_(honkai:_star_rail)",
+        # a name_(franchise) parenthetical is a character even when no series tag
+        # follows it (series omitted from the prompt)
+        "from_front BREAK crop_top, tracer_(overwatch), blue_eyes":
+            "tracer_(overwatch)",
+        # plain character pinned by a PUNCTUATED series (no franchise-dict entry
+        # needed — ":" is detected structurally)
+        "close-up BREAK skirt, bronya_rand, honkai:_star_rail":
+            "bronya_rand",
         # the real catpony preamble: a weighted quality GROUP joined with ",_"
         # plus a NoobAI very_awa tag, then a focus tag — the character follows.
         "from_front, close-up, extreme_close-up, bust_shot, face_focus, breast_focus "
