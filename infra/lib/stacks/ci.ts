@@ -4,7 +4,7 @@ import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as codebuild from 'aws-cdk-lib/aws-codebuild';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
-import { AppConfig } from '../config';
+import { AppConfig, GOLDEN_PIPELINE_NAME } from '../config';
 
 export interface CiStackProps extends StackProps {
   readonly config: AppConfig;
@@ -93,6 +93,19 @@ export class CiStack extends Stack {
       new iam.PolicyStatement({
         actions: ['logs:CreateLogStream', 'logs:PutLogEvents', 'logs:CreateLogGroup'],
         resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/codebuild/*`],
+      })
+    );
+    // The image-worker buildspec re-bakes the golden AMI after pushing a new
+    // :latest (post_build) so the AMI never goes stale vs the container image.
+    // Scoped to the one golden pipeline (constructed ARN — no cross-stack ref;
+    // the pipeline lives in ComfyImageBuilderStack). Shared buildRole, but only
+    // buildspec-image-worker.yml calls start-image-pipeline-execution.
+    buildRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['imagebuilder:StartImagePipelineExecution'],
+        resources: [
+          `arn:aws:imagebuilder:${this.region}:${this.account}:image-pipeline/${GOLDEN_PIPELINE_NAME}`,
+        ],
       })
     );
 

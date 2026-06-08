@@ -27,3 +27,10 @@ phases:
     commands:
       - echo Build complete tag "$REPO:$SHA"
       - echo To roll out run aws ecs update-service --cluster comfy-cluster --service comfy-image --force-new-deployment
+      # Re-bake the golden AMI so it tracks the new :latest (the AMI's payload IS
+      # this image). Non-fatal: a trigger hiccup must not fail an already-pushed
+      # build. ARN built from CodeBuild's ACCOUNT/AWS_REGION; pipeline name is
+      # fixed in infra (GOLDEN_PIPELINE_NAME). No-op until ComfyImageBuilderStack
+      # is deployed (the IAM grant lives on the shared CodeBuild role).
+      - echo Triggering golden AMI re-bake
+      - aws imagebuilder start-image-pipeline-execution --image-pipeline-arn "arn:aws:imagebuilder:$AWS_REGION:$ACCOUNT:image-pipeline/comfy-image-golden-pipeline" --region "$AWS_REGION" || echo "re-bake trigger failed (non-fatal)"
