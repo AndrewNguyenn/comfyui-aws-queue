@@ -298,8 +298,11 @@ export class ComputeStack extends Stack {
           deviceName: '/dev/xvda',
           volume: autoscaling.BlockDeviceVolume.ebs(fleet.rootVolumeGb, {
             volumeType: autoscaling.EbsDeviceVolumeType.GP3,
-            iops: 3000,
-            throughput: 125,
+            // Per-fleet (see config.ts). The image fleet runs 250/6000 to speed
+            // the cold-boot ECR image pull+extract onto this volume (measured
+            // −121 s); video stays at the 125/3000 floor.
+            iops: fleet.rootVolumeIops,
+            throughput: fleet.rootVolumeThroughputMbps,
             deleteOnTermination: true,
           }),
         },

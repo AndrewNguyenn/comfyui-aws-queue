@@ -70,6 +70,12 @@ export interface FleetConfig {
   readonly primaryInstanceType: string;
   readonly fallbackInstanceTypes: readonly string[];
   readonly rootVolumeGb: number;
+  // gp3 root-volume performance. The container image (~26 GB uncompressed for
+  // image, similar for video) is pulled + extracted to /var/lib/docker on this
+  // root volume on every cold boot, so its write throughput gates cold-start
+  // time. Per-fleet so we can tune the image fleet without touching video.
+  readonly rootVolumeIops: number;
+  readonly rootVolumeThroughputMbps: number;
   // (cacheGb removed — model cache lives on the included NVMe instance store,
   // mounted by workers/image/entrypoint.sh. Was never wired into a separate
   // EBS volume in compute.ts anyway.)
@@ -118,12 +124,29 @@ export const APP_CONFIG: AppConfig = {
       primaryInstanceType: 'g5.xlarge',
       fallbackInstanceTypes: [],
       rootVolumeGb: 150,
+      // gp3 250 MB/s / 6000 IOPS (above the 125/3000 floor). The cold-start
+      // bottleneck is the ECR image pull+extract to this root volume. Measured
+      // on an on-demand g5.xlarge (2026-06-08): the same `docker pull` of the
+      // 13 GB (→25.7 GB extracted) image took 394 s at 125/3000 vs 273 s at
+      // 250/6000 — a measured 121 s (−31%) cold-start saving for ~$2–8/mo
+      // (scale-from-zero, per-second billed). Going higher hits a single-thread
+      // gzip-decompress floor (~273 s) AND the g5.xlarge ~437 MB/s EBS burst
+      // ceiling, so 250 is the sweet spot; image-slimming can't help (69% of
+      // bytes are inherited NGC base layers). Only a golden AMI removes the
+      // pull entirely — deferred (re-bake-per-release maintenance burden).
+      rootVolumeIops: 6000,
+      rootVolumeThroughputMbps: 250,
     },
     video: {
       fleetName: 'video',
       primaryInstanceType: 'g5.xlarge',
       fallbackInstanceTypes: ['g5.2xlarge', 'g6e.xlarge'],
       rootVolumeGb: 250,
+      // Left at the gp3 floor for now (the image-fleet bump above is the
+      // measured win; flip these to 6000/250 the same way if video cold-start
+      // proves to be a problem).
+      rootVolumeIops: 3000,
+      rootVolumeThroughputMbps: 125,
     },
   },
 
