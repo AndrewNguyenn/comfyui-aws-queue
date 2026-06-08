@@ -106,6 +106,12 @@ def test_character_is_first_non_framing_tag():
         "back_focus, face_focus, ass_focus BREAK (masterpiece,_best_quality:1.2) "
         "BREAK ningguang_(genshin_impact), genshin_impact":
             "ningguang_(genshin_impact)",
+        # fallback: a LEADING character whose franchise isn't recognized is still
+        # found via the first-content-tag fallback (not lost to no-character).
+        # Also exercises the added framing tags (three-quarter_angle, …).
+        "three-quarter_angle, establishing_shot BREAK protagonist_x, "
+        "totally_made_up_series_zzz, blue_eyes, long_hair":
+            "protagonist_x",
     }
     for prompt, expected in cases.items():
         assert h._character_from_prompt(prompt) == expected, (prompt, h._character_from_prompt(prompt))

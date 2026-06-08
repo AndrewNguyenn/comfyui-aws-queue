@@ -294,11 +294,13 @@ _NON_CHARACTER_TAGS = frozenset({
     "dutch_angle", "low_angle", "high_angle", "overhead_shot", "straight-on",
     "looking_at_viewer", "looking_down", "looking_up", "looking_back",
     "pov", "fisheye", "panorama", "facing_viewer", "facing_away",
+    "three-quarter_angle", "three-quarter_view", "aerial_view",
+    "bird's-eye_view", "worm's-eye_view",
     # shot / framing
     "close-up", "closeup", "extreme_close-up", "portrait", "upper_body",
     "lower_body", "full_body", "cowboy_shot", "bust_shot", "bust",
     "wide_shot", "medium_shot", "long_shot", "headshot", "cropped",
-    "feet_out_of_frame",
+    "feet_out_of_frame", "establishing_shot", "full_shot", "medium_full_shot",
     # focus
     "face_focus", "breast_focus", "ass_focus", "hip_focus", "foot_focus",
     "eye_focus", "solo_focus", "butt_focus", "thigh_focus", "leg_focus",
@@ -367,6 +369,7 @@ _FRANCHISES = frozenset({
     "danmachi", "dungeon_ni_deai_wo_motomeru_no_wa_machigatteiru_darou_ka",
     "tensei_shitara_slime_datta_ken", "naruto", "bleach", "one_piece",
     "spy_x_family", "chainsaw_man", "my_hero_academia", "re:zero",
+    "enen_no_shouboutai", "fire_force", "akame_ga_kill", "kill_la_kill",
 })
 
 
@@ -435,10 +438,19 @@ def _character_and_subject(text: str) -> tuple[str, str]:
     mistaken for it. So:
       1. character = the (non-lead) tag right before the first series tag;
       2. else a standalone name_(franchise) parenthetical is still a character;
-      3. else the prompt names no one — hand back the lead appearance tag as a
-         `subject` hint (e.g. "black_hair" → the viewer shows "black_hair figure")
-         so unnamed figures still cluster instead of collapsing to a model row.
-    All empty for a scenery-only prompt."""
+      3. else (no series recognized) fall back to the FIRST content tag — an
+         appearance descriptor means an unnamed figure (return it as a `subject`
+         hint, e.g. "black_hair" → the viewer shows "black_hair figure"),
+         anything else is taken as the character. This recovers a character
+         whose franchise isn't in the dict yet but who LEADS the prompt
+         (e.g. "princess_hibana, enen_no_shouboutai, ...").
+    All empty for a scenery-only prompt.
+
+    The series anchor (1) is what lets arbitrary descriptors (clothing/persona/
+    appearance) precede the character; the fallback (3) is what keeps a leading
+    character from being lost when its series isn't recognized. The only gap is
+    a descriptor-led prompt whose franchise is ALSO unrecognized — rare, and it
+    self-heals by adding the franchise to _FRANCHISES."""
     if not text:
         return "", ""
     content = []
@@ -456,9 +468,10 @@ def _character_and_subject(text: str) -> tuple[str, str]:
     for tag in content:
         if _is_paren_character(tag):
             return tag, ""
-    # 3. No character. Offer the leading appearance tag as a subject hint.
-    if content and _is_appearance(content[0]):
-        return "", content[0]
+    # 3. No series recognized — fall back to the leading content tag.
+    if content:
+        first = content[0]
+        return ("", first) if _is_appearance(first) else (first, "")
     return "", ""
 
 
