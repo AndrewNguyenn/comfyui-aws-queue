@@ -8,15 +8,15 @@ Scale-UP is graduated and lazy — workers track the visible backlog:
 
     visible queue depth  ->  target workers
     0                         0
-    1 - 49                    1
-    50 - 149                  2
-    150 - 299                 3
+    1 - 49                    2
+    50 - 149                  3
+    150 - 299                 4
     >= 300                    MAX_WORKERS (fleet cap)
 
 Scale-DOWN is sticky — we never shed workers while work remains. Once N workers
 are up they stay up (`max(current, target)`) for as long as anything is visible
 or in flight. So a 500-job batch holds the full fleet until the last job
-finishes, while a fresh 100-job batch only spins up 2 workers, never the whole
+finishes, while a fresh 100-job batch only spins up 3 workers, never the whole
 fleet pre-emptively.
 
 When the queue is *fully cleared* (nothing visible AND nothing in flight) we
@@ -45,11 +45,11 @@ def step_target(visible: int) -> int:
     if visible <= 0:
         return 0
     if visible < 50:
-        return 1
-    if visible < 150:
         return 2
-    if visible < 300:
+    if visible < 150:
         return 3
+    if visible < 300:
+        return 4
     return MAX_WORKERS  # >= 300, capped at the fleet max
 
 
