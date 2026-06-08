@@ -112,9 +112,26 @@ def test_character_is_first_non_framing_tag():
         "three-quarter_angle, establishing_shot BREAK protagonist_x, "
         "totally_made_up_series_zzz, blue_eyes, long_hair":
             "protagonist_x",
+        # composition/scale leads (macro, bokeh) are skipped; goblin_slayer! is a
+        # recognized franchise (the trailing ! defeats structural detection)
+        "extreme_close-up, macro, from_front, face_focus BREAK sword_maiden, "
+        "goblin_slayer!, blonde_hair, blindfold, huge_breasts":
+            "sword_maiden",
     }
     for prompt, expected in cases.items():
         assert h._character_from_prompt(prompt) == expected, (prompt, h._character_from_prompt(prompt))
+
+
+def test_is_series_excludes_emoji_mouth_tags():
+    # internal-colon series detected; leading/trailing colon emoji faces are not
+    assert h._is_series("honkai:_star_rail")
+    assert h._is_series("fate/stay_night")
+    assert not h._is_series("d:")   # trailing-colon mouth (reviewer's case)
+    assert not h._is_series(":d")   # leading-colon face
+    assert not h._is_series(":3")
+    assert not h._is_series("blonde_hair")
+    # a name_(series) character is never a series, even with ":" in its parens
+    assert not h._is_series("jingliu_(honkai:_star_rail)")
 
 
 def test_character_empty_when_no_prompt():

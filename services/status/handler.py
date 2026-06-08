@@ -312,8 +312,11 @@ _NON_CHARACTER_TAGS = frozenset({
     # "...upper_body, mature_female, bronya_rand, honkai:_star_rail, ...").
     "mature_female", "mature_male", "milf", "dilf", "adult", "aged_up",
     "mature", "old_woman", "old_man", "teenage", "teenager", "young_adult",
-    # composition leads occasionally seen first
+    # composition / photography leads occasionally seen first — never a
+    # character (macro/bokeh observed leading real catpony prompts).
     "dramatic", "cinematic", "dynamic_angle", "dynamic_pose",
+    "macro", "bokeh", "depth_of_field", "motion_blur", "chromatic_aberration",
+    "lens_flare", "vignetting", "blurry", "blurry_background",
 })
 # score_9, score_8_up, score_9_up, score_4, … — the whole Pony score ladder.
 _SCORE_RE = re.compile(r"^score_\d")
@@ -368,8 +371,10 @@ _FRANCHISES = frozenset({
     "jujutsu_kaisen", "black_clover", "overlord", "overlord_(maruyama)",
     "danmachi", "dungeon_ni_deai_wo_motomeru_no_wa_machigatteiru_darou_ka",
     "tensei_shitara_slime_datta_ken", "naruto", "bleach", "one_piece",
-    "spy_x_family", "chainsaw_man", "my_hero_academia", "re:zero",
-    "enen_no_shouboutai", "fire_force", "akame_ga_kill", "kill_la_kill",
+    "spy_x_family", "chainsaw_man", "my_hero_academia", "boku_no_hero_academia",
+    "re:zero", "enen_no_shouboutai", "fire_force", "akame_ga_kill",
+    "kill_la_kill", "goblin_slayer!", "goblin_slayer", "soul_calibur",
+    "nier:automata", "nier_automata",
 })
 
 
@@ -389,7 +394,10 @@ def _is_series(tag: str) -> bool:
         return True
     if "_(" in tag:               # a name_(X) tag whose base isn't a franchise
         return False              # → it's a character, not a series
-    return "/" in tag or (":" in tag and not tag.startswith(":"))
+    # Punctuated series: a slash (fate/stay_night) or an INTERNAL colon
+    # (honkai:_star_rail). The colon must be internal so emoji-mouth tags —
+    # both :d / :3 (leading) and d: (trailing) — aren't mistaken for a series.
+    return "/" in tag or ":" in tag[1:-1]
 
 
 def _is_paren_character(tag: str) -> bool:
