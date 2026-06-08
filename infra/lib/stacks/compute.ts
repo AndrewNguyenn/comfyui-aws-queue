@@ -6,6 +6,10 @@ import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
 import * as appscaling from 'aws-cdk-lib/aws-applicationautoscaling';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as path from 'path';
 import { AppConfig, FleetConfig } from '../config';
 import { NetworkStack } from './network';
 import { StorageStack } from './storage';
@@ -66,7 +70,7 @@ export class ComputeStack extends Stack {
       serviceName: 'comfy-image',
       cluster: this.cluster,
       taskDefinition: imageTaskDef,
-      desiredCount: 0, // Scaling controlled by App Auto Scaling on SQS depth
+      desiredCount: 0, // Owned by the comfy-image-scaler Lambda (see below)
       capacityProviderStrategies: [
         {
           capacityProvider: imageCapacityProvider.capacityProviderName,
@@ -79,14 +83,17 @@ export class ComputeStack extends Stack {
         ecs.PlacementConstraint.memberOf(`attribute:fleet == image`),
       ],
     });
-    this.attachSqsTargetTracking(
-      'image',
-      imageService,
-      queue.imageJobsQueue,
-      config.scaling.imageMin,
-      config.scaling.imageMax,
-      config,
+    // The image fleet uses a custom graduated/sticky scaler Lambda (below)
+    // instead of App Auto Scaling target-tracking — the latter is symmetric and
+    // jumped to max on any message. Strip DesiredCount from the CFN resource so
+    // CloudFormation never sets it: otherwise any deploy that updates the
+    // service for another reason (e.g. a task-def revision from a worker
+    // rebuild) re-sends DesiredCount: 0 and drains the scaler-owned fleet
+    // mid-batch. The Lambda owns the count; the ASG MaxSize (imageMax) bounds it.
+    (imageService.node.defaultChild as ecs.CfnService).addPropertyDeletionOverride(
+      'DesiredCount',
     );
+    this.makeImageQueueScaler(imageService, queue.imageJobsQueue, config);
 
     // ----- VIDEO fleet -----
     this.videoAsg = this.makeFleetAsg('video', config.fleets.video, {
@@ -174,6 +181,53 @@ export class ComputeStack extends Stack {
       targetValue: 0.5,
       scaleOutCooldown: Duration.seconds(60),
       scaleInCooldown: Duration.minutes(15),
+    });
+  }
+
+  /**
+   * Graduated + sticky image-fleet autoscaler. A Lambda runs every minute,
+   * reads the live image-queue depth, and sets the comfy-image ECS service's
+   * desired count: ramp UP lazily by depth (50→1, 150→2, 300→3, ≥300→max),
+   * hold (never shed) on the way DOWN, and release to 0 only when the queue is
+   * fully cleared (nothing visible AND nothing in flight), one worker per tick.
+   * See services/image_scaler/handler.py. It owns desiredCount outright (CFN no
+   * longer manages it — see the DeletionOverride above); the ASG MaxSize bounds it.
+   */
+  private makeImageQueueScaler(
+    service: ecs.Ec2Service,
+    queue: import('aws-cdk-lib/aws-sqs').IQueue,
+    config: AppConfig,
+  ): void {
+    const fn = new lambda.Function(this, 'ImageScalerFn', {
+      functionName: 'comfy-image-scaler',
+      runtime: lambda.Runtime.PYTHON_3_12,
+      architecture: lambda.Architecture.ARM_64,
+      handler: 'handler.lambda_handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '../../../services/image_scaler'),
+        { exclude: ['__pycache__', '*.pyc'] }
+      ),
+      timeout: Duration.seconds(30),
+      memorySize: 128,
+      logRetention: logs.RetentionDays.ONE_WEEK,
+      environment: {
+        IMAGE_QUEUE_URL: queue.queueUrl,
+        CLUSTER: this.cluster.clusterName,
+        SERVICE: service.serviceName,
+        MAX_WORKERS: String(config.scaling.imageMax),
+      },
+    });
+    queue.grant(fn, 'sqs:GetQueueAttributes');
+    fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ecs:DescribeServices', 'ecs:UpdateService'],
+        resources: [service.serviceArn],
+      })
+    );
+    new events.Rule(this, 'ImageScalerSchedule', {
+      ruleName: 'comfy-image-scaler-tick',
+      schedule: events.Schedule.rate(Duration.minutes(1)),
+      targets: [new targets.LambdaFunction(fn)],
     });
   }
 
