@@ -264,7 +264,13 @@ export class ComputeStack extends Stack {
     // container can bind-mount /opt/cache without needing block-device access.
     userData.addCommands(
         'set -ex',
-        'dnf install -y xfsprogs',
+        // xfsprogs is already baked into the ECS-optimized AL2023 GPU AMI, but
+        // an unconditional `dnf install` still forces a full repo-metadata
+        // refresh (~149 MB) on every cold boot — measured ~15–21s, all of it on
+        // the critical path before the ECS agent registers (ecs.service is
+        // After=cloud-final.service). Guard it so it's a true no-op on the
+        // current AMI while self-healing if a future AMI ever drops xfsprogs.
+        'command -v mkfs.xfs >/dev/null || dnf install -y xfsprogs',
         'mkdir -p /opt/cache',
         'ROOT_SRC=$(findmnt -no SOURCE /)',
         'NVME_DEV=""',
@@ -276,7 +282,10 @@ export class ComputeStack extends Stack {
         '  NVME_DEV="$dev"; break',
         'done',
         'if [ -n "$NVME_DEV" ]; then',
-        '  if ! blkid "$NVME_DEV" >/dev/null 2>&1; then mkfs.xfs -f "$NVME_DEV"; fi',
+        // -K skips the format-time TRIM/discard: instance-store SSDs are fully
+        // trimmed before allocation, so the discard is redundant work on the
+        // boot path (AWS explicitly recommends skipping it). Saves ~1–5s.
+        '  if ! blkid "$NVME_DEV" >/dev/null 2>&1; then mkfs.xfs -f -K "$NVME_DEV"; fi',
         '  mount "$NVME_DEV" /opt/cache',
         '  chmod 1777 /opt/cache',
         '  echo "instance store $NVME_DEV mounted at /opt/cache"',
