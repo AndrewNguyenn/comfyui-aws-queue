@@ -274,14 +274,18 @@ export class ComputeStack extends Stack {
           // account's on-demand G/VT quota is 0 anyway).
           onDemandBaseCapacity: 0,
           onDemandPercentageAboveBaseCapacity: 0,
-          // capacity-optimized-PRIORITIZED — honors the launchTemplate
-          // overrides order as a preference (primaryInstanceType first),
-          // optimizing for capacity only as the tiebreak. So each fleet
-          // sticks to its primary type whenever that pool has spot capacity
-          // and only walks down the fallback list during a drought.
-          // (Plain capacity-optimized ignores order and picks raw capacity.)
+          // Per-fleet spot strategy:
+          //   image → LOWEST_PRICE: cost-first. Allocates from the cheapest
+          //     spot pools (g4dn over g5, g4dn.xlarge over .2xlarge), ignoring
+          //     the override order. Trade-off: concentrating on the cheapest
+          //     pools raises interruption/churn — accepted for SDXL cost.
+          //   video → CAPACITY_OPTIMIZED_PRIORITIZED: capacity-first, honoring
+          //     the override order (primaryInstanceType first) and only walking
+          //     the fallback list during a drought. Stability over price.
           spotAllocationStrategy:
-            autoscaling.SpotAllocationStrategy.CAPACITY_OPTIMIZED_PRIORITIZED,
+            fleetName === 'image'
+              ? autoscaling.SpotAllocationStrategy.LOWEST_PRICE
+              : autoscaling.SpotAllocationStrategy.CAPACITY_OPTIMIZED_PRIORITIZED,
         },
       },
       minCapacity,

@@ -105,12 +105,13 @@ export const APP_CONFIG: AppConfig = {
       // SDXL/Illustrious throughput on T4 comfortably clears the 100 imgs/hr
       // target, so g4dn.2xlarge (8 vCPU, 32 GB sys RAM) is the primary.
       primaryInstanceType: 'g4dn.2xlarge',
-      // ORDER IS PRIORITY: the ASG uses capacity-optimized-PRIORITIZED, so
-      // g4dn.2xlarge is used whenever its spot pool has capacity; the fleet
-      // walks down to g4dn.xlarge, then g5.xlarge (A10G), only during a g4
-      // drought. g5.xlarge stays as a bf16/24 GB-VRAM safety net and an extra
-      // spot pool for capacity. (g6 and g5.2xlarge removed for cost — g5.2xlarge
-      // was the priciest size in the set; see the trade-off below.)
+      // PRICE, NOT PRIORITY: the image ASG uses the LOWEST_PRICE spot strategy
+      // (see compute.ts) — the cheapest pools win, ordering is ignored. That
+      // means g4dn (T4) over g5 (A10G), and the 4-vCPU g4dn.xlarge over the
+      // 8-vCPU g4dn.2xlarge. primaryInstanceType is just the launch-template
+      // default here. g5.xlarge stays as a bf16/24 GB-VRAM fallback for when g4
+      // spot is unavailable. (g6 and g5.2xlarge removed for cost.) Trade-off:
+      // lowest-price concentrates on the cheapest pools → more spot churn.
       //
       // ACCEPTED TRADE-OFF — FLOW/Flux-class jobs are UNRELIABLE on this fleet.
       // A T4 has no hardware bf16 (ComfyUI falls back to fp32) and can't fit a
@@ -154,13 +155,13 @@ export const APP_CONFIG: AppConfig = {
 
   scaling: {
     imageMin: 0,
-    // 3 concurrent image workers. Each 2xlarge (g5/g6) is 8 vCPU; 3 = 24 vCPU,
-    // which exactly equals the us-east-1 G/VT spot quota (raised to 24,
-    // approved 2026-05-10). Note the 24-vCPU pool is SHARED with the video
-    // fleet — running 3 image workers consumes the entire quota, so a
-    // concurrent video job is starved until image scales back in. Raising
-    // imageMax past 3 (or wanting image+video headroom) needs a quota bump.
-    imageMax: 3,
+    // 5 concurrent image workers. The us-east-1 G/VT spot quota was raised to
+    // 48 vCPU (approved 2026-06-08). At up to 8 vCPU per worker that's 40 vCPU
+    // for 5 image workers, leaving ~8 vCPU headroom in the shared pool for the
+    // video fleet. In practice lowest-price favors the 4-vCPU g4dn.xlarge, so
+    // real image usage is usually well under 40. (If image AND video both run
+    // near max the 48-vCPU pool can still bind — image 40 + video up to 12.)
+    imageMax: 5,
     videoMin: 0,
     videoMax: 3, // v3: lowered from 5 (resolves N2)
     targetBacklogPerTask: 25, // v3: raised from 10 (resolves N2)
