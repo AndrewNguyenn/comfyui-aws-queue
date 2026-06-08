@@ -569,22 +569,24 @@
   };
 
   // Bucket queued jobs by character (the server derives it from the prompt),
-  // keeping the checkpoint on the row. Falls back to the model as the key when
-  // no character could be parsed (scenery prompts, video jobs). Unlike a
-  // consecutive-run collapse, this groups every job of the same
-  // (type, model, character) into ONE row even when the queue interleaves them
-  // — so "artoria_pendragon" is a single group however the batch is ordered.
-  // `oldest` is an ISO created_at string — ISO timestamps sort lexically, so a
-  // string compare finds the earliest, and ageMin() consumes it directly.
+  // keeping the checkpoint on the row. When a prompt names no character the
+  // server hands back an appearance `subject` hint instead (e.g. "black_hair")
+  // — we group on that so unnamed figures still cluster ("black_hair figure")
+  // rather than collapsing into one model row. Falls back to the model when
+  // neither is present (scenery prompts, video jobs). Unlike a consecutive-run
+  // collapse, this groups every job of the same (type, model, key) into ONE row
+  // even when the queue interleaves them. `oldest` is an ISO created_at string
+  // — ISO timestamps sort lexically, so a string compare finds the earliest.
   function groupQueue(queued) {
     const map = new Map();
     for (const j of queued) {
       const model = j.model || j.type || "job";
       const character = j.character || "";
-      const key = `${j.type}|${model}|${character}`;
+      const subject = j.subject || "";
+      const key = `${j.type}|${model}|${character || subject}`;
       let g = map.get(key);
       if (!g) {
-        g = { ids: [], kind: j.type, model, character, count: 0,
+        g = { ids: [], kind: j.type, model, character, subject, count: 0,
               oldest: j.created_at || "" };
         map.set(key, g);
       }
@@ -594,8 +596,8 @@
         g.oldest = j.created_at;
       }
     }
-    // Largest character batch first — what you most likely want to bulk-cancel
-    // — with the oldest batch breaking ties.
+    // Largest batch first — what you most likely want to bulk-cancel — with the
+    // oldest batch breaking ties.
     return [...map.values()].sort(
       (a, b) => b.count - a.count || (a.oldest || "").localeCompare(b.oldest || ""));
   }
@@ -643,7 +645,7 @@
       : "";
     return `<div class="pq-row running${cancel ? " cancelling" : ""}">` +
       `<div class="pq-stamp">${cancel ? "Cancelling" : "Running"}</div>` +
-      `<div class="pq-name">${nameCell(j.type, j.model || j.type || "job", j.character)}${instance}</div>` +
+      `<div class="pq-name">${nameCell(j.type, j.model || j.type || "job", j.character, j.subject)}${instance}</div>` +
       meter +
       `<div class="pq-eta"><span class="step">${esc(step)}</span>` +
         `${esc(elapsed(j.started_at || j.created_at))}</div>` +
@@ -653,13 +655,21 @@
     `</div>`;
   }
 
-  // The name cell: the character as the headline with the checkpoint as a
-  // quiet trailing tag (`narberal_gamma · catponyDark_aniIlV40`). Falls back to
-  // just the model when no character was parsed.
-  function nameCell(kind, model, character) {
+  // Human headline for a group/job: the named character, else an unnamed-figure
+  // appearance hint rendered as "<tag> figure" (e.g. "black_hair figure"), else
+  // "" (caller falls back to the model).
+  function subjectLabel(character, subject) {
+    return character || (subject ? `${subject} figure` : "");
+  }
+
+  // The name cell: the character (or unnamed-figure hint) as the headline with
+  // the checkpoint as a quiet trailing tag (`narberal_gamma · catponyDark…`).
+  // Falls back to just the model when the prompt yielded neither.
+  function nameCell(kind, model, character, subject) {
     const isVid = kind === "video";
-    const head = character || model || "job";
-    const sub = character
+    const named = subjectLabel(character, subject);
+    const head = named || model || "job";
+    const sub = named
       ? `<span class="submodel" title="${esc(model)}">· ${esc(model)}</span>` : "";
     return `<span class="kindchip ${isVid ? "vid" : "img"}">${isVid ? "Vid" : "Img"}</span>` +
       `<span class="model" title="${esc(head)}">${esc(head)}</span>${sub}`;
@@ -674,13 +684,14 @@
     const removable = g.ids ? g.ids.length : g.count;
     const batch = n > 1
       ? `<span class="batchchip">× <span class="ct">${n}</span></span>` : "";
-    const who = g.character ? `${g.character} · ${g.model}` : g.model;
+    const named = subjectLabel(g.character, g.subject);
+    const who = named ? `${named} · ${g.model}` : g.model;
     const label = n > 1
       ? (n > removable ? `Remove queued ${who} items` : `Remove ${n} queued ${who} items`)
       : `Remove ${who} from queue`;
     return `<div class="pq-row queued">` +
       `<div class="pq-stamp">Queued</div>` +
-      `<div class="pq-name">${nameCell(g.kind, g.model, g.character)}${batch}</div>` +
+      `<div class="pq-name">${nameCell(g.kind, g.model, g.character, g.subject)}${batch}</div>` +
       `<div class="pq-meter"></div>` +
       `<div class="pq-eta">${esc(wait)}</div>` +
       `<button class="pq-act" data-act="cancel-group" data-group="${idx}"` +
@@ -886,7 +897,8 @@
         // the 500-row sample, say what the cancel really removes.
         const n = g.shown != null ? g.shown : g.count;
         const removable = g.ids ? g.ids.length : g.count;
-        const who = g.character ? `${g.character} · ${g.model}` : g.model;
+        const named = subjectLabel(g.character, g.subject);
+        const who = named ? `${named} · ${g.model}` : g.model;
         const sub = n > removable
           ? `${who}  —  cancels the ${removable} loaded so far (of ~${n})`
           : who;

@@ -119,6 +119,20 @@ def test_appearance_led_prompt_has_no_character():
         "from_front BREAK luna_snow, marvel_rivals, blue_eyes, blonde_hair") == "luna_snow"
 
 
+def test_character_and_subject_hint():
+    # unnamed figure → ("", <lead appearance tag>) so the viewer can label it
+    # "<tag> figure" instead of a bare model row
+    assert h._character_and_subject(
+        "from_front, bust_shot BREAK black_hair, very_long_hair, pale_skin, 1boy"
+    ) == ("", "black_hair")
+    assert h._character_and_subject("close-up BREAK blue_eyes, large_breasts") == ("", "blue_eyes")
+    # named character → (character, "")
+    assert h._character_and_subject(
+        "from_front BREAK luna_snow, marvel_rivals") == ("luna_snow", "")
+    # scenery / all-lead → ("", "")
+    assert h._character_and_subject("close-up, from_front, solo") == ("", "")
+
+
 def test_extract_character_from_string_literal_graph():
     # mirrors the real catpony workflow: positive prompt wired from a
     # "String Literal (Image Saver)" node into a CLIPTextEncode → KSampler.

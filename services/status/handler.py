@@ -377,35 +377,46 @@ def _norm_tag(t: str) -> str:
     return t.lower()
 
 
-def _character_from_prompt(text: str) -> str:
-    """The character tag from a booru-style positive prompt.
+def _character_and_subject(text: str) -> tuple[str, str]:
+    """(character, subject) for a booru-style positive prompt.
 
     Skip the lead tags (quality/framing/focus/count/persona); the FIRST content
-    tag after them is the character — UNLESS it's an appearance descriptor, in
-    which case the prompt describes an unnamed figure and we return "" (the
-    viewer then groups it by model, not a bogus "black_hair" character). Returns
-    "" when nothing qualifies (e.g. a scenery-only prompt)."""
+    tag after them is the named character — UNLESS it's an appearance descriptor,
+    in which case the prompt describes an UNNAMED figure: there is no character,
+    but we hand back that descriptor as a `subject` hint (e.g. "black_hair") so
+    the viewer can group/label it ("black_hair figure") instead of a bare model
+    row. Both empty for a scenery-only prompt. Don't scan past the first content
+    tag into the unbounded scene/action vocabulary."""
     if not text:
-        return ""
+        return "", ""
     for chunk in text.replace("\n", " ").split(","):
         for piece in chunk.split("BREAK"):
             norm = _norm_tag(piece)
             if not norm or _is_lead_tag(norm):
                 continue
-            # First content tag. A character leads here; appearance here means
-            # the prompt names no one — don't scan on into scene/action tags.
-            return "" if _is_appearance(norm) else norm
-    return ""
+            # First content tag: a character leads here; an appearance tag means
+            # an unnamed figure (return it as a subject hint, not a character).
+            return ("", norm) if _is_appearance(norm) else (norm, "")
+    return "", ""
+
+
+def _character_from_prompt(text: str) -> str:
+    """Just the named character (or "") — see _character_and_subject."""
+    return _character_and_subject(text)[0]
+
+
+def _extract_subject(wf: dict) -> tuple[str, str]:
+    """(character, subject) from the primary positive prompt, for grouping/
+    labeling the pending queue. See _character_and_subject."""
+    for sec in _extract_prompts(wf):
+        if sec.get("label") == "Positive":
+            return _character_and_subject(sec.get("text", ""))
+    return "", ""
 
 
 def _extract_character(wf: dict) -> str:
-    """Best-effort 'who is in this image', for grouping the pending queue by
-    character. Reads the primary positive prompt and pulls its leading
-    character tag."""
-    for sec in _extract_prompts(wf):
-        if sec.get("label") == "Positive":
-            return _character_from_prompt(sec.get("text", ""))
-    return ""
+    """Just the named character (or "") — see _extract_subject."""
+    return _extract_subject(wf)[0]
 
 
 _PARAM_KEYS = ("steps", "cfg", "sampler_name", "scheduler", "denoise")
@@ -642,12 +653,16 @@ def _serialize_job(it: dict, lite: bool = False) -> dict:
         # actually stops it (a running cancel is not instantaneous).
         "cancel_requested": it.get("cancel_requested", {}).get("BOOL", False),
     }
-    # The character drives the viewer's pending-strip grouping, so derive it
-    # only for the statuses that strip shows (queued/running). Skipping it for
-    # the gallery's history fetch (complete/failed/cancelled, up to 8000 rows)
-    # keeps that large list cheap — it never groups by character.
+    # The character (or, for an unnamed figure, the appearance `subject` hint)
+    # drives the viewer's pending-strip grouping, so derive it only for the
+    # statuses that strip shows (queued/running). Skipping it for the gallery's
+    # history fetch (complete/failed/cancelled, up to 8000 rows) keeps that
+    # large list cheap — it never groups by character.
     if out["status"] in ("queued", "running"):
-        out["character"] = _extract_character(wf)
+        character, subject = _extract_subject(wf)
+        out["character"] = character
+        if subject:
+            out["subject"] = subject
     if not lite:
         # All distinct prompts (txt2img → Positive/Negative; detailer graphs
         # add their own sections) + best-effort generation params.
