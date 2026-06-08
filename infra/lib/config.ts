@@ -140,11 +140,20 @@ export const APP_CONFIG: AppConfig = {
       //     32 GB g4dn.2xlarge survived, but is still slow + pricier per image.
       //   - xformers efficient attention doesn't even load on the image (build
       //     mismatch vs the NGC torch), worsening VRAM pressure.
-      // So: A10G only. NO fallback types — a g5.xlarge spot drought means zero
-      // image workers (accepted; revisit if droughts recur). NO g5.2xlarge / g4dn.
+      // So: A10G primary. The T4 rejection above does NOT apply to g6.xlarge
+      // (L4): L4 has 24 GB VRAM (same as A10G — no OOM/offload), 4 vCPU + 16 GB
+      // RAM (identical sizing), Ada/sm_89 with native bf16, and is offered in all
+      // 5 AZs we span. So g6.xlarge is added as a spot FALLBACK to survive g5
+      // droughts (live UnfulfillableCapacity walls observed 2026-06-08).
+      // capacity-optimized-PRIORITIZED keeps g5.xlarge first; g6 fires only on a
+      // g5 shortfall, so the common case is unchanged. De-risked: the video fleet
+      // already runs Ada (g6e/L40S, sm_89) on this stack; the golden AMI's AL2023
+      // GPU driver + NGC fat binaries cover both sm_86 and sm_89. L4 is ~15-40%
+      // slower than A10G on this workload but completes — strictly better than no
+      // worker during a drought. Still NO g4dn (T4: 3.2x slower, 16 GB OOM).
       // The container has no hard memory cap (see makeTaskDefinition).
       primaryInstanceType: 'g5.xlarge',
-      fallbackInstanceTypes: [],
+      fallbackInstanceTypes: ['g6.xlarge'],
       rootVolumeGb: 150,
       // gp3 250 MB/s / 6000 IOPS (above the 125/3000 floor). The cold-start
       // bottleneck is the ECR image pull+extract to this root volume. Measured

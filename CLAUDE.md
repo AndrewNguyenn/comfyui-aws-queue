@@ -134,10 +134,15 @@ ComfyUI `/history` `outputs` shows which nodes actually ran.
   seen until the worker is rotated.
 - **Worker rotation strands in-flight jobs** as zombie `running` records — when
   rotating the `comfy-image` task definition, expect to clean those up.
-- The image fleet is a **single-type spot ASG: `g5.xlarge` only** (A10G: 24 GB
-  VRAM, native bf16, sm_86; 4 vCPU, 16 GB RAM), `capacity-optimized-prioritized`,
-  **no fallback types** (a g5.xlarge spot drought = zero image workers; accepted).
-  **Why g5-only:** a g4dn (T4) `lowest-price` cost experiment backfired for the
+- The image fleet is a **spot ASG: `g5.xlarge` primary + `g6.xlarge` (L4)
+  fallback** (A10G: 24 GB VRAM, native bf16, sm_86; 4 vCPU, 16 GB RAM),
+  `capacity-optimized-prioritized` (g5 first, g6 only on a g5 shortfall).
+  **g6.xlarge fallback added 2026-06-08** to survive g5 spot droughts (live
+  `UnfulfillableCapacity` walls observed that day): L4 has the same 24 GB VRAM +
+  4 vCPU/16 GB sizing, Ada/sm_89, all 5 AZs; ~15-40% slower than A10G but
+  completes (de-risked — the video fleet already runs Ada, and the golden AMI's
+  driver + NGC fat binaries cover sm_86+sm_89). Still **NO g4dn** (T4).
+  **Why not g4dn:** a g4dn (T4) `lowest-price` cost experiment backfired for the
   SDXL+ESRGAN-upscale workload (measured 2026-06-08) — the T4 ran **~192 s/image
   vs A10G's ~61 s (~3.2× slower)**, so at ~$0.24/hr vs ~$0.48/hr it was **~$12.95
   vs $8.11 per 1000 images (~60% MORE expensive per image)**; and the T4's 16 GB
