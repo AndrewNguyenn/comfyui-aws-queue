@@ -293,19 +293,20 @@ export class ComputeStack extends Stack {
         'fi'
     );
 
-    // Machine image. Default: stock ECS-optimized AL2023 GPU AMI (resolved via
-    // SSM at deploy time). When `-c useGoldenAmi=true` AND this is the image
-    // fleet, boot from the golden AMI instead — its root snapshot has the worker
-    // container pre-baked, so a cold instance skips the ~273s ECR pull. The AMI
-    // id is published to GOLDEN_AMI_PARAM by ComfyImageBuilderStack and read via
-    // fromSsmParameter, which resolves at DEPLOY time (not per-launch) — so a new
-    // bake only lands on the next `cdk deploy`, never surprise-rotating a running
-    // worker. Activate only after the first bake has populated the param (else
-    // the deploy fails fast on an unresolved SSM parameter). See imagebuilder.ts.
+    // Machine image. The image fleet boots from the golden AMI by DEFAULT — its
+    // root snapshot has the worker container pre-baked, so a cold instance skips
+    // the ~273s ECR pull. The AMI id is published to GOLDEN_AMI_PARAM by
+    // ComfyImageBuilderStack and read via fromSsmParameter, which resolves at
+    // DEPLOY time (not per-launch) — so a new bake only lands on the next
+    // `cdk deploy`, never surprise-rotating a running worker.
+    //   ROLLBACK: `cdk deploy ComfyComputeStack -c useGoldenAmi=false` reverts
+    //   the image fleet to the stock ECS GPU AMI (+ ECR pull) for one deploy.
+    //   DEPENDENCY: default-on means GOLDEN_AMI_PARAM must exist (it is created
+    //   by the first ComfyImageBuilderStack bake); a compute deploy fails fast on
+    //   an unresolved SSM parameter otherwise. Video fleet never uses it.
+    const ctxGoldenAmi = this.node.tryGetContext('useGoldenAmi');
     const useGoldenAmi =
-      fleetName === 'image' &&
-      (this.node.tryGetContext('useGoldenAmi') === true ||
-        this.node.tryGetContext('useGoldenAmi') === 'true');
+      fleetName === 'image' && ctxGoldenAmi !== false && ctxGoldenAmi !== 'false';
     const machineImage = useGoldenAmi
       ? ec2.MachineImage.fromSsmParameter(GOLDEN_AMI_PARAM, {
           os: ec2.OperatingSystemType.LINUX,
