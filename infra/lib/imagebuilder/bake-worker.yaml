@@ -47,9 +47,14 @@ phases:
               set -euxo pipefail
               REPO=577449503984.dkr.ecr.us-east-1.amazonaws.com/comfy-image-worker:latest
               docker image inspect "$REPO" >/dev/null
-              SZ=$(docker image inspect "$REPO" --format '{{.Size}}')
-              echo "image on-disk size bytes: $SZ"
-              test "$SZ" -gt 20000000000
+              # NB: AWSTOE reserves double-brace syntax for its own templating and
+              # scans the WHOLE command (comments included), so a docker
+              # Go-template format string fails component validation. Measure
+              # on-disk bytes via du instead — also a stronger check (it confirms
+              # the layers actually landed on the volume that gets snapshotted).
+              USED_KB=$(du -sk /var/lib/docker | cut -f1)
+              echo "/var/lib/docker used KB: $USED_KB"
+              test "$USED_KB" -gt 20000000
 
       # Capture a CLEAN ECS host: drop the agent's identity/checkpoint so a new
       # instance re-registers fresh. Do NOT delete /etc/ecs/ecs.config — the
