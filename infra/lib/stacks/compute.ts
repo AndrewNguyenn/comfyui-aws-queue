@@ -10,7 +10,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as path from 'path';
-import { AppConfig, FleetConfig } from '../config';
+import { AppConfig, FleetConfig, GOLDEN_AMI_PARAM } from '../config';
 import { NetworkStack } from './network';
 import { StorageStack } from './storage';
 import { QueueStack } from './queue';
@@ -242,9 +242,8 @@ export class ComputeStack extends Stack {
   ): autoscaling.AutoScalingGroup {
     const { network, config } = deps;
 
-    // ECS-optimized AL2023 GPU AMI (resolved via SSM at deploy time).
-    // v3 N10: pin SSM parameter version in production to avoid silent driver regressions.
-    const machineImage = ecs.EcsOptimizedImage.amazonLinux2023(ecs.AmiHardwareType.GPU);
+    // machineImage is built AFTER userData below (the golden-AMI path needs the
+    // userData object). See the `const machineImage = ...` block before the LT.
 
     const userData = ec2.UserData.forLinux();
     // ECS agent picks up these attributes for placement constraints.
@@ -294,6 +293,25 @@ export class ComputeStack extends Stack {
         'fi'
     );
 
+    // Machine image. Default: stock ECS-optimized AL2023 GPU AMI (resolved via
+    // SSM at deploy time). When `-c useGoldenAmi=true` AND this is the image
+    // fleet, boot from the golden AMI instead — its root snapshot has the worker
+    // container pre-baked, so a cold instance skips the ~273s ECR pull. The AMI
+    // id is published to GOLDEN_AMI_PARAM by ComfyImageBuilderStack and read via
+    // fromSsmParameter, which resolves at DEPLOY time (not per-launch) — so a new
+    // bake only lands on the next `cdk deploy`, never surprise-rotating a running
+    // worker. Activate only after the first bake has populated the param (else
+    // the deploy fails fast on an unresolved SSM parameter). See imagebuilder.ts.
+    const useGoldenAmi =
+      fleetName === 'image' &&
+      (this.node.tryGetContext('useGoldenAmi') === true ||
+        this.node.tryGetContext('useGoldenAmi') === 'true');
+    const machineImage = useGoldenAmi
+      ? ec2.MachineImage.fromSsmParameter(GOLDEN_AMI_PARAM, {
+          os: ec2.OperatingSystemType.LINUX,
+        })
+      : ecs.EcsOptimizedImage.amazonLinux2023(ecs.AmiHardwareType.GPU);
+
     const launchTemplate = new ec2.LaunchTemplate(this, `${fleetName}LaunchTemplate`, {
       launchTemplateName: `comfy-${fleetName}-lt`,
       machineImage,
@@ -317,6 +335,21 @@ export class ComputeStack extends Stack {
         },
       ],
     });
+
+    // Golden-AMI cold boot reads the pre-baked image off the restored root
+    // snapshot. Provision 300 MiB/s init so ~26 GiB hydrates in ~32s instead of
+    // the default lazy-load (~26 MB/s → ~16 min → ComfyUI never ready in the
+    // 300s grace; measured 2026-06-08). No typed CDK prop exists (autoscaling
+    // EbsDeviceOptions lacks it) → L1 escape hatch. Only when the golden AMI is
+    // active (snapshot-only feature; pointless on the stock AMI). Index .0 = the
+    // single /dev/xvda device — sanity-check `cdk synth` if a 2nd device is added.
+    if (useGoldenAmi && fleet.volumeInitializationRateMiBs) {
+      const cfnLt = launchTemplate.node.defaultChild as ec2.CfnLaunchTemplate;
+      cfnLt.addPropertyOverride(
+        'LaunchTemplateData.BlockDeviceMappings.0.Ebs.VolumeInitializationRate',
+        fleet.volumeInitializationRateMiBs,
+      );
+    }
 
     const minCapacity =
       fleetName === 'image' ? config.scaling.imageMin : config.scaling.videoMin;
