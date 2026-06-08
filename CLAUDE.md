@@ -134,22 +134,20 @@ ComfyUI `/history` `outputs` shows which nodes actually ran.
   seen until the worker is rotated.
 - **Worker rotation strands in-flight jobs** as zombie `running` records — when
   rotating the `comfy-image` task definition, expect to clean those up.
-- The image fleet is a **cost-optimized mixed-instance spot ASG** over
-  `g4dn.2xlarge` / `g4dn.xlarge` (T4: 16 GB VRAM, sm_75 — cheapest GPU spot) with
-  `g5.xlarge` (A10G) as a fallback. It uses the **`lowest-price`** spot strategy
-  (compute.ts is per-fleet: image=lowest-price, video=capacity-optimized-
-  prioritized), so price — not the override order — decides: cheapest pool wins
-  (g4dn over g5, g4dn.xlarge over .2xlarge), at the cost of more spot churn. The
-  image worker image is built for T4 (xformers, not SageAttention — see
-  `workers/image/Dockerfile`). **g4 has no hardware bf16 and only 16 GB VRAM, so
-  FLOW/Flux-class jobs (20 GB checkpoints) are UNRELIABLE here** — a T4 offloads
-  every step (~25-40 min) and blows the 15-min SQS visibility timeout; one image
-  queue means any worker grabs any job, so a FLOW job may land on g4 and DLQ.
-  This fleet is intentionally tuned for SDXL/Illustrious; the g5 fallbacks are
-  the bf16/24 GB safety net. The `.xlarge` sizes have 16 GB sys RAM — fine for
-  SDXL but can't mmap 20 GB+ checkpoints. See `infra/lib/config.ts` for the
-  canonical list. The us-east-1 G/VT spot vCPU quota (raised to **48**, approved
-  2026-06-08) gates concurrency — `scaling.imageMax` is **5** (≤40 vCPU at 8 per
-  worker, less under lowest-price's 4-vCPU g4dn.xlarge), leaving ~8 vCPU headroom
-  in the pool, which is **shared with the video fleet** (so image-at-max + video
-  can still bind the 48-vCPU quota).
+- The image fleet is a **single-type spot ASG: `g5.xlarge` only** (A10G: 24 GB
+  VRAM, native bf16, sm_86; 4 vCPU, 16 GB RAM), `capacity-optimized-prioritized`,
+  **no fallback types** (a g5.xlarge spot drought = zero image workers; accepted).
+  **Why g5-only:** a g4dn (T4) `lowest-price` cost experiment backfired for the
+  SDXL+ESRGAN-upscale workload (measured 2026-06-08) — the T4 ran **~192 s/image
+  vs A10G's ~61 s (~3.2× slower)**, so at ~$0.24/hr vs ~$0.48/hr it was **~$12.95
+  vs $8.11 per 1000 images (~60% MORE expensive per image)**; and the T4's 16 GB
+  VRAM forced ComfyUI to offload ~14 GB to pinned CPU RAM, **OOM-killing ComfyUI
+  on the 16 GB-RAM g4dn.xlarge** (jobs failed `[Errno 111] Connection refused` to
+  `:8188`; the 32 GB g4dn.2xlarge survived but was still slow/pricey). xformers
+  efficient attention also fails to load on the worker image (build mismatch vs
+  the NGC torch), worsening VRAM pressure. **FLOW/Flux-class jobs are still
+  unreliable** (g5.xlarge has 16 GB sys RAM — can't mmap 20 GB+ checkpoints).
+  See `infra/lib/config.ts` for the canonical config. The us-east-1 G/VT spot
+  vCPU quota (raised to **48**, approved 2026-06-08) gates concurrency, but
+  `scaling.imageMax` is **4** (4× g5.xlarge = 16 vCPU), leaving most of the pool
+  (**shared with the video fleet**) free.

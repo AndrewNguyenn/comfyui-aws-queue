@@ -99,33 +99,24 @@ export const APP_CONFIG: AppConfig = {
   fleets: {
     image: {
       fleetName: 'image',
-      // COST-OPTIMIZED for SDXL. g4dn (T4: 16 GB VRAM, sm_75) is the cheapest
-      // GPU spot, and the image worker image is BUILT for it — xformers, not
-      // SageAttention (which needs Ampere sm_80+); see workers/image/Dockerfile.
-      // SDXL/Illustrious throughput on T4 comfortably clears the 100 imgs/hr
-      // target, so g4dn.2xlarge (8 vCPU, 32 GB sys RAM) is the primary.
-      primaryInstanceType: 'g4dn.2xlarge',
-      // PRICE, NOT PRIORITY: the image ASG uses the LOWEST_PRICE spot strategy
-      // (see compute.ts) — the cheapest pools win, ordering is ignored. That
-      // means g4dn (T4) over g5 (A10G), and the 4-vCPU g4dn.xlarge over the
-      // 8-vCPU g4dn.2xlarge. primaryInstanceType is just the launch-template
-      // default here. g5.xlarge stays as a bf16/24 GB-VRAM fallback for when g4
-      // spot is unavailable. (g6 and g5.2xlarge removed for cost.) Trade-off:
-      // lowest-price concentrates on the cheapest pools → more spot churn.
-      //
-      // ACCEPTED TRADE-OFF — FLOW/Flux-class jobs are UNRELIABLE on this fleet.
-      // A T4 has no hardware bf16 (ComfyUI falls back to fp32) and can't fit a
-      // 20 GB FLOW checkpoint in 16 GB VRAM, so it offloads every step → 25-40
-      // min/image, which blows the 15-min SQS visibility timeout (the job
-      // retries, then DLQs). There is ONE image queue and any worker grabs any
-      // job, so a FLOW job may land on a g4 worker and fail. This fleet is
-      // intentionally tuned for SDXL cost; run FLOW-class models elsewhere.
-      //
-      // The .xlarge sizes (g4dn.xlarge, g5.xlarge) have 16 GB sys RAM — fine for
-      // SDXL (~7 GB checkpoints) but they CANNOT mmap 20 GB+ checkpoints. The
-      // container has no hard memory cap (see makeTaskDefinition) so it
-      // schedules on both 16 GB and 32 GB sizes.
-      fallbackInstanceTypes: ['g4dn.xlarge', 'g5.xlarge'],
+      // g5.xlarge ONLY (A10G: 24 GB VRAM, native bf16, sm_86; 4 vCPU, 16 GB RAM).
+      // We trialled a g4dn (T4) lowest-price config for cost and it BACKFIRED for
+      // this SDXL + ESRGAN-upscale workload (measured 2026-06-08):
+      //   - SPEED: T4 ran ~192 s/image vs A10G ~61 s — ~3.2x slower. At g4dn.xlarge
+      //     spot (~$0.24/hr) vs g5.xlarge (~$0.48/hr) that's ~$12.95 vs $8.11 per
+      //     1000 images — the T4 is ~60% MORE expensive per image despite the
+      //     lower hourly rate (half price can't beat 3x slower).
+      //   - STABILITY: the T4's 16 GB VRAM forced ComfyUI to offload ~14 GB of
+      //     weights to pinned CPU RAM; on the 16 GB-RAM g4dn.xlarge that OOM-killed
+      //     ComfyUI (jobs failed "[Errno 111] Connection refused" to :8188). The
+      //     32 GB g4dn.2xlarge survived, but is still slow + pricier per image.
+      //   - xformers efficient attention doesn't even load on the image (build
+      //     mismatch vs the NGC torch), worsening VRAM pressure.
+      // So: A10G only. NO fallback types — a g5.xlarge spot drought means zero
+      // image workers (accepted; revisit if droughts recur). NO g5.2xlarge / g4dn.
+      // The container has no hard memory cap (see makeTaskDefinition).
+      primaryInstanceType: 'g5.xlarge',
+      fallbackInstanceTypes: [],
       rootVolumeGb: 150,
     },
     video: {
@@ -155,13 +146,10 @@ export const APP_CONFIG: AppConfig = {
 
   scaling: {
     imageMin: 0,
-    // 5 concurrent image workers. The us-east-1 G/VT spot quota was raised to
-    // 48 vCPU (approved 2026-06-08). At up to 8 vCPU per worker that's 40 vCPU
-    // for 5 image workers, leaving ~8 vCPU headroom in the shared pool for the
-    // video fleet. In practice lowest-price favors the 4-vCPU g4dn.xlarge, so
-    // real image usage is usually well under 40. (If image AND video both run
-    // near max the 48-vCPU pool can still bind — image 40 + video up to 12.)
-    imageMax: 5,
+    // 4 concurrent image workers. g5.xlarge is 4 vCPU → 16 vCPU total, well
+    // within the 48-vCPU G/VT spot quota (approved 2026-06-08), leaving ample
+    // headroom for the video fleet.
+    imageMax: 4,
     videoMin: 0,
     videoMax: 3, // v3: lowered from 5 (resolves N2)
     targetBacklogPerTask: 25, // v3: raised from 10 (resolves N2)
