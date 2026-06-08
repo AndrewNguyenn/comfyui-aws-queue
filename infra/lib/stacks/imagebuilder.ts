@@ -1,7 +1,11 @@
-import { Stack, StackProps } from 'aws-cdk-lib';
+import { Stack, StackProps, Duration } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as imagebuilder from 'aws-cdk-lib/aws-imagebuilder';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as fs from 'fs';
 import * as path from 'path';
 import { AppConfig, GOLDEN_AMI_PARAM, GOLDEN_PIPELINE_NAME } from '../config';
@@ -20,10 +24,18 @@ import { CiStack } from './ci';
  * snapshot lazy-loads at ~26 MB/s and is WORSE than the pull — ComfyUI reaches
  * ready in ~32s (measured) instead of ~5+ min.
  *
- * The pipeline publishes the new AMI id to the SSM parameter
- * `GOLDEN_AMI_PARAM`; the image-fleet launch template reads it via
- * `MachineImage.fromSsmParameter` (deploy-time resolution → a new bake only
- * lands on the next `cdk deploy`, never surprise-rotating a running worker).
+ * A small publisher Lambda (triggered by the Image Builder "AVAILABLE" event)
+ * writes the new AMI id to the SSM parameter `GOLDEN_AMI_PARAM`; the image-fleet
+ * launch template reads it via `MachineImage.fromSsmParameter` (deploy-time
+ * resolution → a new bake only lands on the next `cdk deploy`, never
+ * surprise-rotating a running worker).
+ *
+ * Why a Lambda and not Image Builder's native ssmParameterConfigurations: the
+ * Image Builder service-linked role (AWSServiceRoleForImageBuilder) has NO
+ * ssm:PutParameter permission and can't be granted one (AWS-managed), so the
+ * native distribution write fails ("not authorized to perform: ssm:PutParameter")
+ * — verified on a real bake 2026-06-08. The Lambda writes the param under its
+ * own role, which we control.
  *
  * Re-bake triggers: the monthly schedule below (base-AMI driver/security
  * patches) + the image-worker CodeBuild post_build step (so a worker rebuild
@@ -108,8 +120,8 @@ export class ImageBuilderStack extends Stack {
       instanceMetadataOptions: { httpTokens: 'required', httpPutResponseHopLimit: 2 },
     });
 
-    // ---- Distribution: publish the new AMI id to SSM natively (Image Builder
-    // creates/updates the parameter — no Lambda needed). The fleet LT reads it.
+    // ---- Distribution: just names the output AMI. The SSM-param write is done
+    // by the publisher Lambda below (the Image Builder SLR lacks ssm:PutParameter).
     const dist = new imagebuilder.CfnDistributionConfiguration(this, 'GoldenAmiDist', {
       name: 'comfy-image-golden-dist',
       distributions: [
@@ -119,7 +131,6 @@ export class ImageBuilderStack extends Stack {
           // passes keys verbatim (no camel→Pascal transform) — lowercase `name`
           // is silently dropped by CFN and the AMI gets an auto-generated name.
           amiDistributionConfiguration: { Name: 'comfy-image-golden-{{ imagebuilder:buildDate }}' },
-          ssmParameterConfigurations: [{ parameterName: GOLDEN_AMI_PARAM, dataType: 'aws:ec2:image' }],
         },
       ],
     });
@@ -137,6 +148,53 @@ export class ImageBuilderStack extends Stack {
         pipelineExecutionStartCondition: 'EXPRESSION_MATCH_ONLY',
       },
       status: 'ENABLED',
+    });
+
+    // ---- Publisher Lambda: on Image Builder "AVAILABLE", write the new AMI id
+    // to the SSM param (create-or-update). Replaces the native distribution SSM
+    // write, which the AWS-managed Image Builder SLR can't perform.
+    const publisher = new lambda.Function(this, 'GoldenAmiPublisherFn', {
+      functionName: 'comfy-golden-ami-publisher',
+      runtime: lambda.Runtime.PYTHON_3_12,
+      architecture: lambda.Architecture.ARM_64,
+      handler: 'handler.lambda_handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '../../../services/golden_ami_publisher'),
+        { exclude: ['__pycache__', '*.pyc'] }
+      ),
+      timeout: Duration.seconds(30),
+      memorySize: 128,
+      logRetention: logs.RetentionDays.ONE_WEEK,
+      environment: {
+        GOLDEN_AMI_PARAM,
+        RECIPE_NAME: recipe.name!, // only publish for our recipe's images
+      },
+    });
+    publisher.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ssm:PutParameter'],
+        resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter${GOLDEN_AMI_PARAM}`],
+      })
+    );
+    // GetImage has no resource-level scoping for the build-version ARN shape we
+    // receive, so grant on the account's image resources (read-only metadata).
+    publisher.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['imagebuilder:GetImage'],
+        resources: [`arn:aws:imagebuilder:${this.region}:${this.account}:image/*`],
+      })
+    );
+
+    // Fire only when a build reaches AVAILABLE. The handler re-checks the recipe
+    // name and no-ops on anything else, so a shared rule is safe.
+    new events.Rule(this, 'GoldenAmiAvailableRule', {
+      ruleName: 'comfy-golden-ami-available',
+      eventPattern: {
+        source: ['aws.imagebuilder'],
+        detailType: ['EC2 Image Builder Image State Change'],
+        detail: { state: { status: ['AVAILABLE'] } },
+      },
+      targets: [new targets.LambdaFunction(publisher)],
     });
   }
 }
