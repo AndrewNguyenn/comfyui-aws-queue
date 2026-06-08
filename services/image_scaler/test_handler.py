@@ -23,18 +23,18 @@ _spec.loader.exec_module(h)
 
 
 def test_step_target_bands():
-    # bands: <50→2, 50-149→3, 150-299→4, ≥300→MAX_WORKERS(6)
-    cases = {0: 0, 1: 2, 49: 2, 50: 3, 149: 3, 150: 4, 299: 4, 300: 6, 500: 6, 9999: 6}
+    # aggressive bands: <25→2, 25-74→4, ≥75→MAX_WORKERS(6)
+    cases = {0: 0, 1: 2, 24: 2, 25: 4, 74: 4, 75: 6, 100: 6, 300: 6, 9999: 6}
     for visible, expected in cases.items():
         assert h.step_target(visible) == expected, (visible, h.step_target(visible))
 
 
 def test_lazy_ramp_up():
-    # fresh batches spin up only to the band target, never the whole fleet
-    assert h.decide(visible=100, inflight=0, current=0) == 3
-    assert h.decide(visible=250, inflight=0, current=2) == 4
-    assert h.decide(visible=450, inflight=0, current=3) == 6
-    assert h.decide(visible=10, inflight=0, current=0) == 2
+    # fresh batches ramp to the band target
+    assert h.decide(visible=10, inflight=0, current=0) == 2    # trickle
+    assert h.decide(visible=50, inflight=0, current=0) == 4    # moderate
+    assert h.decide(visible=100, inflight=0, current=0) == 6   # backlog -> full fleet
+    assert h.decide(visible=30, inflight=0, current=2) == 4    # ramps 2 -> 4
 
 
 def test_sticky_down_holds_until_clear():
@@ -54,7 +54,7 @@ def test_release_steps_down_one_per_tick():
 
 def test_new_work_during_release_re_holds():
     # stepped down to 5 after a clear, then a small batch arrives -> hold 5
-    # (current 5 > step_target(30)=2, so stickiness keeps the live fleet)
+    # (current 5 > step_target(30)=4, so stickiness keeps the live fleet)
     assert h.decide(visible=30, inflight=0, current=5) == 5
 
 

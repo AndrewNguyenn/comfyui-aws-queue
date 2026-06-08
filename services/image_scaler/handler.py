@@ -8,16 +8,20 @@ Scale-UP is graduated and lazy — workers track the visible backlog:
 
     visible queue depth  ->  target workers
     0                         0
-    1 - 49                    2
-    50 - 149                  3
-    150 - 299                 4
-    >= 300                    MAX_WORKERS (fleet cap)
+    1 - 24                    2
+    25 - 74                   4
+    >= 75                     MAX_WORKERS (fleet cap)
+
+These bands were tuned aggressive (2026-06-08) once the golden AMI cut cold
+boots from ~8 min to ~2.5 min: spinning workers up early is now cheap, so we
+reach the full fleet at a far lower backlog than the original ladder (which
+needed 300 queued to hit MAX). A ~100-job batch now goes straight to the full
+fleet instead of 3 workers.
 
 Scale-DOWN is sticky — we never shed workers while work remains. Once N workers
 are up they stay up (`max(current, target)`) for as long as anything is visible
 or in flight. So a 500-job batch holds the full fleet until the last job
-finishes, while a fresh 100-job batch only spins up 3 workers, never the whole
-fleet pre-emptively.
+finishes.
 
 When the queue is *fully cleared* (nothing visible AND nothing in flight) we
 release — but one worker per tick, not all at once. ApproximateNumberOfMessages
@@ -41,16 +45,18 @@ ecs = boto3.client("ecs")
 
 
 def step_target(visible: int) -> int:
-    """Graduated scale-up target by visible (waiting) queue depth."""
+    """Graduated scale-up target by visible (waiting) queue depth.
+
+    Aggressive bands (see module docstring) — fast golden-AMI boots make early
+    scale-up cheap, so we hit the full fleet at 75 queued instead of 300.
+    """
     if visible <= 0:
         return 0
-    if visible < 50:
+    if visible < 25:
         return 2
-    if visible < 150:
-        return 3
-    if visible < 300:
+    if visible < 75:
         return 4
-    return MAX_WORKERS  # >= 300, capped at the fleet max
+    return MAX_WORKERS  # >= 75, full fleet
 
 
 def decide(visible: int, inflight: int, current: int) -> int:
