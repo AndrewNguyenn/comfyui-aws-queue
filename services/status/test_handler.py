@@ -105,6 +105,20 @@ def test_character_empty_when_no_prompt():
     assert h._character_from_prompt("close-up, from_front, solo") == ""
 
 
+def test_appearance_led_prompt_has_no_character():
+    # real catpony prompt: an UNNAMED figure described purely by appearance —
+    # the first content tag is a hair colour, so there is no character to label.
+    assert h._character_from_prompt(
+        "from_front, bust_shot BREAK black_hair, very_long_hair, pale_skin, 1boy "
+        "BREAK tears BREAK predicament_bondage, kneeling, penis") == ""
+    # other appearance leads (eyes, skin, build) → also no character
+    assert h._character_from_prompt("close-up BREAK blue_eyes, large_breasts") == ""
+    assert h._character_from_prompt("pov BREAK dark-skinned_female, curvy") == ""
+    # but a character that merely HAS appearance tags after it is still found
+    assert h._character_from_prompt(
+        "from_front BREAK luna_snow, marvel_rivals, blue_eyes, blonde_hair") == "luna_snow"
+
+
 def test_extract_character_from_string_literal_graph():
     # mirrors the real catpony workflow: positive prompt wired from a
     # "String Literal (Image Saver)" node into a CLIPTextEncode → KSampler.

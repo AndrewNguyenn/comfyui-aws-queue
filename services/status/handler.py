@@ -316,6 +316,37 @@ _NON_CHARACTER_TAGS = frozenset({
 # score_9, score_8_up, score_9_up, score_4, … — the whole Pony score ladder.
 _SCORE_RE = re.compile(r"^score_\d")
 
+# Appearance / body descriptors. A real-character prompt leads with the
+# character (right after the framing tags); some prompts instead describe an
+# UNNAMED figure purely by appearance ("...bust_shot BREAK black_hair,
+# very_long_hair, pale_skin, 1boy ..."). So if the first non-lead tag is one of
+# these, the prompt names no character — we return "" rather than mislabel the
+# row with a hair colour. Hair/eyes/skin are matched by suffix (*_hair etc.);
+# this set covers the rest (skin tone, build, bust, common hairstyles).
+_APPEARANCE_TAGS = frozenset({
+    "dark-skinned_female", "dark-skinned_male", "pale", "tan", "tanned",
+    "large_breasts", "huge_breasts", "gigantic_breasts", "medium_breasts",
+    "small_breasts", "flat_chest", "large_ass", "huge_ass",
+    "curvy", "petite", "muscular", "slim", "plump", "thick_thighs",
+    "wide_hips", "abs", "freckles", "ponytail", "twintails", "braid",
+    "bangs", "ahoge", "bob_cut", "hair_bun",
+})
+
+
+def _is_lead_tag(norm: str) -> bool:
+    """True for tags that precede the character — quality/score/framing/focus/
+    count/persona leads and inline <lora:…> tokens. These are skipped."""
+    return (norm in _NON_CHARACTER_TAGS
+            or norm.endswith("_focus")     # *_focus is always framing
+            or norm.startswith("<")        # <lora:foo:0.8> etc.
+            or bool(_SCORE_RE.match(norm)))
+
+
+def _is_appearance(norm: str) -> bool:
+    """True for hair/eyes/skin/body descriptors — see _APPEARANCE_TAGS."""
+    return (norm.endswith("_hair") or norm.endswith("_eyes")
+            or norm.endswith("_skin") or norm in _APPEARANCE_TAGS)
+
 
 def _norm_tag(t: str) -> str:
     """Normalize a single booru tag for stoplist comparison / display: strip
@@ -347,20 +378,23 @@ def _norm_tag(t: str) -> str:
 
 
 def _character_from_prompt(text: str) -> str:
-    """The character tag from a booru-style positive prompt — the first tag
-    (splitting on commas and BREAK) that isn't a quality/framing/score/count
-    lead (or an inline <lora:…> token). Returns "" when nothing qualifies
-    (e.g. a scenery-only prompt)."""
+    """The character tag from a booru-style positive prompt.
+
+    Skip the lead tags (quality/framing/focus/count/persona); the FIRST content
+    tag after them is the character — UNLESS it's an appearance descriptor, in
+    which case the prompt describes an unnamed figure and we return "" (the
+    viewer then groups it by model, not a bogus "black_hair" character). Returns
+    "" when nothing qualifies (e.g. a scenery-only prompt)."""
     if not text:
         return ""
     for chunk in text.replace("\n", " ").split(","):
         for piece in chunk.split("BREAK"):
             norm = _norm_tag(piece)
-            if (norm and norm not in _NON_CHARACTER_TAGS
-                    and not norm.endswith("_focus")  # *_focus is always framing
-                    and not norm.startswith("<")     # <lora:foo:0.8> etc.
-                    and not _SCORE_RE.match(norm)):
-                return norm
+            if not norm or _is_lead_tag(norm):
+                continue
+            # First content tag. A character leads here; appearance here means
+            # the prompt names no one — don't scan on into scene/action tags.
+            return "" if _is_appearance(norm) else norm
     return ""
 
 
