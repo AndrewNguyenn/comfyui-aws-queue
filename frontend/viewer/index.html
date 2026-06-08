@@ -103,6 +103,11 @@ a { color:var(--pond-dk); }
 .pq-name .batchchip { font-family:var(--font-mono); font-size:10px; color:var(--ink-3);
   letter-spacing:.04em; flex-shrink:0; }
 .pq-name .batchchip .ct { color:var(--pond-dk); }
+/* Checkpoint trailing the character headline — a quiet mono tag that
+   ellipsizes before the character name does. */
+.pq-name .submodel { font-family:var(--font-mono); font-size:10px; color:var(--ink-3);
+  letter-spacing:.02em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  min-width:0; flex-shrink:3; align-self:center; }
 /* GPU instance type on the running row — a quiet mono tag. */
 .pq-name .pq-instance { font-family:var(--font-mono); font-size:9.5px;
   color:var(--moss); letter-spacing:.04em; flex-shrink:0; border:1px solid var(--line);
@@ -290,6 +295,25 @@ a { color:var(--pond-dk); }
    own height and keeps the image centred and fully visible. */
 .scrim { position:fixed; inset:0; background:rgba(15,22,19,.72); z-index:50;
   display:flex; }
+/* Confirm overlay — its own backdrop (deliberately NOT .scrim, which the
+   gallery modal owns and queries by class). */
+.confirm-scrim { position:fixed; inset:0; z-index:60; display:flex;
+  align-items:center; justify-content:center; background:rgba(15,22,19,.72); }
+.confirm-card { background:var(--paper); border:1px solid var(--ink);
+  max-width:400px; width:calc(100% - 48px); padding:24px 24px 20px;
+  box-shadow:0 14px 44px rgba(15,22,19,.34); }
+.confirm-title { font-family:var(--font-display); font-style:italic; font-weight:500;
+  font-size:19px; color:var(--ink); line-height:1.25; margin-bottom:8px; }
+.confirm-sub { font-family:var(--font-mono); font-size:11px; color:var(--ink-2);
+  letter-spacing:.02em; line-height:1.45; margin-bottom:20px; word-break:break-word; }
+.confirm-actions { display:flex; justify-content:flex-end; gap:10px; }
+.confirm-actions button { font-family:var(--font-ui); font-size:11px; font-weight:600;
+  letter-spacing:.14em; text-transform:uppercase; padding:9px 16px;
+  border:1px solid var(--line); background:var(--paper); color:var(--ink-2);
+  cursor:pointer; transition:color .12s,border-color .12s,background .12s; }
+.confirm-actions .confirm-keep:hover { border-color:var(--ink); color:var(--ink); }
+.confirm-actions .confirm-go { border-color:var(--maple); color:var(--maple); }
+.confirm-actions .confirm-go:hover { background:var(--maple); color:var(--cream); }
 .modal { flex:1; display:grid; grid-template-columns:1fr 320px;
   grid-template-rows:minmax(0,1fr); background:var(--paper);
   margin:28px auto; border:1px solid var(--ink); overflow:hidden; max-width:1300px;

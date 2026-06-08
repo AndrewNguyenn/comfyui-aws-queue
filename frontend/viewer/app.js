@@ -568,29 +568,36 @@
     return e.length > 90 ? e.slice(0, 89) + "…" : e;
   };
 
-  // Collapse consecutive same-(type, model) queued jobs into one ledger row.
-  // `oldest` is kept as an ISO created_at string — ISO timestamps sort
-  // lexically, so a string compare finds the earliest, and ageMin() consumes
-  // it directly (no second time representation to drift from).
+  // Bucket queued jobs by character (the server derives it from the prompt),
+  // keeping the checkpoint on the row. Falls back to the model as the key when
+  // no character could be parsed (scenery prompts, video jobs). Unlike a
+  // consecutive-run collapse, this groups every job of the same
+  // (type, model, character) into ONE row even when the queue interleaves them
+  // — so "artoria_pendragon" is a single group however the batch is ordered.
+  // `oldest` is an ISO created_at string — ISO timestamps sort lexically, so a
+  // string compare finds the earliest, and ageMin() consumes it directly.
   function groupQueue(queued) {
-    const out = [];
+    const map = new Map();
     for (const j of queued) {
       const model = j.model || j.type || "job";
-      const last = out[out.length - 1];
-      if (last && last.model === model && last.kind === j.type) {
-        last.ids.push(j.job_id);
-        last.count += 1;
-        if (j.created_at && (!last.oldest || j.created_at < last.oldest)) {
-          last.oldest = j.created_at;
-        }
-      } else {
-        out.push({
-          ids: [j.job_id], kind: j.type, model, count: 1,
-          oldest: j.created_at || "",
-        });
+      const character = j.character || "";
+      const key = `${j.type}|${model}|${character}`;
+      let g = map.get(key);
+      if (!g) {
+        g = { ids: [], kind: j.type, model, character, count: 0,
+              oldest: j.created_at || "" };
+        map.set(key, g);
+      }
+      g.ids.push(j.job_id);
+      g.count += 1;
+      if (j.created_at && (!g.oldest || j.created_at < g.oldest)) {
+        g.oldest = j.created_at;
       }
     }
-    return out;
+    // Largest character batch first — what you most likely want to bulk-cancel
+    // — with the oldest batch breaking ties.
+    return [...map.values()].sort(
+      (a, b) => b.count - a.count || (a.oldest || "").localeCompare(b.oldest || ""));
   }
 
   // Rough "time remaining" — projects the running job's full duration from its
@@ -621,8 +628,6 @@
 
   function runningRow(j) {
     const cancel = cancelling.has(j.job_id);
-    const isVid = j.type === "video";
-    const model = j.model || j.type || "job";
     let pct = null, frac = "";
     if (j.progress && j.progress.includes("/")) {
       const [v, m] = j.progress.split("/").map(Number);
@@ -638,9 +643,7 @@
       : "";
     return `<div class="pq-row running${cancel ? " cancelling" : ""}">` +
       `<div class="pq-stamp">${cancel ? "Cancelling" : "Running"}</div>` +
-      `<div class="pq-name">` +
-        `<span class="kindchip ${isVid ? "vid" : "img"}">${isVid ? "Vid" : "Img"}</span>` +
-        `<span class="model" title="${esc(model)}">${esc(model)}</span>${instance}</div>` +
+      `<div class="pq-name">${nameCell(j.type, j.model || j.type || "job", j.character)}${instance}</div>` +
       meter +
       `<div class="pq-eta"><span class="step">${esc(step)}</span>` +
         `${esc(elapsed(j.started_at || j.created_at))}</div>` +
@@ -650,8 +653,19 @@
     `</div>`;
   }
 
+  // The name cell: the character as the headline with the checkpoint as a
+  // quiet trailing tag (`narberal_gamma · catponyDark_aniIlV40`). Falls back to
+  // just the model when no character was parsed.
+  function nameCell(kind, model, character) {
+    const isVid = kind === "video";
+    const head = character || model || "job";
+    const sub = character
+      ? `<span class="submodel" title="${esc(model)}">· ${esc(model)}</span>` : "";
+    return `<span class="kindchip ${isVid ? "vid" : "img"}">${isVid ? "Vid" : "Img"}</span>` +
+      `<span class="model" title="${esc(head)}">${esc(head)}</span>${sub}`;
+  }
+
   function queuedRow(g, idx) {
-    const isVid = g.kind === "video";
     const wait = fmtWait(ageMin(g.oldest));
     // g.shown is the true depth (scaled to the SQS backlog); g.count/g.ids are
     // the actual sampled rows the cancel button can act on. When the displayed
@@ -660,14 +674,13 @@
     const removable = g.ids ? g.ids.length : g.count;
     const batch = n > 1
       ? `<span class="batchchip">× <span class="ct">${n}</span></span>` : "";
+    const who = g.character ? `${g.character} · ${g.model}` : g.model;
     const label = n > 1
-      ? (n > removable ? "Remove queued items" : `Remove ${n} queued items`)
-      : "Remove from queue";
+      ? (n > removable ? `Remove queued ${who} items` : `Remove ${n} queued ${who} items`)
+      : `Remove ${who} from queue`;
     return `<div class="pq-row queued">` +
       `<div class="pq-stamp">Queued</div>` +
-      `<div class="pq-name">` +
-        `<span class="kindchip ${isVid ? "vid" : "img"}">${isVid ? "Vid" : "Img"}</span>` +
-        `<span class="model" title="${esc(g.model)}">${esc(g.model)}</span>${batch}</div>` +
+      `<div class="pq-name">${nameCell(g.kind, g.model, g.character)}${batch}</div>` +
       `<div class="pq-meter"></div>` +
       `<div class="pq-eta">${esc(wait)}</div>` +
       `<button class="pq-act" data-act="cancel-group" data-group="${idx}"` +
@@ -788,6 +801,45 @@
     }
   }
 
+  // A small yes/no confirm overlay (reuses the .scrim backdrop). Resolves true
+  // on confirm, false on Keep / Escape / backdrop click. Enter confirms.
+  function confirmDialog({ title, sub, confirmLabel, cancelLabel }) {
+    return new Promise((resolve) => {
+      // Its OWN backdrop class — NOT the modal's `.scrim` — so the gallery
+      // modal's document.querySelector(".scrim") can never grab this overlay.
+      const scrim = document.createElement("div");
+      scrim.className = "confirm-scrim";
+      scrim.innerHTML =
+        `<div class="confirm-card" role="alertdialog" aria-modal="true">` +
+          `<div class="confirm-title">${esc(title)}</div>` +
+          (sub ? `<div class="confirm-sub">${esc(sub)}</div>` : "") +
+          `<div class="confirm-actions">` +
+            `<button class="confirm-keep" data-act="keep">${esc(cancelLabel || "Keep")}</button>` +
+            `<button class="confirm-go" data-act="go">${esc(confirmLabel || "Confirm")}</button>` +
+          `</div></div>`;
+      const done = (val) => {
+        document.removeEventListener("keydown", onKey, true);
+        scrim.remove();
+        resolve(val);
+      };
+      // Capture phase + stopPropagation so a modal confirm swallows the key —
+      // Escape here must NOT also reach the global handler (which closes the
+      // image modal / exits select mode).
+      const onKey = (e) => {
+        if (e.key !== "Escape" && e.key !== "Enter") return;
+        e.preventDefault();
+        e.stopPropagation();
+        done(e.key === "Enter");
+      };
+      scrim.addEventListener("click", (e) => { if (e.target === scrim) done(false); });
+      scrim.querySelector('[data-act="keep"]').onclick = () => done(false);
+      scrim.querySelector('[data-act="go"]').onclick = () => done(true);
+      document.addEventListener("keydown", onKey, true);
+      document.body.appendChild(scrim);
+      scrim.querySelector('[data-act="go"]').focus();
+    });
+  }
+
   // Cancel a whole queued group — every job collapsed into the row. Optimistic:
   // collapse the row out, then re-render once the requests land. Rollback is
   // per-id: a job whose cancel succeeded stays hidden even if a sibling failed.
@@ -824,9 +876,27 @@
       btn.onclick = () => cancelRunning(btn.dataset.id);
     });
     pending.querySelectorAll('[data-act="cancel-group"]').forEach((btn) => {
-      btn.onclick = () => {
+      btn.onclick = async () => {
         const g = pendGroups[Number(btn.dataset.group)];
-        if (g) cancelGroup(g, btn.closest(".pq-row"));
+        if (!g) return;
+        // Confirm before nuking a whole character's batch — one click could
+        // otherwise cancel dozens of jobs that can't be un-cancelled (only
+        // re-queued). n is the displayed (SQS-scaled) count; `removable` is the
+        // sampled ids the cancel can actually act on — if the queue ran past
+        // the 500-row sample, say what the cancel really removes.
+        const n = g.shown != null ? g.shown : g.count;
+        const removable = g.ids ? g.ids.length : g.count;
+        const who = g.character ? `${g.character} · ${g.model}` : g.model;
+        const sub = n > removable
+          ? `${who}  —  cancels the ${removable} loaded so far (of ~${n})`
+          : who;
+        const ok = await confirmDialog({
+          title: `Cancel ${n} queued ${n === 1 ? "job" : "jobs"}?`,
+          sub,
+          confirmLabel: "Cancel all",
+          cancelLabel: "Keep",
+        });
+        if (ok) cancelGroup(g, btn.closest(".pq-row"));
       };
     });
     pending.querySelectorAll('[data-act="dismiss-fail"]').forEach((btn) => {
