@@ -6,6 +6,21 @@
  */
 import { Duration } from 'aws-cdk-lib';
 
+/**
+ * SSM parameter that holds the current golden-AMI id for the image fleet.
+ * Written by the EC2 Image Builder pipeline (imagebuilder.ts) on each bake;
+ * read by the image-fleet launch template (compute.ts) when the golden AMI is
+ * activated via `-c useGoldenAmi=true`.
+ */
+export const GOLDEN_AMI_PARAM = '/comfy/image/golden-ami-id';
+
+/**
+ * Name of the EC2 Image Builder pipeline that bakes the golden AMI. Fixed so
+ * other stacks can grant on / trigger its ARN without a cross-stack reference.
+ * Defined here (not imagebuilder.ts) to avoid a circular import with ci.ts.
+ */
+export const GOLDEN_PIPELINE_NAME = 'comfy-image-golden-pipeline';
+
 export interface AppConfig {
   readonly projectName: string;
   readonly region: string;
@@ -76,6 +91,13 @@ export interface FleetConfig {
   // time. Per-fleet so we can tune the image fleet without touching video.
   readonly rootVolumeIops: number;
   readonly rootVolumeThroughputMbps: number;
+  // Golden-AMI only (image fleet). When the fleet boots from the golden AMI
+  // (root restored from the worker-image snapshot), provision this EBS init
+  // rate (MiB/s, 100–300) so the snapshot hydrates eagerly instead of
+  // lazy-loading at ~26 MB/s (measured: lazy-load never reached ComfyUI-ready
+  // in the 300s grace; 300 MiB/s → ~32s). Ignored unless `-c useGoldenAmi=true`.
+  // See compute.ts and imagebuilder.ts.
+  readonly volumeInitializationRateMiBs?: number;
   // (cacheGb removed — model cache lives on the included NVMe instance store,
   // mounted by workers/image/entrypoint.sh. Was never wired into a separate
   // EBS volume in compute.ts anyway.)
@@ -136,6 +158,10 @@ export const APP_CONFIG: AppConfig = {
       // pull entirely — deferred (re-bake-per-release maintenance burden).
       rootVolumeIops: 6000,
       rootVolumeThroughputMbps: 250,
+      // Golden-AMI hydration rate (only applied when `-c useGoldenAmi=true`).
+      // Measured: 300 MiB/s → ComfyUI cold-ready ~32s; default lazy-load (~26
+      // MB/s) never ready in the 300s grace. See imagebuilder.ts / compute.ts.
+      volumeInitializationRateMiBs: 300,
     },
     video: {
       fleetName: 'video',
