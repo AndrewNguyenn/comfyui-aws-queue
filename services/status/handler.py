@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -267,6 +268,100 @@ def _extract_prompts(wf: dict) -> list[dict]:
     return sections
 
 
+# Booru-tag prompts lead with quality/score/meta tags and framing/angle/focus
+# tags, then the *character* tag — which is itself followed by the series tag.
+# So the character is the first tag that isn't one of these leads. This beats a
+# "first parenthetical tag" rule: a series like overlord_(maruyama) carries the
+# parens, not the character (narberal_gamma), so that rule would pick the series.
+_NON_CHARACTER_TAGS = frozenset({
+    # quality / aesthetic / meta — Pony/Illustrious prompts (catponyDark is that
+    # lineage) almost always lead with these, so they MUST be skipped or every
+    # batch collapses under "masterpiece"/"score_9". (score_N is also caught by
+    # _SCORE_RE below, which covers score_8_up / score_9_up / … variants.)
+    "masterpiece", "best_quality", "high_quality", "normal_quality",
+    "low_quality", "worst_quality", "amazing_quality", "great_quality",
+    "good_quality", "ultra-detailed", "ultra_detailed", "highly_detailed",
+    "very_aesthetic", "aesthetic", "absurdres", "highres", "hires", "lowres",
+    "newest", "recent", "oldest", "early", "mid",
+    "source_anime", "source_cartoon", "source_furry", "official_art",
+    "rating_safe", "rating_questionable", "rating_explicit",
+    # angle / viewpoint
+    "from_front", "from_behind", "from_back", "from_above", "from_below",
+    "from_side", "side_view", "back_view", "front_view", "profile",
+    "dutch_angle", "low_angle", "high_angle", "overhead_shot", "straight-on",
+    "looking_at_viewer", "looking_down", "looking_up", "looking_back",
+    "pov", "fisheye", "panorama", "facing_viewer", "facing_away",
+    # shot / framing
+    "close-up", "closeup", "extreme_close-up", "portrait", "upper_body",
+    "lower_body", "full_body", "cowboy_shot", "bust_shot", "bust",
+    "wide_shot", "medium_shot", "long_shot", "headshot", "cropped",
+    "feet_out_of_frame",
+    # focus
+    "face_focus", "breast_focus", "ass_focus", "hip_focus", "foot_focus",
+    "eye_focus", "solo_focus", "butt_focus", "thigh_focus", "leg_focus",
+    # subject count — never a character name, but sometimes leads
+    "solo", "1girl", "2girls", "3girls", "4girls", "multiple_girls",
+    "1boy", "2boys", "multiple_boys", "duo", "trio", "group",
+    # persona / age / build descriptors — describe the subject, don't name them,
+    # and commonly sit between the framing tags and the character (e.g.
+    # "...upper_body, mature_female, bronya_rand, honkai:_star_rail, ...").
+    "mature_female", "mature_male", "milf", "dilf", "adult", "aged_up",
+    "mature", "old_woman", "old_man", "teenage", "teenager", "young_adult",
+    # composition leads occasionally seen first
+    "dramatic", "cinematic", "dynamic_angle", "dynamic_pose",
+})
+# score_9, score_8_up, score_9_up, score_4, … — the whole Pony score ladder.
+_SCORE_RE = re.compile(r"^score_\d")
+
+
+def _norm_tag(t: str) -> str:
+    """Normalize a single booru tag for stoplist comparison / display: strip
+    emphasis wrapping and a trailing :weight, lowercase.
+
+    Emphasis syntax wraps the WHOLE tag — (tag), ((tag)), [tag], (tag:1.3) — so
+    we only unwrap when the tag starts with a bracket. A character tag with
+    internal parens, e.g. ais_wallenstein_(danmachi), does NOT start with one,
+    so it is left intact (a naive strip(')') would lop off its closing paren)."""
+    t = t.strip()
+    while t and t[0] in "([{":
+        t = t[1:]
+        if t and t[-1] in ")]}":
+            t = t[:-1]
+        t = t.strip()
+    if ":" in t:  # (tag:1.3) / tag::1.3 weight — drop a numeric weight tail
+        head, _, tail = t.rpartition(":")
+        if head and tail.strip().replace(".", "", 1).isdigit():
+            t = head.strip().rstrip(":").strip()  # rstrip handles tag::1.3
+    return t.lower()
+
+
+def _character_from_prompt(text: str) -> str:
+    """The character tag from a booru-style positive prompt — the first tag
+    (splitting on commas and BREAK) that isn't a quality/framing/score/count
+    lead (or an inline <lora:…> token). Returns "" when nothing qualifies
+    (e.g. a scenery-only prompt)."""
+    if not text:
+        return ""
+    for chunk in text.replace("\n", " ").split(","):
+        for piece in chunk.split("BREAK"):
+            norm = _norm_tag(piece)
+            if (norm and norm not in _NON_CHARACTER_TAGS
+                    and not norm.startswith("<")  # <lora:foo:0.8> etc.
+                    and not _SCORE_RE.match(norm)):
+                return norm
+    return ""
+
+
+def _extract_character(wf: dict) -> str:
+    """Best-effort 'who is in this image', for grouping the pending queue by
+    character. Reads the primary positive prompt and pulls its leading
+    character tag."""
+    for sec in _extract_prompts(wf):
+        if sec.get("label") == "Positive":
+            return _character_from_prompt(sec.get("text", ""))
+    return ""
+
+
 _PARAM_KEYS = ("steps", "cfg", "sampler_name", "scheduler", "denoise")
 
 
@@ -501,6 +596,12 @@ def _serialize_job(it: dict, lite: bool = False) -> dict:
         # actually stops it (a running cancel is not instantaneous).
         "cancel_requested": it.get("cancel_requested", {}).get("BOOL", False),
     }
+    # The character drives the viewer's pending-strip grouping, so derive it
+    # only for the statuses that strip shows (queued/running). Skipping it for
+    # the gallery's history fetch (complete/failed/cancelled, up to 8000 rows)
+    # keeps that large list cheap — it never groups by character.
+    if out["status"] in ("queued", "running"):
+        out["character"] = _extract_character(wf)
     if not lite:
         # All distinct prompts (txt2img → Positive/Negative; detailer graphs
         # add their own sections) + best-effort generation params.
