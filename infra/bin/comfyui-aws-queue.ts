@@ -9,6 +9,7 @@ import { MonitoringStack } from '../lib/stacks/monitoring';
 import { AuthStack } from '../lib/stacks/auth';
 import { ApiStack } from '../lib/stacks/api';
 import { CiStack } from '../lib/stacks/ci';
+import { ImageBuilderStack } from '../lib/stacks/imagebuilder';
 import { ComputeStack } from '../lib/stacks/compute';
 import { FrontendStack } from '../lib/stacks/frontend';
 import { MetadataStack } from '../lib/stacks/metadata';
@@ -102,6 +103,21 @@ const ci = new CiStack(app, 'ComfyCiStack', {
   description: 'CodeBuild projects + ECR repos for worker images',
 });
 Tags.of(ci).add('Component', 'ci');
+
+// EC2 Image Builder pipeline that bakes the golden AMI (worker image pre-staged
+// on the root snapshot) for the image fleet. Publishes the AMI id to SSM; the
+// image-fleet launch template reads it when `-c useGoldenAmi=true`. Depends on
+// ci (ECR repo to pull) and network (build subnet + SG).
+const imageBuilder = new ImageBuilderStack(app, 'ComfyImageBuilderStack', {
+  env,
+  config: APP_CONFIG,
+  network,
+  ci,
+  description: 'EC2 Image Builder golden-AMI pipeline for the comfy-image fleet',
+});
+Tags.of(imageBuilder).add('Component', 'imagebuilder');
+imageBuilder.addDependency(ci);
+imageBuilder.addDependency(network);
 
 // Phase 4 — compute (depends on CI for ECR repos to exist, and on api for
 // SSM parameters /comfy/api/url and /comfy/api/worker-key-id that the worker

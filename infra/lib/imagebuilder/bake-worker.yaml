@@ -1,0 +1,67 @@
+name: comfy-image-bake-worker
+description: >-
+  Pre-stage the comfy-image-worker container image into /var/lib/docker on the
+  AMI root volume so a cold ECS instance skips the ~273s ECR pull at boot, then
+  reset ECS-agent state so the snapshot is a clean, reusable ECS host.
+schemaVersion: 1.0
+
+# Only a build phase is needed — validate/test are intentionally omitted, and the
+# pipeline sets imageTestsEnabled=false (no separate test instance: cost + time).
+# account/region are literals: this deployment is single-account/region (CLAUDE.md).
+phases:
+  - name: build
+    steps:
+      # ECS-optimized AL2023 ships docker; make sure the daemon is up for the pull.
+      - name: WaitForDocker
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euxo pipefail
+              systemctl start docker
+              for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
+              docker info
+
+      # Authenticate to ECR and pull :latest so the layers land in /var/lib/docker
+      # (the docker data-root on the AL2023 ECS AMI's root volume).
+      - name: EcrLoginAndPull
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euxo pipefail
+              REGION=us-east-1
+              REGISTRY=577449503984.dkr.ecr.us-east-1.amazonaws.com
+              REPO="$REGISTRY/comfy-image-worker:latest"
+              aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REGISTRY"
+              docker pull "$REPO"
+
+      # Fail the bake VISIBLY if the image isn't really staged on disk — a golden
+      # AMI without the image baked in is worse than useless (it would silently
+      # fall back to a slow pull). Expect >20 GB extracted.
+      - name: VerifyImagePresent
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euxo pipefail
+              REPO=577449503984.dkr.ecr.us-east-1.amazonaws.com/comfy-image-worker:latest
+              docker image inspect "$REPO" >/dev/null
+              SZ=$(docker image inspect "$REPO" --format '{{.Size}}')
+              echo "image on-disk size bytes: $SZ"
+              test "$SZ" -gt 20000000000
+
+      # Capture a CLEAN ECS host: drop the agent's identity/checkpoint so a new
+      # instance re-registers fresh. Do NOT delete /etc/ecs/ecs.config — the
+      # launch-template userData rewrites cluster + fleet attributes at boot.
+      - name: CleanEcsAgentState
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euxo pipefail
+              systemctl stop ecs || true
+              systemctl stop docker docker.socket || true
+              rm -rf /var/lib/ecs/data/* || true
+              rm -f  /var/log/ecs/* || true
+              sync
