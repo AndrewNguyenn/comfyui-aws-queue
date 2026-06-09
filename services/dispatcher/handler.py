@@ -29,6 +29,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from anima import maybe_rewrite_to_anima
 from workflow_router import classify_workflow
 
 # AWS clients are created at module load (re-used across warm invocations).
@@ -239,6 +240,16 @@ def _post_prompt(event: dict) -> dict:
     if not workflow or not isinstance(workflow, dict):
         return _resp(400, {"error": "missing or invalid 'prompt' (workflow JSON)"})
 
+    # Anima is a Qwen-Image architecture, not SDXL — a normal checkpoint workflow
+    # loads it with a None CLIP and dies ("clip input is invalid: None"). If the
+    # submission references an Anima model, swap in the official Anima workflow,
+    # carrying over only the model + the user's prompts. No-op (None) for
+    # everything else, so normal jobs are untouched.
+    anima_workflow = maybe_rewrite_to_anima(workflow)
+    anima_rewritten = anima_workflow is not None
+    if anima_rewritten:
+        workflow = anima_workflow
+
     explicit_type = body.get("type")
     if explicit_type in ("image", "video"):
         job_type = explicit_type
@@ -264,6 +275,8 @@ def _post_prompt(event: dict) -> dict:
         # Reaper-owned: only the reaper increments this (once per zombie
         # re-queue). The worker never touches it.
         "attempt_count": {"N": "0"},
+        # True when the submitted graph was swapped for the Anima workflow.
+        "anima_rewritten": {"BOOL": anima_rewritten},
     }
     # workflow_json above is the API-format prompt (what the worker executes).
     # The editor also sends its full UI workflow — node layout, groups, the

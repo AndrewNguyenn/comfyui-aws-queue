@@ -1,0 +1,1044 @@
+{
+ "8": {
+  "inputs": {
+   "seed": 193844855393784
+  },
+  "class_type": "Seed (rgthree)",
+  "_meta": {
+   "title": "Seed"
+  }
+ },
+ "12": {
+  "inputs": {
+   "images": [
+    "220",
+    0
+   ]
+  },
+  "class_type": "PreviewImage",
+  "_meta": {
+   "title": "Preview Image"
+  }
+ },
+ "34": {
+  "inputs": {
+   "images": [
+    "233",
+    0
+   ]
+  },
+  "class_type": "PreviewImage",
+  "_meta": {
+   "title": "Preview Image"
+  }
+ },
+ "218": {
+  "inputs": {
+   "text": [
+    "987",
+    0
+   ],
+   "clip": [
+    "1047",
+    1
+   ]
+  },
+  "class_type": "CLIPTextEncode",
+  "_meta": {
+   "title": "Positive prompt"
+  }
+ },
+ "219": {
+  "inputs": {
+   "text": [
+    "988",
+    0
+   ],
+   "clip": [
+    "1047",
+    1
+   ]
+  },
+  "class_type": "CLIPTextEncode",
+  "_meta": {
+   "title": "Negative prompt"
+  }
+ },
+ "220": {
+  "inputs": {
+   "samples": [
+    "224",
+    0
+   ],
+   "vae": [
+    "1003",
+    3
+   ]
+  },
+  "class_type": "VAEDecode",
+  "_meta": {
+   "title": "VAE Decode"
+  }
+ },
+ "224": {
+  "inputs": {
+   "seed": [
+    "1012",
+    0
+   ],
+   "steps": [
+    "1012",
+    1
+   ],
+   "cfg": [
+    "1012",
+    2
+   ],
+   "sampler_name": [
+    "1012",
+    3
+   ],
+   "scheduler": [
+    "1012",
+    4
+   ],
+   "denoise": [
+    "1012",
+    5
+   ],
+   "model": [
+    "1003",
+    1
+   ],
+   "positive": [
+    "218",
+    0
+   ],
+   "negative": [
+    "219",
+    0
+   ],
+   "latent_image": [
+    "1003",
+    6
+   ]
+  },
+  "class_type": "KSampler",
+  "_meta": {
+   "title": "KSampler"
+  }
+ },
+ "226": {
+  "inputs": {
+   "value": 2
+  },
+  "class_type": "PrimitiveFloat",
+  "_meta": {
+   "title": "Upscale By"
+  }
+ },
+ "227": {
+  "inputs": {
+   "image": [
+    "234",
+    0
+   ]
+  },
+  "class_type": "GetImageSize+",
+  "_meta": {
+   "title": "\ud83d\udd27 Get Image Size"
+  }
+ },
+ "228": {
+  "inputs": {
+   "image": [
+    "240",
+    0
+   ]
+  },
+  "class_type": "GetImageSize+",
+  "_meta": {
+   "title": "\ud83d\udd27 Get Image Size"
+  }
+ },
+ "229": {
+  "inputs": {
+   "expression": "a/4",
+   "a": [
+    "226",
+    0
+   ]
+  },
+  "class_type": "MathExpression|pysssss",
+  "_meta": {
+   "title": "Math Expression \ud83d\udc0d"
+  }
+ },
+ "230": {
+  "inputs": {
+   "upscale_model": [
+    "239",
+    0
+   ],
+   "image": [
+    "220",
+    0
+   ]
+  },
+  "class_type": "ImageUpscaleWithModel",
+  "_meta": {
+   "title": "Upscale Image"
+  }
+ },
+ "233": {
+  "inputs": {
+   "width": [
+    "227",
+    0
+   ],
+   "height": [
+    "227",
+    1
+   ],
+   "interpolation": "lanczos",
+   "method": "fill / crop",
+   "condition": "always",
+   "multiple_of": 64,
+   "image": [
+    "234",
+    0
+   ]
+  },
+  "class_type": "ImageResize+",
+  "_meta": {
+   "title": "\ud83d\udd27 Image Resize"
+  }
+ },
+ "234": {
+  "inputs": {
+   "samples": [
+    "236",
+    0
+   ],
+   "vae": [
+    "1004",
+    3
+   ]
+  },
+  "class_type": "VAEDecode",
+  "_meta": {
+   "title": "VAE Decode"
+  }
+ },
+ "235": {
+  "inputs": {
+   "pixels": [
+    "238",
+    0
+   ],
+   "vae": [
+    "1004",
+    3
+   ]
+  },
+  "class_type": "VAEEncode",
+  "_meta": {
+   "title": "VAE Encode"
+  }
+ },
+ "236": {
+  "inputs": {
+   "seed": [
+    "1004",
+    8
+   ],
+   "steps": 20,
+   "cfg": 3,
+   "sampler_name": "euler_ancestral",
+   "scheduler": "normal",
+   "denoise": 0.35,
+   "model": [
+    "1004",
+    1
+   ],
+   "positive": [
+    "1004",
+    4
+   ],
+   "negative": [
+    "1004",
+    5
+   ],
+   "latent_image": [
+    "235",
+    0
+   ]
+  },
+  "class_type": "KSampler",
+  "_meta": {
+   "title": "KSampler"
+  }
+ },
+ "237": {
+  "inputs": {
+   "width": [
+    "228",
+    0
+   ],
+   "height": [
+    "228",
+    1
+   ],
+   "interpolation": "lanczos",
+   "method": "fill / crop",
+   "condition": "always",
+   "multiple_of": 64,
+   "image": [
+    "240",
+    0
+   ]
+  },
+  "class_type": "ImageResize+",
+  "_meta": {
+   "title": "\ud83d\udd27 Image Resize"
+  }
+ },
+ "238": {
+  "inputs": {
+   "amount": 0.2,
+   "image": [
+    "237",
+    0
+   ]
+  },
+  "class_type": "ImageCASharpening+",
+  "_meta": {
+   "title": "\ud83d\udd27 Image Contrast Adaptive Sharpening"
+  }
+ },
+ "239": {
+  "inputs": {
+   "model_name": "4x-AnimeSharp.pth"
+  },
+  "class_type": "UpscaleModelLoader",
+  "_meta": {
+   "title": "Load Upscale Model"
+  }
+ },
+ "240": {
+  "inputs": {
+   "upscale_method": "lanczos",
+   "scale_by": [
+    "229",
+    1
+   ],
+   "image": [
+    "230",
+    0
+   ]
+  },
+  "class_type": "ImageScaleBy",
+  "_meta": {
+   "title": "Upscale Image By"
+  }
+ },
+ "245": {
+  "inputs": {
+   "shorter_edge": 640,
+   "images": [
+    "233",
+    0
+   ]
+  },
+  "class_type": "ResizeImagesByShorterEdge",
+  "_meta": {
+   "title": "Resize Images by Shorter Edge"
+  }
+ },
+ "246": {
+  "inputs": {
+   "intensity": 0.02,
+   "scale": 1,
+   "temperature": 0,
+   "vignette": 0,
+   "image": [
+    "245",
+    0
+   ]
+  },
+  "class_type": "FilmGrain",
+  "_meta": {
+   "title": "FilmGrain"
+  }
+ },
+ "248": {
+  "inputs": {},
+  "_meta": {
+   "title": "Enable / Disable groups"
+  }
+ },
+ "250": {
+  "inputs": {
+   "dimensions": "1216 x 832   (landscape)",
+   "clip_scale": 1.3,
+   "batch_size": 1
+  },
+  "class_type": "SDXL Empty Latent Image (rgthree)",
+  "_meta": {
+   "title": "Base Resolution"
+  }
+ },
+ "255": {
+  "inputs": {},
+  "_meta": {
+   "title": "1st Pass"
+  }
+ },
+ "256": {
+  "inputs": {},
+  "_meta": {
+   "title": "Upscaled Image"
+  }
+ },
+ "257": {
+  "inputs": {},
+  "_meta": {
+   "title": "2nd Pass"
+  }
+ },
+ "262": {
+  "inputs": {
+   "text": "",
+   "clip": [
+    "1038",
+    2
+   ]
+  },
+  "class_type": "CLIPTextEncode",
+  "_meta": {
+   "title": "Positive prompt"
+  }
+ },
+ "263": {
+  "inputs": {
+   "text": "",
+   "clip": [
+    "1038",
+    2
+   ]
+  },
+  "class_type": "CLIPTextEncode",
+  "_meta": {
+   "title": "Negative prompt"
+  }
+ },
+ "264": {
+  "inputs": {
+   "model_name": "bbox/face_yolov8m.pt"
+  },
+  "class_type": "UltralyticsDetectorProvider",
+  "_meta": {
+   "title": "UltralyticsDetectorProvider"
+  }
+ },
+ "266": {
+  "inputs": {
+   "model_name": "sam_vit_b_01ec64.pth",
+   "device_mode": "AUTO"
+  },
+  "class_type": "SAMLoader",
+  "_meta": {
+   "title": "SAMLoader (Impact)"
+  }
+ },
+ "270": {
+  "inputs": {
+   "text": "perfect hand",
+   "clip": [
+    "1006",
+    2
+   ]
+  },
+  "class_type": "CLIPTextEncode",
+  "_meta": {
+   "title": "CLIP Text Encode (Prompt)"
+  }
+ },
+ "271": {
+  "inputs": {
+   "text": "",
+   "clip": [
+    "1006",
+    2
+   ]
+  },
+  "class_type": "CLIPTextEncode",
+  "_meta": {
+   "title": "CLIP Text Encode (Prompt)"
+  }
+ },
+ "272": {
+  "inputs": {
+   "model_name": "bbox/hand_yolov8s.pt"
+  },
+  "class_type": "UltralyticsDetectorProvider",
+  "_meta": {
+   "title": "UltralyticsDetectorProvider"
+  }
+ },
+ "273": {
+  "inputs": {
+   "model_name": "sam_vit_b_01ec64.pth",
+   "device_mode": "AUTO"
+  },
+  "class_type": "SAMLoader",
+  "_meta": {
+   "title": "SAMLoader (Impact)"
+  }
+ },
+ "276": {
+  "inputs": {},
+  "_meta": {
+   "title": "Face Detailer"
+  }
+ },
+ "277": {
+  "inputs": {},
+  "_meta": {
+   "title": "Hand Detailer"
+  }
+ },
+ "281": {
+  "inputs": {
+   "image_a": [
+    "246",
+    0
+   ],
+   "image_b": [
+    "233",
+    0
+   ]
+  },
+  "class_type": "Image Comparer (rgthree)",
+  "_meta": {
+   "title": "Image Comparer (rgthree)"
+  }
+ },
+ "284": {
+  "inputs": {
+   "image_a": [
+    "246",
+    0
+   ],
+   "image_b": [
+    "246",
+    0
+   ]
+  },
+  "class_type": "Image Comparer (rgthree)",
+  "_meta": {
+   "title": "Image Comparer (rgthree)"
+  }
+ },
+ "285": {
+  "inputs": {
+   "image_a": [
+    "246",
+    0
+   ],
+   "image_b": [
+    "246",
+    0
+   ]
+  },
+  "class_type": "Image Comparer (rgthree)",
+  "_meta": {
+   "title": "Image Comparer (rgthree)"
+  }
+ },
+ "922": {
+  "inputs": {
+   "ckpt_name": "animaCatTower_v10.safetensors"
+  },
+  "class_type": "Checkpoint Loader with Name (Image Saver)",
+  "_meta": {
+   "title": "Checkpoint Loader"
+  }
+ },
+ "987": {
+  "inputs": {
+   "string": "bianca_fontaine, platinum_blonde_hair, bob_cut, blunt_bangs, light_blue_eyes, pale_skin, mole_under_mouth, red_lips, tall_female, mature_female, slender, small_breasts, bare_shoulders, adult, aged_up, solo, 1girl, thighs, open_mouth BREAK white_dress, long_dress, backless_dress, sleeveless_dress, asymmetrical_clothes, high_heels, cowboy_shot BREAK car_interior, steering_wheel, fingering, masturbation, pussy_juice BREAK dutch_angle, spread_legs BREAK spotlight, chiaroscuro, high_contrast, indoors, moonlight, dark, intricate_details, window, night, anime_style, detailed_skin, 4k"
+  },
+  "class_type": "String Literal (Image Saver)",
+  "_meta": {
+   "title": "Positive prompt"
+  }
+ },
+ "988": {
+  "inputs": {
+   "string": "score_6, score_5, score_4, (worst_quality:1.2), (low_quality:1.2), (normal_quality:1.2), lowres, bad_anatomy, bad_hands, signature, watermark, ugly, imperfect_eyes, skewed_eyes, unnatural_face, unnatural_body, error, extra_limb, missing_limbs, (floating_penis:1.2), (detached_genitals:1.2), (pubic_hair:1.2), censor, censorship, distorted face, 3d, render, cgi, multiple_boys, monochrome, greyscale, black_and_white"
+  },
+  "class_type": "String Literal (Image Saver)",
+  "_meta": {
+   "title": "Negative prompt"
+  }
+ },
+ "1002": {
+  "inputs": {
+   "model": [
+    "1047",
+    0
+   ],
+   "clip": [
+    "1047",
+    1
+   ],
+   "vae": [
+    "922",
+    2
+   ],
+   "latent": [
+    "250",
+    0
+   ],
+   "seed": [
+    "8",
+    0
+   ]
+  },
+  "class_type": "Context Big (rgthree)",
+  "_meta": {
+   "title": "Context Big (rgthree)"
+  }
+ },
+ "1003": {
+  "inputs": {
+   "model": [
+    "1002",
+    1
+   ],
+   "clip": [
+    "1002",
+    2
+   ],
+   "vae": [
+    "1002",
+    3
+   ],
+   "positive": [
+    "218",
+    0
+   ],
+   "negative": [
+    "219",
+    0
+   ],
+   "latent": [
+    "1002",
+    6
+   ],
+   "seed": [
+    "1002",
+    8
+   ]
+  },
+  "class_type": "Context Big (rgthree)",
+  "_meta": {
+   "title": "Context Big (rgthree)"
+  }
+ },
+ "1004": {
+  "inputs": {
+   "model": [
+    "1027",
+    1
+   ],
+   "clip": [
+    "1027",
+    2
+   ],
+   "vae": [
+    "1027",
+    3
+   ],
+   "positive": [
+    "1027",
+    4
+   ],
+   "negative": [
+    "1027",
+    5
+   ],
+   "latent": [
+    "1027",
+    6
+   ],
+   "seed": [
+    "1027",
+    8
+   ],
+   "steps": [
+    "1027",
+    9
+   ],
+   "cfg": [
+    "1027",
+    11
+   ],
+   "sampler": [
+    "1027",
+    13
+   ],
+   "scheduler": [
+    "1027",
+    14
+   ]
+  },
+  "class_type": "Context Big (rgthree)",
+  "_meta": {
+   "title": "Context Big (rgthree)"
+  }
+ },
+ "1005": {
+  "inputs": {
+   "model": [
+    "1032",
+    1
+   ],
+   "clip": [
+    "1032",
+    2
+   ],
+   "vae": [
+    "1032",
+    3
+   ],
+   "positive": [
+    "1032",
+    4
+   ],
+   "negative": [
+    "1004",
+    5
+   ],
+   "seed": [
+    "1004",
+    8
+   ],
+   "steps": [
+    "1004",
+    9
+   ],
+   "cfg": [
+    "1032",
+    11
+   ],
+   "sampler": [
+    "1032",
+    13
+   ],
+   "scheduler": [
+    "1032",
+    14
+   ],
+   "clip_width": [
+    "1032",
+    15
+   ],
+   "clip_height": [
+    "1032",
+    16
+   ]
+  },
+  "class_type": "Context Big (rgthree)",
+  "_meta": {
+   "title": "Context Big (rgthree)"
+  }
+ },
+ "1006": {
+  "inputs": {
+   "model": [
+    "1005",
+    1
+   ],
+   "clip": [
+    "1005",
+    2
+   ],
+   "vae": [
+    "1005",
+    3
+   ],
+   "positive": [
+    "1038",
+    4
+   ],
+   "negative": [
+    "1038",
+    5
+   ],
+   "seed": [
+    "1038",
+    8
+   ],
+   "steps": [
+    "1038",
+    9
+   ],
+   "cfg": [
+    "1038",
+    11
+   ],
+   "sampler": [
+    "1038",
+    13
+   ],
+   "scheduler": [
+    "1038",
+    14
+   ],
+   "clip_width": [
+    "1038",
+    15
+   ],
+   "clip_height": [
+    "1038",
+    16
+   ]
+  },
+  "class_type": "Context Big (rgthree)",
+  "_meta": {
+   "title": "Context Big (rgthree)"
+  }
+ },
+ "1012": {
+  "inputs": {
+   "seed": [
+    "1003",
+    8
+   ],
+   "steps": 53,
+   "cfg": 4.2,
+   "sampler": "euler_ancestral",
+   "scheduler": "normal",
+   "denoise": 1
+  },
+  "class_type": "Input Parameters (Image Saver)",
+  "_meta": {
+   "title": "Input Parameters (Image Saver)"
+  }
+ },
+ "1027": {
+  "inputs": {
+   "model": [
+    "1003",
+    1
+   ],
+   "clip": [
+    "1003",
+    2
+   ],
+   "vae": [
+    "1003",
+    3
+   ],
+   "positive": [
+    "218",
+    0
+   ],
+   "negative": [
+    "219",
+    0
+   ],
+   "seed": [
+    "1003",
+    8
+   ],
+   "steps": [
+    "1012",
+    1
+   ],
+   "cfg": [
+    "1012",
+    2
+   ],
+   "sampler": [
+    "1012",
+    3
+   ],
+   "scheduler": [
+    "1012",
+    4
+   ]
+  },
+  "class_type": "Context Big (rgthree)",
+  "_meta": {
+   "title": "Context Big (rgthree)"
+  }
+ },
+ "1032": {
+  "inputs": {
+   "model": [
+    "1004",
+    1
+   ],
+   "clip": [
+    "1004",
+    2
+   ],
+   "vae": [
+    "1004",
+    3
+   ],
+   "positive": [
+    "1004",
+    4
+   ],
+   "negative": [
+    "1004",
+    5
+   ],
+   "cfg": [
+    "1004",
+    11
+   ],
+   "sampler": [
+    "1004",
+    13
+   ],
+   "scheduler": [
+    "1004",
+    14
+   ],
+   "clip_width": [
+    "233",
+    1
+   ],
+   "clip_height": [
+    "233",
+    2
+   ]
+  },
+  "class_type": "Context Big (rgthree)",
+  "_meta": {
+   "title": "Context Big (rgthree)"
+  }
+ },
+ "1036": {
+  "inputs": {
+   "images": [
+    "246",
+    0
+   ]
+  },
+  "class_type": "PreviewImage",
+  "_meta": {
+   "title": "Preview Image"
+  }
+ },
+ "1037": {
+  "inputs": {},
+  "_meta": {
+   "title": "Final Image"
+  }
+ },
+ "1038": {
+  "inputs": {
+   "model": [
+    "1005",
+    1
+   ],
+   "clip": [
+    "1005",
+    2
+   ],
+   "vae": [
+    "1005",
+    3
+   ],
+   "positive": [
+    "1005",
+    4
+   ],
+   "negative": [
+    "1005",
+    5
+   ],
+   "seed": [
+    "1005",
+    8
+   ],
+   "steps": [
+    "1005",
+    9
+   ],
+   "sampler": [
+    "1005",
+    13
+   ],
+   "scheduler": [
+    "1005",
+    14
+   ],
+   "clip_width": [
+    "1005",
+    15
+   ],
+   "clip_height": [
+    "1005",
+    16
+   ]
+  },
+  "class_type": "Context Big (rgthree)",
+  "_meta": {
+   "title": "Context Big (rgthree)"
+  }
+ },
+ "1040": {
+  "inputs": {},
+  "_meta": {
+   "title": "civitai.com/user/Cyberdelia"
+  }
+ },
+ "1041": {
+  "inputs": {},
+  "_meta": {
+   "title": "CyberRealistic SDXL Workflow V4"
+  }
+ },
+ "1047": {
+  "inputs": {
+   "model": [
+    "922",
+    0
+   ],
+   "clip": [
+    "922",
+    1
+   ]
+  },
+  "class_type": "Power Lora Loader (rgthree)",
+  "_meta": {
+   "title": "LoRa Loader"
+  }
+ },
+ "1048": {
+  "inputs": {
+   "filename_prefix": "%date:hhmmss%",
+   "subdirectory_name": "image/%date:yyyy-MM-dd%/",
+   "output_format": "png",
+   "quality": "max",
+   "metadata_scope": "parameters_only",
+   "include_batch_num": true,
+   "prefer_nearest": true,
+   "images": [
+    "246",
+    0
+   ]
+  },
+  "class_type": "SaveImageWithMetaData",
+  "_meta": {
+   "title": "Save Image"
+  }
+ }
+}
