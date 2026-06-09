@@ -607,23 +607,22 @@ def _extract_params(wf: dict) -> dict:
     return params
 
 
-# Attributes the list endpoint asks for (see _serialize_job lite=True):
-# everything EXCEPT the bulky workflow_ui (only _get_job uses that) and
-# attempt_count.
+# Attributes the /jobs list endpoint reads off the jobs-by-status GSI (see
+# _serialize_job lite=True). model/character/subject are DENORMALIZED onto each
+# row at dispatch time (services/dispatcher), so the list reads them directly —
+# the jobs-by-status INCLUDE projection carries exactly these small attrs and
+# NOT the ~47 KB workflow_json. That is the read-cost fix: RCU is billed on the
+# stored item size IN THE INDEX, so each list read is ~1 KB instead of ~47 KB.
 #
-# NOTE: this ProjectionExpression only trims the response PAYLOAD (keeping a
-# big /jobs list under Lambda's 6 MB cap) — it does NOT reduce read capacity.
-# DynamoDB charges RCU on the full stored item size in the index being read,
-# not on the projected attributes, and status-index is an ALL projection, so
-# every row billed here costs for its whole ~47 KB item (workflow_json is the
-# bulk) regardless of what we project. The real read-cost levers are reading
-# fewer rows (poll cadence / page size) and shrinking the stored item (move
-# workflow_json/workflow_ui out of the row, or reproject status-index to
-# INCLUDE only these attrs) — not editing this list.
+# Must stay a subset of the index's nonKeyAttributes (infra/lib/stacks/storage.ts
+# jobs-by-status) plus the key attrs (job_id base PK, status/created_at GSI keys,
+# auto-projected). workflow_json is NOT here — the lite list never reads the
+# graph; _serialize_job's workflow_json fallback only fires on the detail path
+# (_get_job, base-table GetItem), so old rows still resolve there.
 _LIST_PROJECTION_ATTRS = (
     "job_id", "type", "status", "created_at", "started_at", "completed_at",
-    "output_keys", "error", "workflow_json", "progress", "instance_type",
-    "cancel_requested",
+    "output_keys", "error", "progress", "instance_type", "cancel_requested",
+    "model", "character", "subject",
 )
 
 
@@ -664,15 +663,15 @@ def _queue_depth() -> dict:
 
 
 def _query_newest(status: str, n: int) -> list:
-    """The `n` newest job records in `status`, via the status-index GSI.
+    """The `n` newest job records in `status`, via the jobs-by-status GSI.
 
     Pages through LastEvaluatedKey until it has `n` items or the status is
-    exhausted (a single Query returns only one ~1 MB page). The
-    ProjectionExpression (_LIST_PROJECTION_ATTRS) keeps the returned PAYLOAD
-    small, but note it does NOT lower read capacity — RCU is billed on the full
-    stored item size in status-index (an ALL projection), so every row costs for
-    its whole ~47 KB item here. Callers should bound `n` (read fewer rows); see
-    _LIST_PROJECTION_ATTRS for the stored-item-size levers."""
+    exhausted (a single Query returns only one ~1 MB page). jobs-by-status is an
+    INCLUDE projection carrying only the small _LIST_PROJECTION_ATTRS (model/
+    character/subject denormalized at dispatch — NO workflow_json), so each row
+    read is ~1 KB instead of the old ALL-projection ~47 KB: ~12x fewer read units
+    per row, and far more rows fit in the 1 MB page. Still bound `n` — read
+    capacity scales with rows read."""
     items: list = []
     kwargs: dict = {}
     names = {f"#p{i}": a for i, a in enumerate(_LIST_PROJECTION_ATTRS)}
@@ -681,7 +680,7 @@ def _query_newest(status: str, n: int) -> list:
     while len(items) < n:
         r = ddb.query(
             TableName=JOBS_TABLE,
-            IndexName="status-index",
+            IndexName="jobs-by-status",
             KeyConditionExpression="#s = :s",
             ExpressionAttributeNames=names,
             ExpressionAttributeValues={":s": {"S": status}},
@@ -701,7 +700,7 @@ def _query_newest(status: str, n: int) -> list:
 def _list_jobs(event: dict) -> dict:
     """GET /jobs?status=complete,failed,cancelled&limit=64&offset=0
 
-    Queries the status-index GSI (paginated — see _query_newest) once per
+    Queries the jobs-by-status GSI (paginated — see _query_newest) once per
     requested status, merges, sorts by submission time (created_at)
     newest-first, then applies offset/limit in Python.
     """
@@ -746,9 +745,18 @@ def _list_jobs(event: dict) -> dict:
 
 
 def _serialize_job(it: dict, lite: bool = False) -> dict:
-    """Shape a raw DDB job item into the API job object. `model`, the prompt
-    sections and the generation params are all derived on the fly from the
-    stored `workflow_json` (the job record itself never carries them).
+    """Shape a raw DDB job item into the API job object.
+
+    `model` and `character`/`subject` are DENORMALIZED onto the row at dispatch
+    time (services/dispatcher), so we read them straight off the item — which is
+    what lets the jobs-by-status GSI omit workflow_json (the read-cost fix). For
+    rows written before denormalization shipped the stored attr is absent, so we
+    fall back to deriving it from workflow_json when that's present. On the lite
+    list path the reprojected GSI no longer carries workflow_json, so an old
+    un-backfilled row simply shows a blank model (cosmetic, self-heals on
+    backfill); on the detail path (_get_job, base-table GetItem) workflow_json is
+    present, so the fallback still works for every row. The prompt sections and
+    generation params are always derived from workflow_json (detail only).
 
     lite=True skips the heavy prompt/param sections — the list endpoint
     doesn't need them (the viewer's modal fetches /jobs/{id} for those), and
@@ -763,7 +771,10 @@ def _serialize_job(it: dict, lite: bool = False) -> dict:
         "completed_at": it.get("completed_at", {"S": ""})["S"],
         "output_keys": json.loads(it.get("output_keys", {"S": "[]"})["S"]),
         "error": it.get("error", {"S": ""})["S"],
-        "model": _extract_model(wf),
+        # Prefer the denormalized attr; derive from workflow_json only for old
+        # rows that predate denormalization (blank on the lite list once the GSI
+        # drops workflow_json — see docstring).
+        "model": it.get("model", {}).get("S", "") or _extract_model(wf),
         "progress": it.get("progress", {}).get("S", ""),
         # The GPU instance type the worker recorded when it claimed the job.
         # Both fleets run mixed instance types (a spot-capacity ASG), so this
@@ -781,7 +792,14 @@ def _serialize_job(it: dict, lite: bool = False) -> dict:
     # history fetch (complete/failed/cancelled, up to 8000 rows) keeps that
     # large list cheap — it never groups by character.
     if out["status"] in ("queued", "running"):
-        character, subject = _extract_subject(wf)
+        # Prefer the denormalized attrs; fall back to deriving from the graph
+        # for old rows (pre-denormalization). cancel-group's _group_key matches
+        # the viewer's group on these, so dispatch-time and read-time derivation
+        # must agree — extract.py mirrors these helpers (lockstep-tested).
+        character = it.get("character", {}).get("S", "")
+        subject = it.get("subject", {}).get("S", "")
+        if not character and not subject:
+            character, subject = _extract_subject(wf)
         out["character"] = character
         if subject:
             out["subject"] = subject

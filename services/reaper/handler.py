@@ -23,6 +23,7 @@ import time
 from datetime import datetime, timezone
 
 import boto3
+from botocore.exceptions import ClientError
 
 ddb = boto3.client("dynamodb")
 sqs = boto3.client("sqs")
@@ -34,7 +35,7 @@ VIDEO_QUEUE_URL = os.environ["VIDEO_QUEUE_URL"]
 REAPER_QUEUE_URL = os.environ["REAPER_QUEUE_URL"]
 FAILED_WORKFLOWS_BUCKET = os.environ["FAILED_WORKFLOWS_BUCKET"]
 
-STATUS_INDEX = "status-index"
+STATUS_INDEX = "jobs-by-status"  # INCLUDE-projection GSI (carries last_heartbeat + attempt_count)
 ZOMBIE_AFTER_SEC = 300   # no heartbeat for 5 min → the worker is gone
 TICK_INTERVAL_SEC = 180  # re-arm cadence while work remains
 MAX_RETRIES = 3          # re-queue a zombie this many times, then give up
@@ -204,7 +205,21 @@ def _archive(item: dict) -> None:
         "attempts": int(item.get("attempt_count", {}).get("N", "0")),
         "archived_at": _now_iso(),
     }
-    raw = item.get("workflow_json", {}).get("S", "")
+    # workflow_json is NOT on the jobs-by-status GSI (the read-cost reproject dropped
+    # it), and `item` here came from a GSI query — so fetch the graph with a
+    # targeted base-table GetItem rather than reading it off `item` (which would
+    # archive an empty workflow). One extra read, only on jobs that exhausted all
+    # retries (rare).
+    try:
+        got = ddb.get_item(
+            TableName=JOBS_TABLE,
+            Key={"job_id": {"S": job_id}},
+            ProjectionExpression="workflow_json",
+        )
+        raw = got.get("Item", {}).get("workflow_json", {}).get("S", "")
+    except ClientError as e:
+        print(f"reaper: could not fetch workflow_json for {job_id} to archive: {e!r}")
+        raw = ""
     try:
         record["workflow"] = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
@@ -219,7 +234,7 @@ def _archive(item: dict) -> None:
 
 
 def _query_status(status: str) -> list:
-    """All job records in a given status, via the status-index GSI."""
+    """All job records in a given status, via the jobs-by-status GSI."""
     items: list = []
     kwargs: dict = {}
     while True:

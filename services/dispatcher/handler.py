@@ -30,6 +30,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from anima import maybe_rewrite_to_anima
+from extract import _extract_model, _extract_subject
 from workflow_router import classify_workflow
 
 # AWS clients are created at module load (re-used across warm invocations).
@@ -221,7 +222,7 @@ def _arm_reaper() -> None:
         )["Attributes"]
         pending = sum(int(attrs.get(k, "0")) for k in depth_attrs)
         if pending == 0:  # chain dormant — seed it
-            # Small delay so the job record propagates to the status-index GSI
+            # Small delay so the job record propagates to the jobs-by-status GSI
             # before the reaper's first sweep reads it (and decides whether to
             # keep the tick chain alive).
             sqs.send_message(
@@ -278,6 +279,24 @@ def _post_prompt(event: dict) -> dict:
         # True when the submitted graph was swapped for the Anima workflow.
         "anima_rewritten": {"BOOL": anima_rewritten},
     }
+    # Denormalize the fields the /jobs list derives — model (all rows; the
+    # gallery's model label) and character/subject (the pending-strip grouping)
+    # — as small attrs (~120 B) computed from the SAME `workflow` we store in
+    # workflow_json. This lets the jobs-by-status GSI omit the ~47 KB workflow_json
+    # from its projection (the read-cost fix): once the GSI is reprojected
+    # ALL->INCLUDE the list WILL read these attrs off the index instead of paying
+    # to read the whole graph per row (until then the GSI is still ALL, so this
+    # just populates the attrs). The derivation MUST match the status Lambda's
+    # read-time logic — extract.py is a verbatim mirror, enforced by
+    # test_extract_lockstep.py. Stored only when non-empty.
+    model = _extract_model(workflow)
+    character, subject = _extract_subject(workflow)
+    if model:
+        item["model"] = {"S": model}
+    if character:
+        item["character"] = {"S": character}
+    if subject:
+        item["subject"] = {"S": subject}
     # workflow_json above is the API-format prompt (what the worker executes).
     # The editor also sends its full UI workflow — node layout, groups, the
     # UI-only nodes — at extra_data.extra_pnginfo.workflow. Keep it so the
@@ -1411,7 +1430,7 @@ def _get_history_list(event: dict) -> dict:
     try:
         for page in paginator.paginate(
             TableName=JOBS_TABLE,
-            IndexName="status-index",
+            IndexName="jobs-by-status",
             KeyConditionExpression="#s = :s",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={":s": {"S": "complete"}},
