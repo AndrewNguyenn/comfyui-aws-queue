@@ -851,17 +851,33 @@
     });
   }
 
-  // Cancel a whole queued group — every job collapsed into the row. Optimistic:
-  // collapse the row out, then re-render once the requests land. Rollback is
-  // per-id: a job whose cancel succeeded stays hidden even if a sibling failed.
+  // Cancel a whole queued group — the ENTIRE character stack, not just the ids
+  // we loaded. group.ids only holds the fetched sample, so we POST the group's
+  // identity and let the server cancel every queued job that matches (see
+  // _cancel_group in services/status/handler.py). Optimistic: collapse the row
+  // and mark the loaded ids cancelling for instant feedback; the rest of the
+  // stack drops on the next feed refresh (they're now "cancelled", not queued).
   async function cancelGroup(group, rowEl) {
     group.ids.forEach((id) => cancelling.add(id));
     if (rowEl) rowEl.classList.add("removing");
-    const results = await Promise.all(
-      group.ids.map(async (id) => [id, await cancelJob(id)]));
-    const failed = results.filter(([, ok]) => !ok).map(([id]) => id);
-    if (failed.length) {
-      failed.forEach((id) => cancelling.delete(id));
+    let ok = false;
+    try {
+      const r = await authedFetch("/jobs/cancel-group", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: group.kind,
+          model: group.model,
+          character: group.character,
+          subject: group.subject,
+        }),
+      });
+      ok = r.ok;
+    } catch (_e) {
+      ok = false;
+    }
+    if (!ok) {
+      group.ids.forEach((id) => cancelling.delete(id));
       showToast("Couldn't cancel — try again.");
     }
     setTimeout(renderPending, rowEl ? ROW_COLLAPSE_MS : 0);
