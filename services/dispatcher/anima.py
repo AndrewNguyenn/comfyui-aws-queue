@@ -14,10 +14,14 @@ So: when a submitted prompt references an Anima model, we **discard the submitte
 graph** and run the official Anima workflow instead, carrying over only
 (a) the user's chosen Anima model and (b) their positive/negative prompt text.
 
-We substitute the **AnimaStandard** variant: a txt2img graph (EmptyLatent →
-KSampler → VAEDecode → save-with-metadata) that generates from the prompt. The
-AnimaDetailer variant is intentionally NOT used — its base sampler is bypassed in
-the shipped file (it details a loaded image), so it can't generate from a prompt.
+We substitute the **AnimaStandardDetailer** template: the AnimaStandard txt2img
+graph (EmptyLatent → KSampler → VAEDecode → save-with-metadata) with the Hand /
+Face / Eyes ADetailer passes and the hires-fix 2x upscale enabled (the stylistic
+post-FX, NSFW detailer, and img2img path stay bypassed). Produced by un-bypassing
+those groups in the official AnimaStandard UI workflow and re-converting via
+ComfyUI's graphToPrompt; validated end-to-end on an A10G worker. (The shipped
+AnimaDetailerV6 file is NOT used directly — its base sampler is bypassed, so it
+can't generate from a prompt.)
 
 Detection is an **explicit allowlist** (``ANIMA_MODELS``) — deliberately NOT a
 name heuristic: "anime"-named SDXL checkpoints (e.g. ``novaAnimeXL_ilV190``,
@@ -177,7 +181,7 @@ def extract_prompts(workflow: dict) -> tuple[str, str]:
 # Template + injection
 # ---------------------------------------------------------------------------
 
-_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "anima_templates", "AnimaStandardV6.api.json")
+_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "anima_templates", "AnimaStandardDetailer.api.json")
 _template_cache: Optional[dict] = None
 
 # Titles of the ImpactWildcardProcessor nodes that hold the prompt text in the
