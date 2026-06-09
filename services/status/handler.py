@@ -607,9 +607,19 @@ def _extract_params(wf: dict) -> dict:
     return params
 
 
-# Attributes the list endpoint needs (see _serialize_job lite=True) —
-# everything EXCEPT the bulky workflow_ui (only _get_job uses that; it can be
-# ~90 KB/record and would otherwise dominate the GSI read) and attempt_count.
+# Attributes the list endpoint asks for (see _serialize_job lite=True):
+# everything EXCEPT the bulky workflow_ui (only _get_job uses that) and
+# attempt_count.
+#
+# NOTE: this ProjectionExpression only trims the response PAYLOAD (keeping a
+# big /jobs list under Lambda's 6 MB cap) — it does NOT reduce read capacity.
+# DynamoDB charges RCU on the full stored item size in the index being read,
+# not on the projected attributes, and status-index is an ALL projection, so
+# every row billed here costs for its whole ~47 KB item (workflow_json is the
+# bulk) regardless of what we project. The real read-cost levers are reading
+# fewer rows (poll cadence / page size) and shrinking the stored item (move
+# workflow_json/workflow_ui out of the row, or reproject status-index to
+# INCLUDE only these attrs) — not editing this list.
 _LIST_PROJECTION_ATTRS = (
     "job_id", "type", "status", "created_at", "started_at", "completed_at",
     "output_keys", "error", "workflow_json", "progress", "instance_type",
@@ -657,9 +667,12 @@ def _query_newest(status: str, n: int) -> list:
     """The `n` newest job records in `status`, via the status-index GSI.
 
     Pages through LastEvaluatedKey until it has `n` items or the status is
-    exhausted (a single Query returns only one ~1 MB page). Projects only the
-    attributes the list needs — crucially NOT workflow_ui — so a record's size
-    on the wire stays small even as workflows grow."""
+    exhausted (a single Query returns only one ~1 MB page). The
+    ProjectionExpression (_LIST_PROJECTION_ATTRS) keeps the returned PAYLOAD
+    small, but note it does NOT lower read capacity — RCU is billed on the full
+    stored item size in status-index (an ALL projection), so every row costs for
+    its whole ~47 KB item here. Callers should bound `n` (read fewer rows); see
+    _LIST_PROJECTION_ATTRS for the stored-item-size levers."""
     items: list = []
     kwargs: dict = {}
     names = {f"#p{i}": a for i, a in enumerate(_LIST_PROJECTION_ATTRS)}
