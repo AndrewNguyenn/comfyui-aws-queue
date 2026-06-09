@@ -724,7 +724,7 @@
         `</section>`;
     }
     const groups = groupQueue(queued);
-    // The fetched sample caps at 500 rows, but queuedTotal is the true SQS
+    // The fetched sample caps at 100 rows, but queuedTotal is the true SQS
     // backlog. Scale each group's *displayed* count up to that total so the
     // chips reflect real queue depth — exact for a single-model batch, a
     // proportional estimate from the newest-sample when models are mixed.
@@ -760,7 +760,7 @@
       (m, g) => (g.oldest && (!m || g.oldest < m) ? g.oldest : m), "");
     // The expand/collapse toggle only makes sense when there are extra sample
     // groups to reveal. A remainder that ISN'T a collapsible group — the sample
-    // truncated at 500, or a small SQS overcount — gets no button (clicking
+    // truncated at the page limit, or a small SQS overcount — gets no button (clicking
     // would reveal nothing); the foot's queuedTotal still tells the true count.
     const hasCollapsible = groups.length > VISIBLE;
     const moreBtn = hasCollapsible
@@ -910,7 +910,7 @@
         // otherwise cancel dozens of jobs that can't be un-cancelled (only
         // re-queued). n is the displayed (SQS-scaled) count; `removable` is the
         // sampled ids the cancel can actually act on — if the queue ran past
-        // the 500-row sample, say what the cancel really removes.
+        // the loaded sample, say what the cancel really removes.
         const n = g.shown != null ? g.shown : g.count;
         const removable = g.ids ? g.ids.length : g.count;
         const named = subjectLabel(g.character, g.subject);
@@ -948,12 +948,19 @@
       // created_at) crowd the running/failed rows out of the window ("0
       // running"). So: /backlog gives the count; per-status /jobs queries give
       // the rows — running/failed in full (only a handful exist), queued as a
-      // display sample (500) for the grouped rows. The four calls are a
+      // small display sample for the grouped rows. The four calls are a
       // non-atomic snapshot (a job mid-flip can be briefly absent from all of
       // them) — fine; the gallery refresh below is best-effort and self-corrects.
+      // Why so small: each queued row read off the status-index GSI bills for
+      // the full ~47 KB job item (DynamoDB charges read capacity on the stored
+      // item size, NOT on the projected attributes), so this page dominated
+      // DynamoDB read cost. The sample only feeds up to 3 character chips whose
+      // displayed counts are scaled to the exact SQS `queuedTotal`
+      // (buildPendingHtml), and cancel acts server-side by identity (not on
+      // these ids), so 100 newest rows are plenty.
       const [qDepth, qd, rn, fl] = await Promise.all([
         authedFetch(`/backlog`),
-        authedFetch(`/jobs?status=queued&limit=500`),
+        authedFetch(`/jobs?status=queued&limit=100`),
         authedFetch(`/jobs?status=running&limit=50`),
         authedFetch(`/jobs?status=failed&limit=50`),
       ]);
@@ -1284,6 +1291,19 @@
   (async () => {
     await loadJobs();
     await renderPending();
-    setInterval(renderPending, 4000);
+    // Poll the pending strip, but only while the tab is visible. The old fixed
+    // 4s interval kept reading the status-index GSI forever — even in a
+    // backgrounded tab left open for hours — and each tick reads ~150 (large)
+    // job rows, which was the dominant DynamoDB read cost. 15s is ample for a
+    // backlog gauge; a hidden tab polls not at all, and refreshes once the
+    // moment it's brought back to the foreground so the user never sees stale
+    // data on return.
+    const POLL_MS = 15000;
+    setInterval(() => {
+      if (document.visibilityState === "visible") renderPending();
+    }, POLL_MS);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") renderPending();
+    });
   })();
 })();
