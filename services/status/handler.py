@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -54,6 +55,8 @@ def lambda_handler(event: dict, _context: Any) -> dict:
             return _delete_job(event)
         if method == "POST" and path == "/jobs/{id}/cancel":
             return _cancel_job(event)
+        if method == "POST" and path == "/jobs/cancel-group":
+            return _cancel_group(event)
         if method == "GET" and path == "/backlog":
             return _queue_depth()
         if method == "GET" and path == "/view":
@@ -876,6 +879,92 @@ def _cancel_job(event: dict) -> dict:
         return _resp(200, {"job_id": job_id, "state": "cancelling"})
 
     return _resp(409, {"error": f"job is {status or 'unknown'}, cannot cancel"})
+
+
+def _group_key(j: dict) -> tuple:
+    """The viewer's pending-strip group key for a serialized job — MIRRORS
+    groupQueue() in frontend/viewer/app.js: (type, model||type||'job',
+    character||subject). The bulk cancel matches on this so it cancels exactly
+    the stack the viewer collapses into one row. Keep in lockstep with the JS."""
+    model = j.get("model") or j.get("type") or "job"
+    return (j.get("type") or "", model, (j.get("character") or "") or (j.get("subject") or ""))
+
+
+# A character stack is at most a few hundred jobs; 5000 covers any real case,
+# and scanning+deriving that many mirrors what _list_jobs already does per call.
+_CANCEL_GROUP_SCAN_CAP = 5000
+
+
+def _cancel_group(event: dict) -> dict:
+    """POST /jobs/cancel-group — cancel an ENTIRE character stack, not just the
+    rows the viewer happened to load.
+
+    The viewer groups the pending strip by (type, model, character||subject) but
+    only knows the job ids in its fetched sample, so a client-side group-cancel
+    cancels only that sample (~the page). This re-derives the same group key for
+    EVERY queued/running job server-side — reusing _serialize_job, the single
+    source of truth the listing and the viewer's grouping both rely on — and
+    cancels every match, so the whole stack drops.
+
+    Body: {type, model, character, subject} (a viewer group's identity). Queued
+    matches → "cancelled" (worker discards on dequeue); running matches →
+    cancel_requested (worker interrupts). Returns the counts."""
+    body = json.loads(event.get("body") or "{}")
+    want = _group_key({
+        "type": body.get("type") or "",
+        "model": body.get("model") or "",
+        "character": body.get("character") or "",
+        "subject": body.get("subject") or "",
+    })
+    if not want[0] and not want[2]:
+        return _resp(400, {"error": "cancel-group needs at least a type or character/subject"})
+
+    # Stay under the StatusFn 29s API-GW timeout; a partial cancel is fine (the
+    # viewer can re-issue, and the next call resumes over what's still queued).
+    deadline = time.monotonic() + 25.0
+
+    cancelled = 0
+    for it in _query_newest("queued", _CANCEL_GROUP_SCAN_CAP):
+        if time.monotonic() > deadline:
+            break
+        j = _serialize_job(it, lite=True)
+        if _group_key(j) != want:
+            continue
+        try:
+            ddb.update_item(
+                TableName=JOBS_TABLE,
+                Key={"job_id": {"S": j["job_id"]}},
+                UpdateExpression="SET #s = :cancelled, cancelled_at = :t",
+                ConditionExpression="#s = :queued",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":cancelled": {"S": "cancelled"},
+                    ":queued": {"S": "queued"},
+                    ":t": {"S": datetime.now(timezone.utc).isoformat()},
+                },
+            )
+            cancelled += 1
+        except ClientError as e:
+            # Lost the race to a worker (no longer queued) — the running pass
+            # below / the row's own cancel covers it. Re-raise anything else.
+            if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+
+    # Also stop a currently-running job of this stack (running set is small).
+    cancelling = 0
+    for it in _query_newest("running", 200):
+        j = _serialize_job(it, lite=True)
+        if _group_key(j) != want:
+            continue
+        ddb.update_item(
+            TableName=JOBS_TABLE,
+            Key={"job_id": {"S": j["job_id"]}},
+            UpdateExpression="SET cancel_requested = :true",
+            ExpressionAttributeValues={":true": {"BOOL": True}},
+        )
+        cancelling += 1
+
+    return _resp(200, {"cancelled": cancelled, "cancelling": cancelling})
 
 
 def _view(event: dict) -> dict:

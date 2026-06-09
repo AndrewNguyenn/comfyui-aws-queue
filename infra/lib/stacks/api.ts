@@ -363,6 +363,10 @@ export class ApiStack extends Stack {
     // /jobs (list — editor queue/history) + /jobs/{id} (single)
     const jobsRoot = root.addResource('jobs');
     jobsRoot.addMethod('GET', statusIntegration, authMethodOptions);
+    // /jobs/cancel-group — cancel an entire character stack (POST body: group
+    // identity {type,model,character,subject}). Registered before /jobs/{id} so
+    // the literal path wins over the {id} greedy param.
+    jobsRoot.addResource('cancel-group').addMethod('POST', statusIntegration, authMethodOptions);
     const jobs = jobsRoot.addResource('{id}');
     jobs.addMethod('GET', statusIntegration, authMethodOptions);
     jobs.addMethod('DELETE', statusIntegration, authMethodOptions);

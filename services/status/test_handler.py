@@ -7,6 +7,7 @@ clients are created at import time, so we stub them before importing the
 handler.
 """
 import importlib.util
+import json
 import os
 import sys
 import types
@@ -234,6 +235,51 @@ def test_serialize_job_only_adds_character_for_pending_statuses():
     # gallery rows (complete/failed/cancelled) never group by character, so the
     # field is omitted to keep the big history fetch cheap
     assert "character" not in done
+
+
+def test_group_key_mirrors_frontend_grouping():
+    # (type, model||type||'job', character||subject) — must match groupQueue() in app.js.
+    assert h._group_key({"type": "image", "model": "catpony", "character": "aqua", "subject": ""}) \
+        == ("image", "catpony", "aqua")
+    # no character → the subject hint is the key part (unnamed-figure grouping)
+    assert h._group_key({"type": "image", "model": "m", "character": "", "subject": "blue_hair figure"}) \
+        == ("image", "m", "blue_hair figure")
+    # no model → falls back to type, then 'job'
+    assert h._group_key({"type": "video", "model": "", "character": "rem", "subject": ""}) \
+        == ("video", "video", "rem")
+    assert h._group_key({"type": "", "model": "", "character": "", "subject": ""}) == ("", "job", "")
+
+
+def test_cancel_group_cancels_the_whole_stack_not_a_sample():
+    # The bug this fixes: cancelling a group must hit EVERY matching queued job,
+    # not just the ids the viewer loaded. Patch the query + serializer + ddb.
+    saved = (h.ddb, h._query_newest, h._serialize_job)
+    cancelled_ids = []
+    fake = types.SimpleNamespace(
+        update_item=lambda **kw: cancelled_ids.append(kw["Key"]["job_id"]["S"]))
+    # 6 queued jobs: 4 in the target stack (aqua), 2 in another (rem).
+    chars = {"j0": "aqua", "j1": "rem", "j2": "aqua", "j3": "aqua", "j4": "rem", "j5": "aqua"}
+    items = [{"job_id": {"S": jid}} for jid in chars]
+    try:
+        h.ddb = fake
+        h._query_newest = lambda status, n: items if status == "queued" else []
+        h._serialize_job = lambda it, lite=False: {
+            "job_id": it["job_id"]["S"], "type": "image", "model": "catpony",
+            "character": chars[it["job_id"]["S"]], "subject": "",
+        }
+        resp = h._cancel_group({"body": json.dumps(
+            {"type": "image", "model": "catpony", "character": "aqua", "subject": ""})})
+    finally:
+        h.ddb, h._query_newest, h._serialize_job = saved
+    body = json.loads(resp["body"])
+    assert resp["statusCode"] == 200, resp
+    assert body["cancelled"] == 4, body                      # all 4 aqua — not a sample
+    assert sorted(cancelled_ids) == ["j0", "j2", "j3", "j5"]  # exactly the aqua ids
+
+
+def test_cancel_group_rejects_empty_identity():
+    resp = h._cancel_group({"body": json.dumps({"type": "", "character": "", "subject": ""})})
+    assert resp["statusCode"] == 400, resp
 
 
 if __name__ == "__main__":
