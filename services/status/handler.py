@@ -278,7 +278,7 @@ _NON_CHARACTER_TAGS = frozenset({
     # lineage) almost always lead with these, so they MUST be skipped or every
     # batch collapses under "masterpiece"/"score_9". (score_N is also caught by
     # _SCORE_RE below, which covers score_8_up / score_9_up / … variants.)
-    "masterpiece", "best_quality", "high_quality", "normal_quality",
+    "masterpiece", "masterwork", "best_quality", "high_quality", "normal_quality",
     "low_quality", "worst_quality", "amazing_quality", "great_quality",
     "good_quality", "ultra-detailed", "ultra_detailed", "highly_detailed",
     "very_aesthetic", "aesthetic", "absurdres", "highres", "hires", "lowres",
@@ -396,7 +396,8 @@ _FRANCHISES = frozenset({
     "re:zero", "enen_no_shouboutai", "fire_force", "akame_ga_kill",
     "kill_la_kill", "goblin_slayer!", "goblin_slayer", "soul_calibur",
     "nier:automata", "nier_automata", "one_punch_man", "final_fantasy",
-    "final_fantasy_vii", "bleach", "dragon_ball",
+    "final_fantasy_vii", "bleach", "dragon_ball", "high_school_dxd",
+    "highschool_dxd",
 })
 
 

@@ -126,6 +126,10 @@ def test_character_is_first_non_framing_tag():
         # content is a franchise, not a category qualifier)
         "close-up BREAK fubuki_(one_punch_man), green_dress, black_hair":
             "fubuki_(one_punch_man)",
+        # "masterwork" is a quality synonym (like masterpiece), skipped
+        "masterwork, (masterpiece,_best_quality:1.2), very_awa BREAK rossweisse, "
+        "high_school_dxd, grey_hair":
+            "rossweisse",
     }
     for prompt, expected in cases.items():
         assert h._character_from_prompt(prompt) == expected, (prompt, h._character_from_prompt(prompt))
