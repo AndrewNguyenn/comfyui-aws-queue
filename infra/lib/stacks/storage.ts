@@ -187,10 +187,29 @@ export class StorageStack extends Stack {
       timeToLiveAttribute: 'expire_at',
       removalPolicy: RemovalPolicy.RETAIN,
     });
+    // jobs-by-status: the status GSI backing the /jobs list, cancel-group, and
+    // reaper sweeps. An INCLUDE projection of only the small attrs readers need
+    // (the /jobs list attrs + model/character/subject denormalized at dispatch,
+    // PLUS last_heartbeat + attempt_count which the reaper reads for zombie
+    // detection + retry counting) — deliberately NOT the ~47 KB workflow_json.
+    // DynamoDB bills GSI read capacity on the STORED item size in the index, so
+    // each list read is ~1 KB instead of ~47 KB (~12x fewer read units/row, and
+    // far less GSI write amplification). status/created_at are the GSI keys and
+    // job_id is the base PK — all auto-projected; workflow_json/workflow_ui are
+    // excluded (readers fall back to a base-table GetItem for the graph). This
+    // replaced an ALL-projection 'status-index' via a zero-downtime cutover
+    // (add new index -> switch readers -> drop old), 2026-06-09.
     this.jobsTable.addGlobalSecondaryIndex({
-      indexName: 'status-index',
+      indexName: 'jobs-by-status',
       partitionKey: { name: 'status', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'created_at', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.INCLUDE,
+      nonKeyAttributes: [
+        'type', 'started_at', 'completed_at', 'output_keys', 'error',
+        'progress', 'instance_type', 'cancel_requested',
+        'model', 'character', 'subject',
+        'last_heartbeat', 'attempt_count',
+      ],
     });
 
     this.downloadsTable = new dynamodb.Table(this, 'DownloadsTable', {
