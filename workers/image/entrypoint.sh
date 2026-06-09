@@ -34,9 +34,9 @@ mkdir -p "$CACHE_ROOT/mount-s3"
 echo "cache root: $(df -h "$CACHE_ROOT" | tail -1 | awk '{print $1 " " $2}')"
 
 # Compute the per-mount disk cache budget so the sum across all mounts can't
-# exceed the available NVMe. NVMe minus a 10 GB OS/container reserve, divided
-# by the number of mounts in TYPES below. Cached as CACHE_PER_MOUNT_MB.
-# Computed after TYPES is loaded so we know the divisor.
+# exceed the available NVMe. NVMe minus a 10 GB OS/container reserve, split by
+# per-type WEIGHTS (checkpoint-heavy) — see cache_weight() below. Computed after
+# TYPES is loaded so we know the weight total.
 
 # ----- 1. mount-s3 per model type -----
 # We mount each catalog type at its ComfyUI directory name. S3 layout is
@@ -57,19 +57,41 @@ else
         TYPES[$key]=$val
     done < <(cd /opt/worker && python3 -m model_types --bash)
 
-    # Per-mount cache size = (NVMe_MiB - 10 GiB reserve) / num_mounts, floored
-    # so the sum stays bounded. mount-s3 LRU-evicts within each per-mount cap.
+    # Per-mount cache budget is WEIGHTED, not an even split. The image fleet is
+    # checkpoint-heavy (SDXL), so the checkpoints mount gets the lion's share to
+    # hold the pinned hot-set (multiple ~7 GB checkpoints), while mounts this
+    # fleet never uses (diffusion_models / unet / text_encoders — Flux/video-class)
+    # get a small floor. Each cap = weight/total_weight * (NVMe - reserve), so the
+    # sum stays bounded below the NVMe regardless of instance/disk size, and
+    # mount-s3 LRU-evicts within each per-mount cap. (Video keeps the even split —
+    # its workload needs the diffusion/unet caches; see workers/video/entrypoint.sh.)
+    cache_weight() {
+        case "$1" in
+            checkpoint) echo 45 ;;   # the pinned hot-set lives here (~90 GiB on a 250 GB NVMe)
+            lora)       echo 25 ;;
+            controlnet) echo 8 ;;
+            upscale)    echo 5 ;;
+            ipadapter)  echo 5 ;;
+            vae)        echo 2 ;;
+            *)          echo 1 ;;     # light / unused on the image fleet
+        esac
+    }
     NVME_MIB=$(df -m --output=avail "$CACHE_ROOT" | tail -1 | tr -d ' ')
-    NUM_MOUNTS=${#TYPES[@]}
     RESERVE_MIB=10240
-    CACHE_PER_MOUNT_MB=$(( (NVME_MIB - RESERVE_MIB) / NUM_MOUNTS ))
-    if [ "$CACHE_PER_MOUNT_MB" -lt 512 ]; then CACHE_PER_MOUNT_MB=512; fi
-    echo "NVMe ${NVME_MIB} MiB / ${NUM_MOUNTS} mounts → ${CACHE_PER_MOUNT_MB} MiB per mount"
+    AVAIL_MIB=$(( NVME_MIB - RESERVE_MIB ))
+    if [ "$AVAIL_MIB" -lt 1024 ]; then AVAIL_MIB=1024; fi
+    TOTAL_WEIGHT=0
+    for s3_type in "${!TYPES[@]}"; do
+        TOTAL_WEIGHT=$(( TOTAL_WEIGHT + $(cache_weight "$s3_type") ))
+    done
+    echo "NVMe ${NVME_MIB} MiB, ${AVAIL_MIB} MiB cacheable across weight ${TOTAL_WEIGHT}"
 
     for s3_type in "${!TYPES[@]}"; do
         comfy_dir=${TYPES[$s3_type]}
         mount_at="$COMFY_MODELS/$comfy_dir"
         cache_dir="$CACHE_ROOT/mount-s3/$s3_type"
+        cache_mb=$(( AVAIL_MIB * $(cache_weight "$s3_type") / TOTAL_WEIGHT ))
+        if [ "$cache_mb" -lt 512 ]; then cache_mb=512; fi
         mkdir -p "$mount_at" "$cache_dir"
         if mountpoint -q "$mount_at"; then
             MOUNTS+=("$mount_at")
@@ -81,12 +103,12 @@ else
         if mount-s3 \
                 --prefix "$s3_type/" \
                 --cache "$cache_dir" \
-                --max-cache-size "$CACHE_PER_MOUNT_MB" \
+                --max-cache-size "$cache_mb" \
                 --allow-other \
                 --metadata-ttl 60 \
                 --read-only \
                 "$MODELS_BUCKET" "$mount_at"; then
-            echo "  mounted s3://$MODELS_BUCKET/$s3_type/ at $mount_at"
+            echo "  mounted s3://$MODELS_BUCKET/$s3_type/ at $mount_at (cache ${cache_mb} MiB)"
             MOUNTS+=("$mount_at")
         else
             echo "  WARN: mount-s3 failed for $s3_type (continuing)"
