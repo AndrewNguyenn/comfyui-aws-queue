@@ -338,12 +338,33 @@ _APPEARANCE_TAGS = frozenset({
 })
 
 
+# Booru `_(X)` disambiguator qualifiers that are CATEGORIES, not franchises:
+# painting_(object), sword_(weapon), apple_(fruit). A name_(X) tag is only a
+# character when X is a franchise — so we skip the ones whose X is a generic
+# category. (This is the small, bounded inverse of "X is a franchise"; a real
+# character's franchise like one_punch_man is NOT in here.)
+_PAREN_QUALIFIERS = frozenset({
+    "object", "medium", "artwork", "traditional_media", "weapon", "food",
+    "fruit", "vegetable", "vehicle", "animal", "plant", "instrument",
+    "furniture", "clothing", "company", "store", "song", "album", "meme",
+    "concept", "material", "body_part", "flower",
+})
+
+
+def _paren_content(tag: str) -> str:
+    """The X in a name_(X) tag — painting_(object) → 'object'. "" if no parens."""
+    i = tag.find("_(")
+    return tag[i + 2:-1] if (i >= 0 and tag.endswith(")")) else ""
+
+
 def _is_lead_tag(norm: str) -> bool:
     """True for tags that precede the character — quality/score/framing/focus/
-    count/persona leads and inline <lora:…> tokens. These are skipped."""
+    count/persona leads, inline <lora:…> tokens, and name_(category) qualifier
+    tags (painting_(object)). These are skipped."""
     return (norm in _NON_CHARACTER_TAGS
             or norm.endswith("_focus")     # *_focus is always framing
             or norm.startswith("<")        # <lora:foo:0.8> etc.
+            or _paren_content(norm) in _PAREN_QUALIFIERS  # painting_(object)
             or bool(_SCORE_RE.match(norm)))
 
 
@@ -374,7 +395,8 @@ _FRANCHISES = frozenset({
     "spy_x_family", "chainsaw_man", "my_hero_academia", "boku_no_hero_academia",
     "re:zero", "enen_no_shouboutai", "fire_force", "akame_ga_kill",
     "kill_la_kill", "goblin_slayer!", "goblin_slayer", "soul_calibur",
-    "nier:automata", "nier_automata",
+    "nier:automata", "nier_automata", "one_punch_man", "final_fantasy",
+    "final_fantasy_vii", "bleach", "dragon_ball",
 })
 
 

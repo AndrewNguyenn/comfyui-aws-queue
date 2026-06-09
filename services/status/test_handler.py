@@ -117,6 +117,15 @@ def test_character_is_first_non_framing_tag():
         "extreme_close-up, macro, from_front, face_focus BREAK sword_maiden, "
         "goblin_slayer!, blonde_hair, blindfold, huge_breasts":
             "sword_maiden",
+        # name_(category) qualifier tags are skipped — painting_(object) is a
+        # medium tag, not a character; the real character follows
+        "from_front BREAK painting_(object), tifa_lockhart, final_fantasy_vii, "
+        "brown_hair":
+            "tifa_lockhart",
+        # a real name_(franchise) parenthetical is still a character (the paren
+        # content is a franchise, not a category qualifier)
+        "close-up BREAK fubuki_(one_punch_man), green_dress, black_hair":
+            "fubuki_(one_punch_man)",
     }
     for prompt, expected in cases.items():
         assert h._character_from_prompt(prompt) == expected, (prompt, h._character_from_prompt(prompt))
