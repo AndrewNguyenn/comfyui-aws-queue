@@ -14,12 +14,15 @@ So: when a submitted prompt references an Anima model, we **discard the submitte
 graph** and run the official Anima workflow instead, carrying over only
 (a) the user's chosen Anima model and (b) their positive/negative prompt text.
 
-We substitute the **AnimaStandardDetailer** template: the AnimaStandard txt2img
-graph (EmptyLatent → KSampler → VAEDecode → save-with-metadata) with the Hand /
-Face / Eyes ADetailer passes and the hires-fix 2x upscale enabled (the stylistic
-post-FX, NSFW detailer, and img2img path stay bypassed). Produced by un-bypassing
-those groups in the official AnimaStandard UI workflow and re-converting via
-ComfyUI's graphToPrompt; validated end-to-end on an A10G worker. (The shipped
+We substitute the **AnimaStandardFull** template: the AnimaStandard txt2img graph
+(EmptyLatent → KSampler → VAEDecode → save-with-metadata) carrying ALL FOUR
+ADetailer passes (Hand / NSFW / Face / Eyes) plus the hires-fix upscale, then
+REDUCE it to the subset the submission asked for via ``anima_options`` (see
+``_apply_anima_options``). With no options the reduction reproduces the old
+AnimaStandardDetailer result exactly — hand/face/eyes on, nsfw off, upscale on at
+2.0x — so today's behavior is preserved. Produced by un-bypassing those groups in
+the official AnimaStandard UI workflow and re-converting via ComfyUI's
+graphToPrompt; validated end-to-end on an A10G worker. (The shipped
 AnimaDetailerV6 file is NOT used directly — its base sampler is bypassed, so it
 can't generate from a prompt.)
 
@@ -51,6 +54,10 @@ _SEED_MAX = 2 ** 50
 # the catalog. NOTE: an Anima model must also be cataloged as ``diffusion_models``
 # (and live under the diffusion_models/ S3 prefix) so the template's UNETLoader
 # can find it — see project notes.
+# DUPLICATED in comfytaggenerator/index.html (cbNormalizeModel + ANIMA_MODELS, which
+# gate the Anima toggle UI). Keep both in sync when adding a model — the frontend
+# can't import this. (Follow-up: expose an is_anima flag on the models endpoint so
+# the frontend derives it instead of hardcoding.)
 ANIMA_MODELS: frozenset[str] = frozenset(
     {
         "anima_basev10",
@@ -181,7 +188,7 @@ def extract_prompts(workflow: dict) -> tuple[str, str]:
 # Template + injection
 # ---------------------------------------------------------------------------
 
-_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "anima_templates", "AnimaStandardDetailer.api.json")
+_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "anima_templates", "AnimaStandardFull.api.json")
 _template_cache: Optional[dict] = None
 
 # Titles of the ImpactWildcardProcessor nodes that hold the prompt text in the
@@ -242,7 +249,215 @@ def _neutralize_widget_to_string(workflow: dict, model: str) -> None:
         del workflow[nid]
 
 
-def build_anima_workflow(model: str, positive: str, negative: str) -> dict:
+# ---------------------------------------------------------------------------
+# Detailer / upscale reduction (AnimaStandardFull -> the user's selected subset)
+# ---------------------------------------------------------------------------
+#
+# The Full template ships ALL FOUR detailers (hand/nsfw/face/eyes) + the hires-fix
+# upscale. A submission's optional ``anima_options`` turns each off; we splice the
+# unwanted nodes out of the graph (the same passthrough a ComfyUI bypass does) and
+# then garbage-collect anything no longer reachable from the saver. See
+# `multi-view-prompt-recipe.md` / the spec for the node-id topology. Node ids below
+# are AnimaStandardFull's; never the older Detailer template's.
+
+# Per-detailer node-id triple: (FaceDetailerPipe, EditDetailerPipe, [detector ids]).
+# The detector list is the EditDetailerPipe's exclusive feeders (nsfw's one detector
+# feeds both bbox_detector + segm_detector slots, so it's still a single node).
+_DETAILERS: dict[str, dict[str, Any]] = {
+    "hand": {"fdp": "27", "edp": "14", "detectors": ["9"]},
+    "nsfw": {"fdp": "28", "edp": "15", "detectors": ["10"]},
+    "face": {"fdp": "29", "edp": "16", "detectors": ["11"]},
+    "eyes": {"fdp": "30", "edp": "17", "detectors": ["12"]},
+}
+
+# Per-key defaults: today's AnimaStandardDetailer behavior — hand/face/eyes on,
+# nsfw off, upscale on at 2.0x.
+_DETAILER_DEFAULTS: dict[str, bool] = {"hand": True, "nsfw": False, "face": True, "eyes": True}
+_UPSCALE_DEFAULT = True
+_UPSCALE_FACTOR_DEFAULT = 2.0
+
+# easy hiresFix node + its widget knobs. The net upscale is model_scale(4) *
+# percent/100; the only user-facing factor is ``percent`` (= factor * 25).
+_UPSCALE_NODE = "60"
+_UPSCALE_FACTOR_MIN = 1.0  # percent 25 (the 4x model can't down-scale below this knob)
+_UPSCALE_FACTOR_MAX = 4.0  # percent 100 (the 4x model's ceiling — don't exceed it)
+
+# The terminal output node we run reachability from (and the saver invariant).
+_SAVER_NODE = "13"
+
+
+def _find_consumer(wf: dict, src_id: str) -> Optional[tuple[str, str]]:
+    """Return ``(consumer_node_id, input_key)`` of the single node reading
+    ``[src_id, slot]`` on its ``image``/``images`` chain — i.e. the next node in
+    the linear image chain. Returns ``None`` if nothing consumes it.
+
+    We restrict to the image-chain keys (``image``/``images``) so we follow the
+    FaceDetailerPipe linked-list, not the detailer-pipe side links."""
+    for nid, node in wf.items():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs") or {}
+        for key in ("image", "images"):
+            val = inputs.get(key)
+            if isinstance(val, list) and len(val) == 2 and str(val[0]) == str(src_id):
+                return nid, key
+    return None
+
+
+def _remove_detailer(wf: dict, which: str) -> None:
+    """Splice one detailer out of the live graph: rewire the consumer of its
+    FaceDetailerPipe's output to the FDP's own image source (bypass passthrough),
+    then delete the FDP, its EditDetailerPipe, and the detector node(s).
+
+    No-op (and never raises) if the named detailer's nodes aren't present — so it
+    composes safely across arbitrary subsets and repeat calls."""
+    spec = _DETAILERS.get(which)
+    if spec is None:
+        return
+    fdp_id, edp_id = spec["fdp"], spec["edp"]
+    fdp = wf.get(fdp_id)
+    if not isinstance(fdp, dict):
+        return
+    # STEP 1: read the FDP's current image source S.
+    src = (fdp.get("inputs") or {}).get("image")
+    # STEP 2: rewire the unique downstream image-chain consumer to S.
+    consumer = _find_consumer(wf, fdp_id)
+    if consumer is not None and isinstance(src, list):
+        cid, ckey = consumer
+        wf[cid].setdefault("inputs", {})[ckey] = list(src)
+    # STEP 3: delete the orphaned detailer-side feeders (EDP + detector(s)).
+    for det_id in spec["detectors"]:
+        wf.pop(det_id, None)
+    wf.pop(edp_id, None)
+    # STEP 4: delete the FDP itself.
+    wf.pop(fdp_id, None)
+
+
+def _remove_upscale(wf: dict) -> None:
+    """Splice the hires-fix upscale (node 60) out: rewire the saver's ``images``
+    to node 60's current image source, then delete node 60. Resolves the source
+    dynamically so it works whether or not detailers were already removed."""
+    node = wf.get(_UPSCALE_NODE)
+    if not isinstance(node, dict):
+        return
+    src = (node.get("inputs") or {}).get("image")
+    consumer = _find_consumer(wf, _UPSCALE_NODE)
+    if consumer is not None and isinstance(src, list):
+        cid, ckey = consumer
+        wf[cid].setdefault("inputs", {})[ckey] = list(src)
+    wf.pop(_UPSCALE_NODE, None)
+
+
+def _set_upscale_factor(wf: dict, factor: float) -> None:
+    """Keep node 60 and encode the user's net upscale factor as ``percent`` (=
+    factor * 25; the 4x model output is rescaled by that percentage). factor is
+    clamped to [1.0, 4.0] so percent stays within the model's 4x ceiling."""
+    node = wf.get(_UPSCALE_NODE)
+    if not isinstance(node, dict):
+        return
+    f = max(_UPSCALE_FACTOR_MIN, min(_UPSCALE_FACTOR_MAX, float(factor)))
+    node.setdefault("inputs", {})["percent"] = f * 25.0
+
+
+def _reachable_from(wf: dict, root: str) -> set[str]:
+    """Set of node ids reachable from ``root`` by walking every ``[node, slot]``
+    input link transitively (the node's input dependency tree)."""
+    seen: set[str] = set()
+    stack = [str(root)]
+    while stack:
+        nid = stack.pop()
+        if nid in seen or nid not in wf:
+            continue
+        seen.add(nid)
+        node = wf.get(nid)
+        if not isinstance(node, dict):
+            continue
+        for val in (node.get("inputs") or {}).values():
+            if isinstance(val, list) and len(val) == 2 and isinstance(val[0], (str, int)):
+                stack.append(str(val[0]))
+    return seen
+
+
+def _gc_unreachable(wf: dict, root: str) -> None:
+    """Drop every node not reachable from ``root`` — garbage-collects the now-
+    orphaned base-pipe infra (ToDetailerPipe 19, detector 7, SAMLoader 8) once the
+    last detailer that consumed them is gone. Safest way to keep the graph valid."""
+    keep = _reachable_from(wf, root)
+    for nid in [n for n in wf if n not in keep]:
+        del wf[nid]
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    """Treat only real bools as meaningful; anything else falls back to default
+    (the substitution must never raise on a malformed option)."""
+    return bool(value) if isinstance(value, bool) else default
+
+
+def _resolve_options(options: Optional[dict]) -> dict[str, Any]:
+    """Merge a (possibly partial / malformed) ``anima_options`` over the per-key
+    defaults. Never raises; bad values fall back to that key's default.
+
+    Returns ``{"detailers": {hand,nsfw,face,eyes: bool}, "upscale": bool,
+    "upscale_factor": float}``."""
+    opts = options if isinstance(options, dict) else {}
+
+    raw_detailers = opts.get("detailers")
+    if not isinstance(raw_detailers, dict):
+        raw_detailers = {}
+    detailers = {
+        name: _coerce_bool(raw_detailers.get(name), default)
+        for name, default in _DETAILER_DEFAULTS.items()
+    }
+
+    upscale = _coerce_bool(opts.get("upscale"), _UPSCALE_DEFAULT)
+
+    factor = _UPSCALE_FACTOR_DEFAULT
+    raw_factor = opts.get("upscale_factor")
+    if isinstance(raw_factor, bool):
+        pass  # bool is not a valid factor; keep default
+    elif isinstance(raw_factor, (int, float)) and raw_factor > 0:
+        factor = float(raw_factor)
+
+    return {"detailers": detailers, "upscale": upscale, "upscale_factor": factor}
+
+
+def _saver_reachable(wf: dict) -> bool:
+    """Cheap post-reduction invariant: the saver must still exist and its image
+    link must resolve to a node still in the graph. A broken saver would otherwise
+    ship as a silent 0-output job (the failure mode the project notes warn about),
+    so the caller checks this and falls back to the full template if it fails."""
+    saver = wf.get(_SAVER_NODE)
+    if not isinstance(saver, dict):
+        return False
+    img = (saver.get("inputs") or {}).get("images")
+    return isinstance(img, list) and len(img) == 2 and str(img[0]) in wf
+
+
+def _apply_anima_options(wf: dict, options: Optional[dict]) -> None:
+    """Reduce the Full template to the user's selected detailer/upscale subset, in
+    place. Runs AFTER model/prompt/seed injection + WidgetToString neutralization.
+
+    Order: remove unwanted detailers first (each reading live links so chained
+    splices compose), then handle upscale against the now-current chain, then a
+    reachability sweep from the saver GCs the orphaned base-pipe infra. MAY raise on
+    a malformed graph — ``build_anima_workflow`` runs this on a COPY and falls back
+    to the full (valid) template if it raises or breaks the saver invariant."""
+    resolved = _resolve_options(options)
+    for name, keep in resolved["detailers"].items():
+        if not keep:
+            _remove_detailer(wf, name)
+    if resolved["upscale"]:
+        _set_upscale_factor(wf, resolved["upscale_factor"])
+    else:
+        _remove_upscale(wf)
+    # GC orphaned base-pipe nodes (19/7/8) and anything else now unreachable from
+    # the saver. This also drops any dangling [deleted, slot] link's source.
+    _gc_unreachable(wf, _SAVER_NODE)
+
+
+def build_anima_workflow(
+    model: str, positive: str, negative: str, options: Optional[dict] = None
+) -> dict:
     """Return the Anima template with the user's model + prompts injected:
     model -> every ``UNETLoader.unet_name``; prompts -> the POSITIVE/NEGATIVE
     wildcard nodes; plus a fresh valid seed.
@@ -250,7 +465,12 @@ def build_anima_workflow(model: str, positive: str, negative: str) -> dict:
     The prompt nodes are ALWAYS overwritten (even with an empty string) so the
     template's authored sample prompt can never leak into a user's job, and the
     node ``mode`` is pinned to ``fixed`` so it uses our text verbatim instead of
-    re-rolling wildcards from its own widget server-side."""
+    re-rolling wildcards from its own widget server-side.
+
+    ``options`` (the submission's ``anima_options``) selects which detailers and
+    the upscale survive; absent/partial options fall back to today's behavior
+    (hand/face/eyes on, nsfw off, upscale on @2.0x). The reduction runs LAST so
+    seed injection + WidgetToString neutralization apply to surviving nodes."""
     workflow = _load_template()
 
     for node in workflow.values():
@@ -267,10 +487,21 @@ def build_anima_workflow(model: str, positive: str, negative: str) -> dict:
 
     _inject_seed(workflow, random.randint(0, _SEED_MAX - 1))
     _neutralize_widget_to_string(workflow, model)
+
+    # Reduce to the requested detailer/upscale subset on a COPY. If the reduction
+    # raises or disconnects the saver, keep the full (valid) template rather than
+    # ship a structurally-broken job — a safe degradation that still renders.
+    try:
+        reduced = copy.deepcopy(workflow)
+        _apply_anima_options(reduced, options)
+        if _saver_reachable(reduced):
+            workflow = reduced
+    except Exception:  # noqa: BLE001 — keep the full template on any reduction failure
+        pass
     return workflow
 
 
-def maybe_rewrite_to_anima(workflow: dict) -> Optional[dict]:
+def maybe_rewrite_to_anima(workflow: dict, options: Optional[dict] = None) -> Optional[dict]:
     """If ``workflow`` references an Anima model, return the Anima workflow
     carrying over the model + prompts; else ``None`` (caller keeps the original).
     Never raises — on any failure returns ``None``.
@@ -285,6 +516,6 @@ def maybe_rewrite_to_anima(workflow: dict) -> Optional[dict]:
         if not model:
             return None
         positive, negative = extract_prompts(workflow)
-        return build_anima_workflow(model, positive, negative)
+        return build_anima_workflow(model, positive, negative, options)
     except Exception:  # noqa: BLE001 — substitution must never break submission
         return None

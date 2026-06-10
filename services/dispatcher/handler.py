@@ -246,7 +246,7 @@ def _post_prompt(event: dict) -> dict:
     # submission references an Anima model, swap in the official Anima workflow,
     # carrying over only the model + the user's prompts. No-op (None) for
     # everything else, so normal jobs are untouched.
-    anima_workflow = maybe_rewrite_to_anima(workflow)
+    anima_workflow = maybe_rewrite_to_anima(workflow, body.get("anima_options"))
     anima_rewritten = anima_workflow is not None
     if anima_rewritten:
         workflow = anima_workflow

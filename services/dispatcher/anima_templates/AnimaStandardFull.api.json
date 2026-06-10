@@ -138,6 +138,15 @@
       "title": "UltralyticsDetectorProvider"
     }
   },
+  "10": {
+    "inputs": {
+      "model_name": "segm/ntd11_anime_nsfw_segm_v5-variant1.pt"
+    },
+    "class_type": "UltralyticsDetectorProvider",
+    "_meta": {
+      "title": "UltralyticsDetectorProvider"
+    }
+  },
   "11": {
     "inputs": {
       "model_name": "bbox/face_yolov9c.pt"
@@ -195,6 +204,29 @@
       "bbox_detector": [
         "9",
         0
+      ]
+    },
+    "class_type": "EditDetailerPipe",
+    "_meta": {
+      "title": "Edit DetailerPipe"
+    }
+  },
+  "15": {
+    "inputs": {
+      "wildcard": "[LAB]\n[ALL] nsfw\n[NIPPLES] nsfw, nipples\n[PUSSY] nsfw, pussy\n[ANUS] nsfw, (anus)\n[PENIS] nsfw, penis\n[TESTICLES] nsfw, testicles",
+      "Select to add LoRA": "Select the LoRA to add to the text",
+      "Select to add Wildcard": "Select the Wildcard to add to the text",
+      "detailer_pipe": [
+        "19",
+        0
+      ],
+      "bbox_detector": [
+        "10",
+        0
+      ],
+      "segm_detector": [
+        "10",
+        1
       ]
     },
     "class_type": "EditDetailerPipe",
@@ -400,6 +432,77 @@
       "title": "HandDetailer (pipe)"
     }
   },
+  "28": {
+    "inputs": {
+      "guide_size": [
+        "38",
+        0
+      ],
+      "guide_size_for": true,
+      "max_size": [
+        "35",
+        0
+      ],
+      "seed": [
+        "34",
+        0
+      ],
+      "steps": 16,
+      "cfg": [
+        "24",
+        2
+      ],
+      "sampler_name": [
+        "41",
+        0
+      ],
+      "scheduler": [
+        "40",
+        0
+      ],
+      "denoise": 0.3,
+      "feather": 16,
+      "noise_mask": true,
+      "force_inpaint": true,
+      "bbox_threshold": 0.44,
+      "bbox_dilation": 8,
+      "bbox_crop_factor": [
+        "45",
+        0
+      ],
+      "sam_detection_hint": "none",
+      "sam_dilation": 4,
+      "sam_threshold": 0.9000000000000001,
+      "sam_bbox_expansion": 0,
+      "sam_mask_hint_threshold": 0.7,
+      "sam_mask_hint_use_negative": "False",
+      "drop_size": 16,
+      "refiner_ratio": 0.2,
+      "cycle": 1,
+      "inpaint_model": false,
+      "noise_mask_feather": 64,
+      "tiled_encode": [
+        "50",
+        0
+      ],
+      "tiled_decode": [
+        "50",
+        0
+      ],
+      "image": [
+        "27",
+        0
+      ],
+      "detailer_pipe": [
+        "15",
+        0
+      ]
+    },
+    "class_type": "FaceDetailerPipe",
+    "_meta": {
+      "title": "NSFWDetailer (pipe)"
+    }
+  },
   "29": {
     "inputs": {
       "guide_size": [
@@ -458,7 +561,7 @@
         0
       ],
       "image": [
-        "27",
+        "28",
         0
       ],
       "detailer_pipe": [
