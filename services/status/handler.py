@@ -120,6 +120,11 @@ _TEXT_KEYS = ("text", "text_g", "text_l", "string", "wildcard", "populated_text"
 # string-provider — never on an arbitrary conditioning node, where a stray
 # string-typed `value` would be mistaken for a prompt.
 _PROVIDER_KEYS = ("value", "prompt")
+# Concatenation inputs (StringConcatenate: string_a/string_b, …). The Anima
+# workflow wires its positive through `StringConcatenate(trigger_words, POSITIVE)`
+# then a RegexReplace, so the prompt only surfaces if we follow *both* parts and
+# join them — a plain text-link follow dead-ends at the concat node.
+_CONCAT_KEYS = ("string_a", "string_b", "string_c", "string_d")
 
 
 def _generators(wf: dict) -> tuple[list, list]:
@@ -197,6 +202,14 @@ def _extract_prompts(wf: dict) -> list[dict]:
             got = _resolve(inp.get(key), polarity, set(seen), depth + 1, via_link=True)
             if got:
                 return got
+        # A string-concatenation node (StringConcatenate) builds the text from
+        # several parts — resolve every part and join, so a prompt wired through
+        # `concat(trigger_words, prompt)` isn't dropped. Joined with ", " (the
+        # exact delimiter doesn't matter for a human-readable display).
+        parts = [g for key in _CONCAT_KEYS
+                 if (g := _resolve(inp.get(key), polarity, set(seen), depth + 1, via_link=True))]
+        if parts:
+            return ", ".join(parts)
         # Otherwise walk upstream, but only through conditioning-named inputs so
         # a ControlNetApplyAdvanced (has both `positive` and `negative`) can't
         # cross polarities. `seen` is copied per branch so it guards against

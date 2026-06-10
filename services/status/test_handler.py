@@ -216,6 +216,34 @@ def test_extract_character_from_inline_cliptextencode():
     assert h._extract_character(wf) == "narberal_gamma"
 
 
+def test_extract_prompts_through_concat_chain():
+    # Mirrors the real Anima workflow: the positive runs POSITIVE wildcard ->
+    # StringConcatenate(trigger_words, POSITIVE) -> RegexReplace -> CLIPTextEncode
+    # -> KSampler. The walk must follow the concat's string_a/string_b parts; the
+    # negative is wired directly (the case that always worked).
+    wf = {
+        "3": {"class_type": "ImpactWildcardProcessor", "_meta": {"title": "POSITIVE"},
+              "inputs": {"populated_text": "masterwork, tsukino_usagi, blonde_hair, twintails", "mode": "fixed"}},
+        "4": {"class_type": "ImpactWildcardProcessor", "_meta": {"title": "NEGATIVE"},
+              "inputs": {"populated_text": "worst_quality, bad_hands", "mode": "fixed"}},
+        "37": {"class_type": "TriggerWord Toggle (LoraManager)",
+               "inputs": {"orinalMessage": "", "trigger_words": ["5", 2]}},
+        "46": {"class_type": "StringConcatenate",
+               "inputs": {"string_a": ["37", 0], "string_b": ["3", 0], "delimiter": ","}},
+        "48": {"class_type": "RegexReplace",
+               "inputs": {"string": ["46", 0], "regex_pattern": "^,|,$", "replace": ""}},
+        "54": {"class_type": "CLIPTextEncode", "_meta": {"title": "CLIP Text Encode (Positive Prompt)"},
+               "inputs": {"text": ["48", 0], "clip": ["18", 0]}},
+        "55": {"class_type": "CLIPTextEncode", "_meta": {"title": "CLIP Text Encode (Negative Prompt)"},
+               "inputs": {"text": ["4", 0], "clip": ["18", 0]}},
+        "6": {"class_type": "KSampler", "_meta": {"title": "KSampler"},
+              "inputs": {"positive": ["54", 0], "negative": ["55", 0]}},
+    }
+    secs = {s["label"]: s["text"] for s in h._extract_prompts(wf)}
+    assert secs.get("Positive", "").startswith("masterwork, tsukino_usagi"), secs
+    assert secs.get("Negative", "").startswith("worst_quality"), secs
+
+
 def test_serialize_job_only_adds_character_for_pending_statuses():
     item = {
         "job_id": {"S": "j1"},
