@@ -216,7 +216,10 @@ export const APP_CONFIG: AppConfig = {
   },
 
   cost: {
-    budgetAmountUsd: 100,
+    // Budget thresholds are PERCENTAGE-based (monitoring.ts): 50% warn, 80%
+    // preventive scale-down, 100% kill-switch (full compute shutdown). At $250
+    // that's warn $125 / scale-down $200 / kill-switch $250.
+    budgetAmountUsd: 250,
     budgetEmailParameter: '/comfy/alerts/budget-email',
   },
 
