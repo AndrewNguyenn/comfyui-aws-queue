@@ -476,3 +476,57 @@ def test_seed_injected_into_surviving_detailers():
     for n in seed_nodes:
         s = n["inputs"]["seed"]
         assert 0 <= s < 2 ** 50 and s != -1
+
+
+# --- LoRA stack injection --------------------------------------------------
+
+def test_loras_absent_is_noop():
+    wf = anima.build_anima_workflow("anima_baseV10.safetensors", "p", "n", {})
+    assert not any(n.get("class_type") == "LoraLoader" for n in wf.values())
+
+
+def test_loras_chain_wiring():
+    opts = {"loras": [{"name": "a.safetensors", "strength": 0.8},
+                      {"name": "b", "strength": 1.2}]}
+    wf = anima.build_anima_workflow("anima_baseV10.safetensors", "p", "n", opts)
+    l1, l2 = wf["9001"], wf["9002"]
+    assert l1["class_type"] == "LoraLoader" and l1["inputs"]["lora_name"] == "a.safetensors"
+    assert l1["inputs"]["model"] == ["1", 0] and l1["inputs"]["clip"] == ["18", 0]
+    assert l1["inputs"]["strength_model"] == 0.8
+    # bare name gets the extension appended
+    assert l2["inputs"]["lora_name"] == "b.safetensors"
+    assert l2["inputs"]["model"] == ["9001", 0] and l2["inputs"]["clip"] == ["9001", 1]
+    # the LoraManager passthrough now feeds from the chain end
+    assert wf["5"]["inputs"]["model"] == ["9002", 0]
+    assert wf["5"]["inputs"]["clip"] == ["9002", 1]
+
+
+def test_loras_malformed_entries_dropped():
+    opts = {"loras": ["junk", {"strength": 1}, {"name": ""},
+                      {"name": "ok.safetensors", "strength": "high"},
+                      {"name": "clamp.safetensors", "strength": 99}]}
+    wf = anima.build_anima_workflow("anima_baseV10.safetensors", "p", "n", opts)
+    chain = [n for n in wf.values() if n.get("class_type") == "LoraLoader"]
+    assert len(chain) == 2
+    assert chain[0]["inputs"]["strength_model"] == 1.0      # bad strength -> default
+    assert chain[1]["inputs"]["strength_model"] == 4.0      # clamped
+
+
+def test_loras_capped_at_max():
+    opts = {"loras": [{"name": f"l{i}.safetensors"} for i in range(20)]}
+    wf = anima.build_anima_workflow("anima_baseV10.safetensors", "p", "n", opts)
+    assert sum(1 for n in wf.values() if n.get("class_type") == "LoraLoader") == 8
+
+
+def test_loras_survive_full_reduction():
+    # The chain feeds the KSampler (via node 5), which survives every reduction —
+    # even all-detailers-off + no-upscale must keep the loras and stay dangling-free.
+    opts = {"loras": [{"name": "x.safetensors", "strength": 1.0}],
+            "detailers": {"face": False, "hand": False, "eyes": False, "nsfw": False},
+            "upscale": False}
+    wf = anima.build_anima_workflow("anima_baseV10.safetensors", "p", "n", opts)
+    assert any(n.get("class_type") == "LoraLoader" for n in wf.values())
+    for n in wf.values():
+        for v in (n.get("inputs") or {}).values():
+            if isinstance(v, list) and len(v) == 2:
+                assert str(v[0]) in wf, f"dangling ref to {v[0]}"

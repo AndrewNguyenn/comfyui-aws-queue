@@ -421,6 +421,80 @@ def _resolve_options(options: Optional[dict]) -> dict[str, Any]:
     return {"detailers": detailers, "upscale": upscale, "upscale_factor": factor}
 
 
+# ---------------------------------------------------------------------------
+# LoRA stack injection
+# ---------------------------------------------------------------------------
+#
+# ``anima_options.loras`` is an optional list of {"name": "<file>", "strength": f}
+# entries. We inject a chain of CORE ``LoraLoader`` nodes between the base loaders
+# (UNETLoader 1 + CLIPLoader 18) and the "Lora Loader (LoraManager)" node 5 —
+# node 5 stays as an empty passthrough, and core-node semantics avoid any
+# dependency on LoraManager's custom cache/name resolution. LoRA files come from
+# the catalog's ``lora`` type (mounted at models/loras/), value = the filename.
+
+_LORA_TARGET_NODE = "5"      # the LoraManager passthrough whose model/clip we feed
+_LORA_CHAIN_BASE_ID = 9001   # chain node ids 9001.. (template ids are all <= ~102)
+_LORA_MAX_COUNT = 8
+_LORA_STRENGTH_LIMIT = 4.0   # |strength| clamp; core LoraLoader allows negatives
+
+
+def _resolve_loras(options: Optional[dict]) -> list[dict]:
+    """Sanitized ``[{"name": str, "strength": float}]`` from anima_options.
+    Malformed entries are dropped (never raises); the list is capped."""
+    opts = options if isinstance(options, dict) else {}
+    raw = opts.get("loras")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for entry in raw[: _LORA_MAX_COUNT * 2]:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        name = name.strip()
+        if not name.lower().endswith(_MODEL_EXTS):
+            name += ".safetensors"
+        strength = entry.get("strength")
+        if isinstance(strength, bool) or not isinstance(strength, (int, float)):
+            strength = 1.0
+        strength = max(-_LORA_STRENGTH_LIMIT, min(_LORA_STRENGTH_LIMIT, float(strength)))
+        out.append({"name": name, "strength": strength})
+        if len(out) >= _LORA_MAX_COUNT:
+            break
+    return out
+
+
+def _inject_loras(wf: dict, loras: list[dict]) -> None:
+    """Insert a chain of core LoraLoader nodes feeding ``_LORA_TARGET_NODE``.
+    Reads the target's current model/clip links so it composes with whatever
+    the template wires there; no-op when the list is empty."""
+    target = wf.get(_LORA_TARGET_NODE)
+    if not loras or not isinstance(target, dict):
+        return
+    inputs = target.setdefault("inputs", {})
+    model_src, clip_src = inputs.get("model"), inputs.get("clip")
+    if not (isinstance(model_src, list) and isinstance(clip_src, list)):
+        return
+    prev_model, prev_clip = model_src, clip_src
+    for i, lora in enumerate(loras):
+        nid = str(_LORA_CHAIN_BASE_ID + i)
+        wf[nid] = {
+            "inputs": {
+                "lora_name": lora["name"],
+                "strength_model": lora["strength"],
+                "strength_clip": lora["strength"],
+                "model": list(prev_model),
+                "clip": list(prev_clip),
+            },
+            "class_type": "LoraLoader",
+            "_meta": {"title": f"LoRA {i + 1}: {lora['name']}"},
+        }
+        prev_model, prev_clip = [nid, 0], [nid, 1]
+    inputs["model"] = prev_model
+    inputs["clip"] = prev_clip
+
+
 def _saver_reachable(wf: dict) -> bool:
     """Cheap post-reduction invariant: the saver must still exist and its image
     link must resolve to a node still in the graph. A broken saver would otherwise
@@ -487,6 +561,14 @@ def build_anima_workflow(
 
     _inject_seed(workflow, random.randint(0, _SEED_MAX - 1))
     _neutralize_widget_to_string(workflow, model)
+
+    # Optional LoRA stack (anima_options.loras) — chained core LoraLoader nodes
+    # feeding the LoraManager passthrough. Never raises; sanitized + capped. The
+    # chain sits upstream of the KSampler so it survives every reduction subset.
+    try:
+        _inject_loras(workflow, _resolve_loras(options))
+    except Exception:  # noqa: BLE001 — a bad lora list must never break submission
+        pass
 
     # Reduce to the requested detailer/upscale subset on a COPY. If the reduction
     # raises or disconnects the saver, keep the full (valid) template rather than
