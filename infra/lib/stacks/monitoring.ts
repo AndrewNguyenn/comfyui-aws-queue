@@ -7,6 +7,9 @@ import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as cw from 'aws-cdk-lib/aws-cloudwatch';
 import * as cwActions from 'aws-cdk-lib/aws-cloudwatch-actions';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as path from 'path';
 import { AppConfig } from '../config';
 
 export interface MonitoringStackProps extends StackProps {
@@ -22,8 +25,10 @@ export interface MonitoringStackProps extends StackProps {
  *   80% — email + (in v3.1+) SNS topic to ASG-shutdown Lambda (preventive)
  *   100% — kill-switch (full shutdown of compute)
  *
- * The kill-switch Lambda itself lives in a later stack that has handles to ASGs
- * and Cognito. This stack creates the SNS topic; the Lambda subscribes to it.
+ * The kill-switch Lambda (services/killswitch) is created HERE and subscribed to
+ * the killSwitchTopic — on a budget breach it zeros both fleet ASGs and ECS
+ * services. It targets the ASGs/services by their deterministic names (no
+ * cross-stack ref needed), so it lives next to the topic + budget it serves.
  *
  * Email subscriber address is pulled from SSM at deploy time, NOT hardcoded.
  * Operator must run before first deploy:
@@ -60,6 +65,70 @@ export class MonitoringStack extends Stack {
     this.killSwitchTopic.addSubscription(new snsSubs.EmailSubscription(alertEmail));
     this.preventiveScaleDownTopic.addSubscription(new snsSubs.EmailSubscription(alertEmail));
 
+    // AWS Budgets can only deliver to an SNS topic that grants
+    // budgets.amazonaws.com sns:Publish via a RESOURCE policy. CfnBudget takes
+    // the topic as a bare ARN string and does NOT add this — without it the
+    // budget→topic delivery silently fails ("Invalid SNS topic") and neither the
+    // kill-switch nor the preventive scale-down ever fires. (This was almost
+    // certainly why the old setup never worked.)
+    for (const topic of [this.killSwitchTopic, this.preventiveScaleDownTopic]) {
+      topic.addToResourcePolicy(new iam.PolicyStatement({
+        sid: 'AllowBudgetsPublish',
+        effect: iam.Effect.ALLOW,
+        principals: [new iam.ServicePrincipal('budgets.amazonaws.com')],
+        actions: ['sns:Publish'],
+        resources: [topic.topicArn],
+        conditions: {
+          StringEquals: { 'aws:SourceAccount': this.account },
+          ArnLike: { 'aws:SourceArn': `arn:aws:budgets::${this.account}:*` },
+        },
+      }));
+    }
+
+    // ---------- Kill-switch Lambda ----------
+    // Names are deterministic (see compute.ts: cluster `${projectName}-cluster`,
+    // services 'comfy-image'/'comfy-video', ASGs `comfy-${fleet}-asg`), so we
+    // target them by name and avoid a cross-stack ref to ComputeStack.
+    const fleets = ['image', 'video'];
+    const asgNames = fleets.map((f) => `comfy-${f}-asg`);
+    const serviceNames = fleets.map((f) => `comfy-${f}`);
+    const clusterName = `${config.projectName}-cluster`;
+
+    const killSwitchFn = new lambda.Function(this, 'KillSwitchFn', {
+      functionName: 'comfy-killswitch-handler',
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'handler.lambda_handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../../services/killswitch')),
+      timeout: Duration.seconds(60),
+      memorySize: 128,
+      environment: {
+        ASG_NAMES: asgNames.join(','),
+        ECS_CLUSTER: clusterName,
+        ECS_SERVICES: serviceNames.join(','),
+      },
+      description: 'Cost kill-switch: zeros the image+video ASGs and ECS services on a budget breach.',
+    });
+
+    // Describe has no resource-level support; scope Update to the two ASGs and
+    // the two services only.
+    killSwitchFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['autoscaling:DescribeAutoScalingGroups'],
+      resources: ['*'],
+    }));
+    killSwitchFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['autoscaling:UpdateAutoScalingGroup'],
+      resources: asgNames.map((n) =>
+        `arn:aws:autoscaling:${this.region}:${this.account}:autoScalingGroup:*:autoScalingGroupName/${n}`),
+    }));
+    killSwitchFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ecs:UpdateService'],
+      resources: serviceNames.map((s) =>
+        `arn:aws:ecs:${this.region}:${this.account}:service/${clusterName}/${s}`),
+    }));
+
+    // The budget's 100% ACTUAL notification publishes here -> fire the kill-switch.
+    this.killSwitchTopic.addSubscription(new snsSubs.LambdaSubscription(killSwitchFn));
+
     // ---------- AWS Budget ----------
     new budgets.CfnBudget(this, 'MonthlyBudget', {
       budget: {
@@ -73,10 +142,27 @@ export class MonitoringStack extends Stack {
           amount: config.cost.budgetAmountUsd,
           unit: 'USD',
         },
-        costFilters: {
-          // Filter to project-tagged resources only. Requires cost-allocation
-          // tags activated in Billing console (manual, ~24h to populate).
-          TagKeyValue: [`user:Project$${config.projectName}`],
+        // NO costFilters: track TOTAL account spend, not just project-tagged
+        // resources. The old TagKeyValue filter required a cost-allocation tag
+        // that was never populated, so the budget read $0 and the kill-switch
+        // never fired. A safety net must see everything.
+        // Track UNBLENDED cost excluding credits/refunds (i.e. raw usage), so
+        // the kill-switch fires on $250 of USAGE even while promotional credits
+        // are covering the actual invoice — consistent with the gross figure
+        // the console budget already shows. Flip includeCredit/includeRefund to
+        // true to track net out-of-pocket instead.
+        costTypes: {
+          includeCredit: false,
+          includeRefund: false,
+          includeDiscount: true,
+          includeOtherSubscription: true,
+          includeRecurring: true,
+          includeSubscription: true,
+          includeSupport: true,
+          includeTax: true,
+          includeUpfront: true,
+          useAmortized: false,
+          useBlended: false,
         },
       },
       notificationsWithSubscribers: [
@@ -138,9 +224,5 @@ export class MonitoringStack extends Stack {
       retention: logs.RetentionDays.ONE_WEEK,
       removalPolicy: RemovalPolicy.DESTROY,
     });
-
-    // The kill-switch Lambda is defined in a later stack (ApiStack) where it can
-    // reference ASGs from ComputeStack and the Cognito user pool from AuthStack.
-    // It will subscribe to this stack's killSwitchTopic.
   }
 }
