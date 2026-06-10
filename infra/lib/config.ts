@@ -152,8 +152,21 @@ export const APP_CONFIG: AppConfig = {
       // slower than A10G on this workload but completes — strictly better than no
       // worker during a drought. Still NO g4dn (T4: 3.2x slower, 16 GB OOM).
       // The container has no hard memory cap (see makeTaskDefinition).
+      //
+      // g6.2xlarge added as a deeper fallback (2026-06-09): same L4 GPU as
+      // g6.xlarge (sm_89, 24 GB VRAM — golden AMI + NGC fat binaries already
+      // cover it), but 8 vCPU + 32 GB RAM. Two reasons: (1) more spot pools to
+      // survive a g5+g6.xlarge drought; (2) the 32 GB system RAM fits the
+      // big-checkpoint / FLOW-class jobs that OOM on a 16 GB .xlarge — the image
+      // task has no hard memoryLimit and only an 11 GiB soft reservation, so it
+      // places on .xlarge AND .2xlarge and uses the extra RAM when present.
+      // capacity-optimized-PRIORITIZED keeps g5.xlarge first, so this only fires
+      // on a deep drought. CAVEAT: g6.2xlarge is 8 vCPU, so at imageMax (6) a
+      // full fall-back to it = 48 vCPU = the entire G/VT spot quota (shared with
+      // video) — only reachable in a deep drought at max scale; raise the quota
+      // or lower imageMax if that becomes real.
       primaryInstanceType: 'g5.xlarge',
-      fallbackInstanceTypes: ['g6.xlarge'],
+      fallbackInstanceTypes: ['g6.xlarge', 'g6.2xlarge'],
       rootVolumeGb: 150,
       // gp3 250 MB/s / 6000 IOPS (above the 125/3000 floor). The cold-start
       // bottleneck is the ECR image pull+extract to this root volume. Measured
