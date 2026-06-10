@@ -297,6 +297,17 @@ def _post_prompt(event: dict) -> dict:
         item["character"] = {"S": character}
     if subject:
         item["subject"] = {"S": subject}
+    # Set/scene provenance from the tag generator (body.source = {set, scene}).
+    # Display-only strings for the viewer's detail panel — capped, stored only
+    # when non-empty, absent on editor submissions.
+    source = body.get("source")
+    if isinstance(source, dict):
+        set_name = str(source.get("set") or "").strip()[:200]
+        scene_name = str(source.get("scene") or "").strip()[:200]
+        if set_name:
+            item["set_name"] = {"S": set_name}
+        if scene_name:
+            item["scene_name"] = {"S": scene_name}
     # workflow_json above is the API-format prompt (what the worker executes).
     # The editor also sends its full UI workflow — node layout, groups, the
     # UI-only nodes — at extra_data.extra_pnginfo.workflow. Keep it so the

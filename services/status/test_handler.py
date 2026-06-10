@@ -265,6 +265,29 @@ def test_serialize_job_only_adds_character_for_pending_statuses():
     assert "character" not in done
 
 
+def test_serialize_job_set_scene_on_detail_path_only():
+    item = {
+        "job_id": {"S": "j2"},
+        "type": {"S": "image"},
+        "status": {"S": "complete"},
+        "workflow_json": {"S": "{}"},
+        "set_name": {"S": "Single - Bikini Car Wash"},
+        "scene_name": {"S": "Customer's Trophy Shot"},
+    }
+    detail = h._serialize_job(item, lite=False)
+    assert detail["set_name"] == "Single - Bikini Car Wash"
+    assert detail["scene_name"] == "Customer's Trophy Shot"
+    # lite list rows come off the jobs-by-status GSI, which doesn't project
+    # these attrs — the serializer must not emit them there
+    lite = h._serialize_job(item, lite=True)
+    assert "set_name" not in lite and "scene_name" not in lite
+    # editor submissions / old rows carry no source attrs → fields omitted
+    bare = dict(item)
+    del bare["set_name"], bare["scene_name"]
+    bare_detail = h._serialize_job(bare, lite=False)
+    assert "set_name" not in bare_detail and "scene_name" not in bare_detail
+
+
 def test_serialize_job_prefers_denormalized_attrs_over_derivation():
     # New rows carry model/character/subject as stored attrs (denormalized at
     # dispatch). _serialize_job must use them verbatim and NOT re-derive from

@@ -817,6 +817,16 @@ def _serialize_job(it: dict, lite: bool = False) -> dict:
         if subject:
             out["subject"] = subject
     if not lite:
+        # Set/scene provenance (tag-generator jobs only — the dispatcher stores
+        # body.source). Detail-path only: the jobs-by-status GSI doesn't project
+        # these attrs, so lite rows simply lack them — gate on `lite` to make
+        # the intent explicit rather than relying on the absent-attr fallback.
+        set_name = it.get("set_name", {}).get("S", "")
+        scene_name = it.get("scene_name", {}).get("S", "")
+        if set_name:
+            out["set_name"] = set_name
+        if scene_name:
+            out["scene_name"] = scene_name
         # All distinct prompts (txt2img → Positive/Negative; detailer graphs
         # add their own sections) + best-effort generation params.
         out["prompts"] = _extract_prompts(wf)

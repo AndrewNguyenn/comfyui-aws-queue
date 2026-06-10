@@ -150,6 +150,15 @@
     return blocks || (`<div class="section-ttl">Prompt</div>` +
       `<div class="prompt muted">Not recorded for this generation.</div>`);
   }
+  // Set/scene provenance — present only on tag-generator jobs (the dispatcher
+  // stores the submitter's set/scene names); empty for editor jobs / old rows.
+  function sourceSection(d) {
+    const rows = [["Set", d.set_name], ["Scene", d.scene_name]]
+      .filter(([, v]) => v);
+    return rows.map(([k, v]) =>
+      `<div class="field"><div class="k">${k}</div>` +
+      `<div class="v">${esc(String(v))}</div></div>`).join("");
+  }
   // Generation parameters — only the fields the workflow actually carried.
   function paramsSection(params) {
     params = params || {};
@@ -1108,7 +1117,8 @@
           // Fill the params/prompts sections — the /jobs list is lite.
           const det = scrim.querySelector(".m-detail");
           if (det) {
-            det.innerHTML = paramsSection(d.params) + promptsBlock(d.prompts);
+            det.innerHTML = sourceSection(d) + paramsSection(d.params) +
+              promptsBlock(d.prompts);
             det.querySelectorAll(".prompt-copy").forEach((btn) => {
               btn.onclick = (e) => {
                 e.stopPropagation();
