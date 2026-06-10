@@ -110,8 +110,9 @@ _SHARED_FNS = (
     "_character_from_prompt", "_extract_subject", "_extract_character",
 )
 _SHARED_CONSTS = (
-    "_PROMPT_MAX", "_TEXT_KEYS", "_PROVIDER_KEYS", "_NON_CHARACTER_TAGS",
-    "_APPEARANCE_TAGS", "_PAREN_QUALIFIERS", "_FRANCHISES",
+    "_PROMPT_MAX", "_TEXT_KEYS", "_PROVIDER_KEYS", "_CONCAT_KEYS",
+    "_NON_CHARACTER_TAGS", "_APPEARANCE_TAGS", "_PAREN_QUALIFIERS",
+    "_FRANCHISES",
 )
 
 
