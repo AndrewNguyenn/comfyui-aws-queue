@@ -65,6 +65,7 @@ ANIMA_MODELS: frozenset[str] = frozenset(
         "animacattower_v10",
         "copycatanima_20260519",
         "miaomiaoharem_anima11",
+        "nyairisanima_basev10",
         "terrarising_20terrarisinganima",
     }
 )
@@ -541,6 +542,13 @@ _ANIMA_MODEL_SAMPLER: dict[str, dict] = {
     # copycatanima_20260519 — steps 32, cfg 4, ER SDE (scheduler kept at template
     # 'simple'; clipSkip 2 / 1280x1792 are not wired — no clip-skip/latent override).
     "copycatanima_20260519": {"steps": 32, "cfg": 4, "sampler": "er_sde"},
+    # nyairisanima_basev10 — author range steps 25~40 / cfg 4.5~6 / sampler
+    # {EulerA,res_multistep,er_sde} x scheduler {sgm_uniform,simple,beta}. We pick
+    # er_sde + simple (already the template default) at the midpoints: steps 30,
+    # cfg 5. NB: the model ships its own text encoder (nyaIrisAnima_baseV10_txt) —
+    # NOT wired; the template's shared qwen_3_06b_base CLIP is used like every
+    # other Anima model.
+    "nyairisanima_basev10": {"steps": 30, "cfg": 5, "sampler": "er_sde", "scheduler": "simple"},
 }
 
 

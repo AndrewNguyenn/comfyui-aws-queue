@@ -557,3 +557,17 @@ def test_per_model_sampler_copycatanima():
     assert p["steps"] == 32 and p["cfg"] == 4 and p["sampler"] == "er_sde"
     # scheduler untouched (template default 'simple')
     assert p["scheduler"] == "simple"
+
+
+def test_nyairis_is_anima_and_sampler_applies():
+    # allowlist detection (filename -> Anima)
+    wf_probe = {"1": {"class_type": "UNETLoader", "inputs": {"unet_name": "nyaIrisAnima_baseV10.safetensors"}}}
+    assert anima.detect_anima_model(wf_probe) == "nyaIrisAnima_baseV10.safetensors"
+    # sampler override (steps 30 / cfg 5 / er_sde / simple)
+    wf = anima.build_anima_workflow("nyaIrisAnima_baseV10.safetensors", "p", "n", None)
+    p = _params_node(wf)
+    assert p["steps"] == 30 and p["cfg"] == 5
+    assert p["sampler"] == "er_sde" and p["scheduler"] == "simple"
+    # UNET swapped to the new model on every UNETLoader
+    units = [n for n in wf.values() if isinstance(n, dict) and n.get("class_type") == "UNETLoader"]
+    assert units and all(u["inputs"]["unet_name"] == "nyaIrisAnima_baseV10.safetensors" for u in units)
