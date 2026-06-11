@@ -538,6 +538,9 @@ def _apply_anima_options(wf: dict, options: Optional[dict]) -> None:
 _ANIMA_MODEL_SAMPLER: dict[str, dict] = {
     # miaomiaoharem_anima11 — recommended Euler / Normal, cfg 5.5 (steps already 30).
     "miaomiaoharem_anima11": {"steps": 30, "cfg": 5.5, "sampler": "euler", "scheduler": "normal"},
+    # copycatanima_20260519 — steps 32, cfg 4, ER SDE (scheduler kept at template
+    # 'simple'; clipSkip 2 / 1280x1792 are not wired — no clip-skip/latent override).
+    "copycatanima_20260519": {"steps": 32, "cfg": 4, "sampler": "er_sde"},
 }
 
 

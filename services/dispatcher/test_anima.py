@@ -549,3 +549,11 @@ def test_per_model_sampler_noop_for_unlisted_model():
     wf = anima.build_anima_workflow("anima_basev10.safetensors", "p", "n", None)
     p = _params_node(wf)
     assert p["cfg"] == 4 and p["sampler"] == "er_sde" and p["scheduler"] == "simple"
+
+
+def test_per_model_sampler_copycatanima():
+    wf = anima.build_anima_workflow("copycatanima_20260519.safetensors", "p", "n", None)
+    p = _params_node(wf)
+    assert p["steps"] == 32 and p["cfg"] == 4 and p["sampler"] == "er_sde"
+    # scheduler untouched (template default 'simple')
+    assert p["scheduler"] == "simple"
