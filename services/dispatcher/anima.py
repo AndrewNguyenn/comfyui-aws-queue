@@ -38,6 +38,7 @@ import copy
 import json
 import os
 import random
+import re
 from typing import Any, Optional
 
 # rgthree's Seed node validates seed <= 2**50; stay under it. The frontend
@@ -545,11 +546,73 @@ _ANIMA_MODEL_SAMPLER: dict[str, dict] = {
     # nyairisanima_basev10 — author range steps 25~40 / cfg 4.5~6 / sampler
     # {EulerA,res_multistep,er_sde} x scheduler {sgm_uniform,simple,beta}. We pick
     # er_sde + simple (already the template default) at the midpoints: steps 30,
-    # cfg 5. NB: the model ships its own text encoder (nyaIrisAnima_baseV10_txt) —
-    # NOT wired; the template's shared qwen_3_06b_base CLIP is used like every
-    # other Anima model.
+    # cfg 5. This model also gets its own text encoder + always-on quality prompts
+    # (see _ANIMA_MODEL_CLIP / _ANIMA_MODEL_PROMPT below).
     "nyairisanima_basev10": {"steps": 30, "cfg": 5, "sampler": "er_sde", "scheduler": "simple"},
 }
+
+
+# Per-model text-encoder (CLIP) override. Every Anima model rides the shared
+# ``qwen_3_06b_base`` text encoder hardcoded in the template's lone CLIPLoader
+# (node "Load CLIP"). A model that ships its OWN fine-tuned Qwen text encoder
+# maps its normalized name -> that encoder's filename (which must live under the
+# ``text_encoders/`` S3 prefix so the worker mounts it). Only ``clip_name`` is
+# swapped; the CLIPLoader's ``type`` is left as authored. No-op for unlisted models.
+_ANIMA_MODEL_CLIP: dict[str, str] = {
+    "nyairisanima_basev10": "nyaIrisAnima_baseV10_txt.safetensors",
+}
+
+
+# Per-model always-on prompts. ``pos`` is PREPENDED to the user's positive and
+# ``neg`` is APPENDED to the user's negative — the same convention as the
+# frontend CB_MODEL_PROMPT (Nutella). Applied to the prompt text BEFORE it is
+# written into the POSITIVE/NEGATIVE wildcard nodes, so it survives the verbatim
+# 'fixed' injection. No-op for unlisted models.
+_ANIMA_MODEL_PROMPT: dict[str, dict] = {
+    "nyairisanima_basev10": {
+        "pos": "masterpiece, best quality, aesthetic",
+        "neg": "score_1, score_2, score_3, low quality, worst quality, lowres, blurry",
+    },
+}
+
+
+def _apply_model_clip(workflow: dict, model: str) -> None:
+    """Point every CLIPLoader at the model's own text encoder, if it has one in
+    ``_ANIMA_MODEL_CLIP``. No-op for unlisted models (they keep the template's
+    shared qwen encoder)."""
+    clip = _ANIMA_MODEL_CLIP.get(_normalize_model(model))
+    if not clip:
+        return
+    for node in workflow.values():
+        if isinstance(node, dict) and node.get("class_type") == "CLIPLoader":
+            node.setdefault("inputs", {})["clip_name"] = clip
+
+
+def _apply_model_prompt(model: str, positive: str, negative: str) -> tuple[str, str]:
+    """Prepend the model's always-on positive / append its always-on negative
+    (from ``_ANIMA_MODEL_PROMPT``). Returns the merged ``(positive, negative)``;
+    unchanged for unlisted models. Empty user text -> just the always-on text
+    (no dangling comma); a user negative's trailing comma(s) are normalized.
+
+    IDEMPOTENT: if the text already leads (positive) / trails (negative) with the
+    always-on block, it is NOT re-applied. This matters because the rewritten
+    graph stores the merged text and ``extract_prompts`` can read it back, so a
+    re-submit (today only user-mediated: copying the viewer's displayed prompt
+    back into the editor) round-trips through here — without this guard each pass
+    would stack another copy of the quality tags."""
+    over = _ANIMA_MODEL_PROMPT.get(_normalize_model(model))
+    if not over:
+        return positive, negative
+    pos = str(over.get("pos", "")).strip()
+    neg = str(over.get("neg", "")).strip()
+    if pos and not positive.strip().lower().startswith(pos.lower()):
+        positive = pos if not positive.strip() else f"{pos}, {positive.strip()}"
+    if neg:
+        # strip all trailing whitespace/commas (handles 'x, ', 'x,, ', 'x, , ')
+        base = re.sub(r"[\s,]+$", "", negative)
+        if not base.lower().endswith(neg.lower()):
+            negative = neg if not base else f"{base}, {neg}"
+    return positive, negative
 
 
 def _apply_model_sampler(workflow: dict, model: str) -> None:
@@ -586,12 +649,18 @@ def build_anima_workflow(
     seed injection + WidgetToString neutralization apply to surviving nodes."""
     workflow = _load_template()
 
-    # Per-model sampler override (before the reduction copy so it's preserved).
+    # Per-model sampler + text-encoder overrides (before the reduction copy so
+    # they're preserved).
     _apply_model_sampler(workflow, model)
+    _apply_model_clip(workflow, model)
 
     for node in workflow.values():
         if isinstance(node, dict) and node.get("class_type") == "UNETLoader":
             node.setdefault("inputs", {})["unet_name"] = model
+
+    # Per-model always-on prompts (prepend pos / append neg) merged in before the
+    # prompt nodes are written.
+    positive, negative = _apply_model_prompt(model, positive, negative)
 
     for title, text in ((_POSITIVE_TITLE, positive), (_NEGATIVE_TITLE, negative)):
         node = _node_by_title(workflow, title)

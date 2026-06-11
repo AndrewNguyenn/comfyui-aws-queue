@@ -571,3 +571,84 @@ def test_nyairis_is_anima_and_sampler_applies():
     # UNET swapped to the new model on every UNETLoader
     units = [n for n in wf.values() if isinstance(n, dict) and n.get("class_type") == "UNETLoader"]
     assert units and all(u["inputs"]["unet_name"] == "nyaIrisAnima_baseV10.safetensors" for u in units)
+
+
+def _clip_name(wf):
+    for n in wf.values():
+        if isinstance(n, dict) and n.get("class_type") == "CLIPLoader":
+            return n["inputs"]["clip_name"]
+    return None
+
+
+def _node_text(wf, title):
+    n = anima._node_by_title(wf, title)
+    return (n.get("inputs") or {}).get("wildcard_text", "") if n else ""
+
+
+def test_nyairis_uses_custom_text_encoder():
+    wf = anima.build_anima_workflow("nyaIrisAnima_baseV10.safetensors", "p", "n", None)
+    assert _clip_name(wf) == "nyaIrisAnima_baseV10_txt.safetensors"
+
+
+def test_other_anima_keeps_shared_clip():
+    for mdl in ("copycatanima_20260519", "miaomiaoharem_anima11", "anima_basev10"):
+        wf = anima.build_anima_workflow(mdl + ".safetensors", "p", "n", None)
+        assert _clip_name(wf) == "qwen_3_06b_base.safetensors", mdl
+
+
+def test_nyairis_quality_prompts_injected():
+    wf = anima.build_anima_workflow("nyaIrisAnima_baseV10.safetensors", "1girl, beach", "extra_neg", None)
+    pos = _node_text(wf, "POSITIVE")
+    neg = _node_text(wf, "NEGATIVE")
+    assert pos == "masterpiece, best quality, aesthetic, 1girl, beach"
+    assert neg == "extra_neg, score_1, score_2, score_3, low quality, worst quality, lowres, blurry"
+
+
+def test_nyairis_quality_prompts_empty_user():
+    wf = anima.build_anima_workflow("nyaIrisAnima_baseV10.safetensors", "", "", None)
+    assert _node_text(wf, "POSITIVE") == "masterpiece, best quality, aesthetic"
+    assert _node_text(wf, "NEGATIVE") == "score_1, score_2, score_3, low quality, worst quality, lowres, blurry"
+
+
+def test_nyairis_negative_trailing_comma_normalized():
+    # user negatives commonly end with ", " — no double comma after the merge
+    p, n = anima._apply_model_prompt("nyaIrisAnima_baseV10.safetensors", "x", "blurry, ")
+    assert n == "blurry, score_1, score_2, score_3, low quality, worst quality, lowres, blurry"
+    assert ",," not in n
+
+
+def test_other_anima_no_prompt_injection():
+    wf = anima.build_anima_workflow("copycatanima_20260519.safetensors", "just this", "and this", None)
+    assert _node_text(wf, "POSITIVE") == "just this"
+    assert _node_text(wf, "NEGATIVE") == "and this"
+
+
+def test_nyairis_prompt_injection_idempotent_on_roundtrip():
+    # build once, then feed the rewritten graph back through the detector+rewriter
+    # (simulates a user copying the viewer's displayed prompt back into the editor)
+    wf1 = anima.build_anima_workflow("nyaIrisAnima_baseV10.safetensors", "1girl, beach", "bad hands", None)
+    wf2 = anima.maybe_rewrite_to_anima(wf1, None)
+    assert wf2 is not None, "rewritten graph still detects as Anima"
+    pos = _node_text(wf2, "POSITIVE")
+    neg = _node_text(wf2, "NEGATIVE")
+    # quality block appears exactly once, not doubled
+    assert pos == "masterpiece, best quality, aesthetic, 1girl, beach", pos
+    assert pos.count("masterpiece, best quality, aesthetic") == 1
+    assert neg.count("score_1") == 1, neg
+    # a THIRD pass is still stable
+    wf3 = anima.maybe_rewrite_to_anima(wf2, None)
+    assert _node_text(wf3, "POSITIVE").count("masterpiece, best quality, aesthetic") == 1
+
+
+def test_apply_model_prompt_double_comma_edges():
+    for bad in ("blurry, , ", "blurry,, ", "blurry, ,", "blurry,"):
+        _, n = anima._apply_model_prompt("nyaIrisAnima_baseV10.safetensors", "x", bad)
+        assert ",," not in n, f"double comma from {bad!r}: {n}"
+        assert n == "blurry, score_1, score_2, score_3, low quality, worst quality, lowres, blurry", (bad, n)
+
+
+def test_apply_model_prompt_idempotent_unit():
+    # applying twice == applying once
+    p1, n1 = anima._apply_model_prompt("nyaIrisAnima_baseV10.safetensors", "1girl", "bad")
+    p2, n2 = anima._apply_model_prompt("nyaIrisAnima_baseV10.safetensors", p1, n1)
+    assert p1 == p2 and n1 == n2
