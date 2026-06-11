@@ -529,6 +529,34 @@ def _apply_anima_options(wf: dict, options: Optional[dict]) -> None:
     _gc_unreachable(wf, _SAVER_NODE)
 
 
+# Per-Anima-model sampler overrides. The shared template's "Input Parameters
+# (Image Saver)" node ships steps 30 / cfg 4 / er_sde / simple, and the KSampler
+# + the sampler/scheduler display nodes all read from it — so overriding that one
+# node retargets the whole pass. Keyed by normalized model name; models NOT listed
+# keep the template defaults. Per-model so one model's recommended sampler doesn't
+# change every Anima job.
+_ANIMA_MODEL_SAMPLER: dict[str, dict] = {
+    # miaomiaoharem_anima11 — recommended Euler / Normal, cfg 5.5 (steps already 30).
+    "miaomiaoharem_anima11": {"steps": 30, "cfg": 5.5, "sampler": "euler", "scheduler": "normal"},
+}
+
+
+def _apply_model_sampler(workflow: dict, model: str) -> None:
+    """Override the Anima sampler params for models in ``_ANIMA_MODEL_SAMPLER``.
+    The single "Input Parameters (Image Saver)" node feeds steps/cfg/denoise to
+    the KSampler and sampler/scheduler to the two display passthroughs, so writing
+    its widgets retargets the whole sampling pass. No-op for unlisted models."""
+    over = _ANIMA_MODEL_SAMPLER.get(_normalize_model(model))
+    if not over:
+        return
+    for node in workflow.values():
+        if isinstance(node, dict) and node.get("class_type") == "Input Parameters (Image Saver)":
+            inp = node.setdefault("inputs", {})
+            for k in ("steps", "cfg", "sampler", "scheduler", "denoise"):
+                if k in over:
+                    inp[k] = over[k]
+
+
 def build_anima_workflow(
     model: str, positive: str, negative: str, options: Optional[dict] = None
 ) -> dict:
@@ -546,6 +574,9 @@ def build_anima_workflow(
     (hand/face/eyes on, nsfw off, upscale on @2.0x). The reduction runs LAST so
     seed injection + WidgetToString neutralization apply to surviving nodes."""
     workflow = _load_template()
+
+    # Per-model sampler override (before the reduction copy so it's preserved).
+    _apply_model_sampler(workflow, model)
 
     for node in workflow.values():
         if isinstance(node, dict) and node.get("class_type") == "UNETLoader":

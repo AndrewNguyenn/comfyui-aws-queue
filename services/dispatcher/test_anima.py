@@ -530,3 +530,22 @@ def test_loras_survive_full_reduction():
         for v in (n.get("inputs") or {}).values():
             if isinstance(v, list) and len(v) == 2:
                 assert str(v[0]) in wf, f"dangling ref to {v[0]}"
+
+
+def _params_node(wf):
+    return next(n["inputs"] for n in wf.values()
+               if n.get("class_type") == "Input Parameters (Image Saver)")
+
+
+def test_per_model_sampler_override_applies_to_listed_model():
+    wf = anima.build_anima_workflow("miaomiaoharem_anima11.safetensors", "p", "n", None)
+    p = _params_node(wf)
+    assert p["cfg"] == 5.5 and p["sampler"] == "euler" and p["scheduler"] == "normal"
+    assert p["steps"] == 30
+
+
+def test_per_model_sampler_noop_for_unlisted_model():
+    # other Anima models keep the template defaults (er_sde / simple / cfg 4)
+    wf = anima.build_anima_workflow("anima_basev10.safetensors", "p", "n", None)
+    p = _params_node(wf)
+    assert p["cfg"] == 4 and p["sampler"] == "er_sde" and p["scheduler"] == "simple"
