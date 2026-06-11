@@ -221,14 +221,18 @@
     hdrCount.textContent = `${allItems.length} file${allItems.length !== 1 ? "s" : ""}`;
   }
 
-  // Returns the raw job list for the page (no client filtering). offset is
-  // over raw jobs so the caller's offset arithmetic and EOF check stay
-  // aligned with what the API paginated.
-  async function _fetchJobsPage(offset, limit) {
-    const r = await authedFetch(
-      `/jobs?status=complete&limit=${limit}&offset=${offset}`);
+  // One keyset page of complete jobs (no client filtering). `cursor` resumes
+  // after the previous page (null for the first). Returns the raw jobs plus
+  // the cursor for the next page (null when the history is exhausted). Keyset
+  // pagination reads exactly `limit` rows per page off the GSI — no offset
+  // re-scan — so a full load is O(N), not O(N²).
+  async function _fetchJobs({ cursor = null, limit }) {
+    let q = `/jobs?status=complete&limit=${limit}`;
+    if (cursor) q += `&cursor=${encodeURIComponent(cursor)}`;
+    const r = await authedFetch(q);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return (await r.json()).jobs || [];
+    const d = await r.json();
+    return { jobs: d.jobs || [], cursor: d.next_cursor || null };
   }
   function _appendJobsAsItems(jobs) {
     for (const job of jobs) {
@@ -237,6 +241,37 @@
         allItems.push({ key, job, isVideo: isVideoKey(key) });
       }
     }
+  }
+  // Merge complete jobs into allItems at their created_at-sorted position
+  // (newest-first), deduped by job_id. The head refresh re-fetches the newest
+  // page, which can contain a job that completed OUT OF submit order — its
+  // created_at (the sort key, fixed at submit) may sit below an already-shown
+  // generation, so a blind prepend would mis-order it. allItems is kept sorted
+  // by created_at desc, so this is a standard two-pointer merge of the fetched
+  // newest-first page with the existing list. Returns how many items were added.
+  function _mergeJobsAsItems(jobs) {
+    const have = new Set(allItems.map((it) => it.job.job_id));
+    const fresh = [];
+    for (const job of jobs) {
+      if (have.has(job.job_id)) continue;
+      for (const key of (job.output_keys || [])) {
+        fresh.push({ key, job, isVideo: isVideoKey(key) });
+      }
+    }
+    if (!fresh.length) return 0;
+    const ca = (it) => it.job.created_at || "";
+    const merged = [];
+    let i = 0, j = 0;
+    // On a created_at tie, emit the fresh item first; both streams keep each
+    // job's keys contiguous, so a job's images never get split apart.
+    while (i < fresh.length && j < allItems.length) {
+      if (ca(fresh[i]) >= ca(allItems[j])) merged.push(fresh[i++]);
+      else merged.push(allItems[j++]);
+    }
+    while (i < fresh.length) merged.push(fresh[i++]);
+    while (j < allItems.length) merged.push(allItems[j++]);
+    allItems = merged;
+    return fresh.length;
   }
 
   async function loadJobs() {
@@ -248,10 +283,10 @@
       return;
     }
     try {
-      const initial = await _fetchJobsPage(0, INITIAL_FETCH);
+      const initial = await _fetchJobs({ limit: INITIAL_FETCH });
       if (myGen !== loadGen) return;
       allItems = [];
-      _appendJobsAsItems(initial);
+      _appendJobsAsItems(initial.jobs);
       // Drop any selected keys that no longer exist after the reload, and
       // reset the shift-select anchor — filtered() indices have shifted.
       lastSelIdx = -1;
@@ -264,7 +299,8 @@
       renderGrid();
       // Tail of the history streams in below the fold. A short initial fetch
       // means filter tabs / search start sparse and fill as batches arrive.
-      if (initial.length >= INITIAL_FETCH) _bgLoadRest(myGen, initial.length);
+      // A non-null cursor means more rows may follow.
+      if (initial.cursor) _bgLoadRest(myGen, initial.cursor);
     } catch (e) {
       if (myGen !== loadGen) return;
       grid.innerHTML = `<div class="empty"><div class="e-title">Couldn't load</div>` +
@@ -272,31 +308,31 @@
     }
   }
 
-  // Page through the rest of the job history in the background. Stops when
-  // an empty batch comes back (table exhausted) or a fresh loadJobs()
-  // supersedes this run. After each batch, re-renders the grid only when
-  // the user's current page slice actually gains items — appended items are
-  // older than everything in allItems, so a slice that's already full of
+  // Page through the rest of the job history in the background via the keyset
+  // cursor. Stops when the cursor goes null (table exhausted) or a fresh
+  // loadJobs() supersedes this run. After each batch, re-renders the grid only
+  // when the user's current page slice actually gains items — appended items
+  // are older than everything in allItems, so a slice that's already full of
   // newer items is byte-identical; just the pagers update.
   //
-  // Cost note: offset/limit pagination re-queries the per-status pool of
-  // size (offset + limit) per request, so total backend work grows with N
-  // batches — the tradeoff for fast first paint.
-  async function _bgLoadRest(myGen, startOffset) {
-    let offset = startOffset;
-    while (true) {
-      let batch;
-      try { batch = await _fetchJobsPage(offset, BG_FETCH); }
+  // Keyset pagination reads exactly BG_FETCH rows per page (resumed by cursor),
+  // so the whole history loads in O(N) reads total — no offset re-scan.
+  async function _bgLoadRest(myGen, startCursor) {
+    let cursor = startCursor;
+    while (cursor) {
+      let res;
+      try { res = await _fetchJobs({ cursor, limit: BG_FETCH }); }
       catch (_e) { return; } // give up silently — the page already painted
       if (myGen !== loadGen) return;
-      if (!batch.length) return;
+      cursor = res.cursor;
+      if (!res.jobs.length) continue; // empty page; null cursor ends the loop
       const sliceStart = page * PER_PAGE;
       const sliceEnd = sliceStart + PER_PAGE;
       const beforeFiltered = filtered().length;
       const beforePages = Math.max(1, Math.ceil(beforeFiltered / PER_PAGE));
       const beforeInSlice = Math.max(
         0, Math.min(beforeFiltered, sliceEnd) - sliceStart);
-      _appendJobsAsItems(batch);
+      _appendJobsAsItems(res.jobs);
       refreshCounts();
       const afterFiltered = filtered().length;
       const afterPages = Math.max(1, Math.ceil(afterFiltered / PER_PAGE));
@@ -310,8 +346,38 @@
         renderPager(pagerTop, afterPages, afterFiltered);
         renderPager(pager, afterPages, afterFiltered);
       }
-      offset += batch.length;
     }
+  }
+
+  // Incremental head refresh: re-fetch just the newest page and merge any
+  // newly-completed jobs into allItems at their sorted position — no full
+  // re-pagination. Runs when a generation completes while the user is on
+  // page 0. A job can complete out of submit order (parallel workers), so we
+  // re-read the authoritative newest window rather than tracking a watermark
+  // that a late, lower-created_at completion would slip below. Bounded to one
+  // INITIAL_FETCH page (~one query), independent of history size.
+  //
+  // Limitation: a completion whose created_at falls BELOW this newest window
+  // (a job submitted long ago, finishing now — e.g. a wedged/retried straggler)
+  // belongs on a later page the page-0 user isn't viewing; it's reconciled by
+  // the full loadJobs() that runs on return-to-page-0 (renderPager) or reload.
+  //
+  // Shares loadGen with an in-flight _bgLoadRest rather than bumping it: the
+  // bg-loader only ever appends OLDER rows at the tail while this merges NEWER
+  // rows at the head, so they touch disjoint regions and can't double-insert
+  // (dedup by job_id guards the boundary regardless).
+  async function _refreshHead() {
+    if (!allItems.length) return loadJobs(); // nothing loaded yet
+    const myGen = loadGen;
+    let res;
+    try { res = await _fetchJobs({ limit: INITIAL_FETCH }); }
+    catch (_e) { return; }
+    if (myGen !== loadGen) return; // a full reload superseded us mid-flight
+    const added = _mergeJobsAsItems(res.jobs);
+    if (!added) return;
+    lastSelIdx = -1; // a merge shifted filtered() indices — drop the anchor
+    refreshCounts();
+    renderGrid();
   }
 
   /* ---------- grid ---------- */
@@ -373,11 +439,13 @@
       const prev = page;
       page = Math.max(0, Math.min(pages - 1, p));
       renderGrid();
-      // Coming back to page 0 picks up anything the pending-poll's refresh
-      // was suppressing while we were away (see the page === 0 guard in
-      // renderPending). renderGrid() above paints with current data first
-      // so the user sees something immediately; loadJobs() re-renders when
-      // the response lands.
+      // Coming back to page 0 does a full reload — it reconciles EVERYTHING
+      // that completed while we were away, including stragglers whose
+      // created_at falls below the head-refresh window (the page === 0 guard
+      // in renderPending suppresses refreshes on other pages). It's O(N) now
+      // (keyset), not O(N²), and only fires on this navigation. renderGrid()
+      // above paints current data first so the user sees something immediately;
+      // loadJobs() re-renders when its response lands.
       if (prev !== 0 && page === 0) loadJobs();
       window.scrollTo(0, 0);
     };
@@ -1039,14 +1107,14 @@
     pending.innerHTML = buildPendingHtml(running, queued, failed, qTotal, queuedByType);
     wirePending();
 
-    // A job leaving the queue (likely) finished — refresh the gallery. Skip
-    // when the user is past page 0: the new job lands at the top of page 0,
-    // and loadJobs() resets allItems to the initial-fetch window — too small
-    // to cover a late page, so we'd bump the user back. A later return to
-    // page 0 (or the next completion while there) picks the new job up.
+    // A job leaving the queue (likely) finished — merge just the newest page
+    // into the gallery via the head refresh (no full re-pagination). Gated to
+    // page 0: re-rendering a later page would shift cards under the user. A
+    // return to page 0 (renderPager) does the full reconcile for anything the
+    // bounded head window missed.
     const cur = new Set(jobs.map((j) => j.job_id));
     if (page === 0 && lastPendingIds &&
-        [...lastPendingIds].some((id) => !cur.has(id))) loadJobs();
+        [...lastPendingIds].some((id) => !cur.has(id))) _refreshHead();
     lastPendingIds = cur;
   }
 
