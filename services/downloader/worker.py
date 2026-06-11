@@ -46,13 +46,14 @@ def lambda_handler(event: dict, _context: Any) -> dict:
     download_id = event["download_id"]
     civitai_url = event["civitai_url"]
     model_type = event["model_type"]
+    file_name = event.get("file_name") or ""
 
     try:
         _set_status(download_id, "resolving")
         token = _civitai_token()
         version_id = _parse_version_id(civitai_url, token)
         meta = _fetch_metadata(version_id, token)
-        file_meta = _pick_primary_file(meta)
+        file_meta = _pick_file(meta, file_name)
         total_bytes = int(file_meta["sizeKB"] * 1024)
         _set_total(download_id, total_bytes, file_meta["name"])
 
@@ -203,6 +204,22 @@ def _fetch_metadata(version_id: int, token: str) -> dict:
     if r.status >= 400:
         raise RuntimeError(f"civitai api {r.status}: {r.data[:200]!r}")
     return json.loads(r.data.decode())
+
+
+def _pick_file(meta: dict, file_name: str = "") -> dict:
+    """Select the file to download. With ``file_name`` given, match it by name
+    (case-insensitive) — lets callers grab a NON-primary file from a multi-file
+    version (e.g. an Anima checkpoint's bundled text encoder). Otherwise fall
+    back to the primary-file heuristic."""
+    if file_name:
+        files = meta.get("files", [])
+        target = file_name.strip().lower()
+        for f in files:
+            if str(f.get("name", "")).strip().lower() == target:
+                return f
+        names = ", ".join(str(f.get("name", "")) for f in files) or "(none)"
+        raise RuntimeError(f"file_name {file_name!r} not in version files: {names}")
+    return _pick_primary_file(meta)
 
 
 def _pick_primary_file(meta: dict) -> dict:

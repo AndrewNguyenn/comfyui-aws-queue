@@ -78,6 +78,11 @@ def _kickoff(event: dict) -> dict:
     body = json.loads(event.get("body") or "{}")
     civitai_url = body.get("civitai_url", "").strip()
     model_type = body.get("model_type", "").strip().lower()
+    # Optional: select a SPECIFIC file from a multi-file CivitAI version by name
+    # (case-insensitive, matched in the worker). Default (absent) keeps the
+    # primary-file behavior. Needed for versions that bundle non-primary files —
+    # e.g. an Anima checkpoint's separate text encoder / VAE alongside the UNET.
+    file_name = body.get("file_name", "").strip()
 
     if not civitai_url or not _looks_like_civitai_url(civitai_url):
         return _resp(400, {"error": "invalid civitai_url"})
@@ -98,16 +103,18 @@ def _kickoff(event: dict) -> dict:
             "total_bytes": {"N": "0"},
             "created_at": {"S": datetime.now(timezone.utc).isoformat()},
             "expire_at": {"N": str(expire_at)},
+            **({"file_name": {"S": file_name}} if file_name else {}),
         },
     )
 
     # Async invoke (Event = fire-and-forget). Returns immediately.
+    payload = {"download_id": download_id, "civitai_url": civitai_url, "model_type": model_type}
+    if file_name:
+        payload["file_name"] = file_name
     lam.invoke(
         FunctionName=DOWNLOAD_WORKER_FN,
         InvocationType="Event",
-        Payload=json.dumps(
-            {"download_id": download_id, "civitai_url": civitai_url, "model_type": model_type}
-        ).encode(),
+        Payload=json.dumps(payload).encode(),
     )
 
     return _resp(202, {"download_id": download_id, "status": "queued"})
