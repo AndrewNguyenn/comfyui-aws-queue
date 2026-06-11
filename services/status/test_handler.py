@@ -373,6 +373,186 @@ def test_cancel_group_rejects_empty_identity():
     assert resp["statusCode"] == 400, resp
 
 
+# ---------------------------------------------------------------------------
+# /jobs keyset (cursor) pagination
+# ---------------------------------------------------------------------------
+class _FakeGSI:
+    """Simulates a Query on the jobs-by-status GSI over an in-memory dataset:
+    a status partition sorted by created_at (desc via ScanIndexForward=False,
+    job_id as the tiebreak for a total order), Limit, and ExclusiveStartKey
+    resume. `page_cap` models DynamoDB's own ~1 MB short-page truncation so
+    _query_page's inner re-query loop is exercised. Tracks rows_read (to prove
+    O(N), no re-scan) and call count."""
+
+    def __init__(self, rows, page_cap=10_000):
+        self.rows = rows
+        self.page_cap = page_cap
+        self.rows_read = 0
+        self.calls = 0
+
+    def query(self, **kw):
+        self.calls += 1
+        assert kw["IndexName"] == "jobs-by-status"
+        assert kw["ScanIndexForward"] is False
+        status = kw["ExpressionAttributeValues"][":s"]["S"]
+        pool = [r for r in self.rows if r["status"]["S"] == status]
+        pool.sort(key=lambda r: (r["created_at"]["S"], r["job_id"]["S"]), reverse=True)
+        start = kw.get("ExclusiveStartKey")
+        if start:
+            sk = (start["created_at"]["S"], start["job_id"]["S"])
+            idx = next((i for i, r in enumerate(pool)
+                        if (r["created_at"]["S"], r["job_id"]["S"]) == sk), None)
+            pool = pool[idx + 1:] if idx is not None else []
+        n = min(kw["Limit"], self.page_cap)
+        page = pool[:n]
+        self.rows_read += len(page)
+        out = {"Items": page}
+        if len(page) < len(pool):  # more rows remain → hand back a resume key
+            last = page[-1]
+            out["LastEvaluatedKey"] = {"status": last["status"],
+                                       "created_at": last["created_at"],
+                                       "job_id": last["job_id"]}
+        return out
+
+
+def _row(job_id, status, created_at):
+    return {"job_id": {"S": job_id}, "type": {"S": "image"},
+            "status": {"S": status}, "created_at": {"S": created_at},
+            "output_keys": {"S": json.dumps([f"out/{job_id}.png"])}}
+
+
+def _rows(n, status="complete"):
+    # created_at sorts lexicographically with i, so job-000NN is the newest.
+    return [_row(f"job-{i:05d}", status, f"2026-06-11T00:00:{i:05d}")
+            for i in range(n)]
+
+
+def _sweep(fake, qs_base):
+    """Page the whole history via the cursor, returning the job_ids in order."""
+    saved = h.ddb
+    seen, cursor, pages = [], None, 0
+    try:
+        h.ddb = fake
+        while True:
+            qs = dict(qs_base)
+            if cursor:
+                qs["cursor"] = cursor
+            body = json.loads(h._list_jobs({"queryStringParameters": qs})["body"])
+            seen.extend(j["job_id"] for j in body["jobs"])
+            cursor = body["next_cursor"]
+            pages += 1
+            assert pages < 1000, "cursor sweep did not terminate"
+            if not cursor:
+                break
+    finally:
+        h.ddb = saved
+    return seen
+
+
+def test_keyset_pagination_covers_every_row_exactly_once():
+    fake = _FakeGSI(_rows(1000))
+    seen = _sweep(fake, {"status": "complete", "limit": "300"})
+    assert len(seen) == 1000
+    assert len(set(seen)) == 1000             # no page overlap / duplicates
+    assert seen[0] == "job-00999"             # newest first
+    assert seen[-1] == "job-00000"            # oldest last, contiguous
+    # The whole point: each row is read exactly once across the sweep — the old
+    # offset/limit path re-read everything above each page (O(N^2)).
+    assert fake.rows_read == 1000, fake.rows_read
+
+
+def test_keyset_inner_loop_fills_page_across_short_dynamo_pages():
+    # DynamoDB hands back at most 120 rows/query; _query_page must re-query to
+    # fill a 300-row API page, threading the LastEvaluatedKey correctly.
+    fake = _FakeGSI(_rows(500), page_cap=120)
+    seen = _sweep(fake, {"status": "complete", "limit": "300"})
+    assert len(seen) == 500 and len(set(seen)) == 500
+    assert seen[0] == "job-00499"
+    assert fake.rows_read == 500              # still O(N) despite short pages
+    assert fake.calls > 500 / 300             # >1 ddb query per API page
+
+
+def test_bad_cursor_returns_400_without_querying():
+    fake = _FakeGSI(_rows(10))
+    saved = h.ddb
+    try:
+        h.ddb = fake
+        resp = h._list_jobs({"queryStringParameters": {
+            "status": "complete", "limit": "150", "cursor": "%%%not-base64%%%"}})
+    finally:
+        h.ddb = saved
+    assert resp["statusCode"] == 400, resp
+    assert fake.calls == 0                    # rejected before any DynamoDB read
+
+
+def test_cursor_status_mismatch_returns_400():
+    # a token minted for `complete` must not resume a `running` query.
+    cur = h._encode_cursor({"status": {"S": "complete"},
+                            "created_at": {"S": "2026-06-11T00:00:00500"},
+                            "job_id": {"S": "job-00500"}})
+    fake = _FakeGSI(_rows(10, status="running"))
+    saved = h.ddb
+    try:
+        h.ddb = fake
+        resp = h._list_jobs({"queryStringParameters": {
+            "status": "running", "limit": "150", "cursor": cur}})
+    finally:
+        h.ddb = saved
+    assert resp["statusCode"] == 400, resp
+
+
+def test_malformed_cursor_shape_returns_400_not_500():
+    # A token with the right status but a wrong key shape must be rejected by
+    # _decode_cursor (a clean 400) rather than passed to DynamoDB as an
+    # ExclusiveStartKey, where it would raise ValidationException → a 500.
+    bad = h._encode_cursor({"status": {"S": "complete"}, "junk": {"S": "x"}})
+    fake = _FakeGSI(_rows(10))
+    saved = h.ddb
+    try:
+        h.ddb = fake
+        resp = h._list_jobs({"queryStringParameters": {
+            "status": "complete", "limit": "150", "cursor": bad}})
+    finally:
+        h.ddb = saved
+    assert resp["statusCode"] == 400, resp
+    assert fake.calls == 0
+
+
+def test_single_status_offset_without_cursor_keeps_legacy_slice():
+    # A stale client still paging by offset (no cursor) must keep working.
+    fake = _FakeGSI(_rows(10))
+    saved = h.ddb
+    try:
+        h.ddb = fake
+        body = json.loads(h._list_jobs({"queryStringParameters": {
+            "status": "complete", "limit": "3", "offset": "3"}})["body"])
+    finally:
+        h.ddb = saved
+    ids = [j["job_id"] for j in body["jobs"]]
+    assert ids == ["job-00006", "job-00005", "job-00004"], ids  # newest, skip 3
+    assert body["next_cursor"] is None        # legacy path exposes no cursor
+    assert "offset" in body and "total" in body
+
+
+def test_multi_status_uses_legacy_offset_merge():
+    rows = ([_row(f"c{i}", "complete", f"2026-06-11T00:00:0{i}") for i in range(3)] +
+            [_row(f"f{i}", "failed", f"2026-06-11T00:00:1{i}") for i in range(3)])
+    fake = _FakeGSI(rows)
+    saved = h.ddb
+    try:
+        h.ddb = fake
+        body = json.loads(h._list_jobs({"queryStringParameters": {
+            "status": "complete,failed", "limit": "10"}})["body"])
+    finally:
+        h.ddb = saved
+    assert body["next_cursor"] is None
+    assert "offset" in body and "total" in body
+    ids = [j["job_id"] for j in body["jobs"]]
+    assert len(ids) == 6
+    assert ids[0] == "f2"                      # newest across both statuses
+    assert ids[-1] == "c0"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

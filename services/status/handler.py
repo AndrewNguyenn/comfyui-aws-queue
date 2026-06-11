@@ -13,6 +13,7 @@ Routes:
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -675,22 +676,54 @@ def _queue_depth() -> dict:
     })
 
 
-def _query_newest(status: str, n: int) -> list:
-    """The `n` newest job records in `status`, via the jobs-by-status GSI.
+def _encode_cursor(lek: dict) -> str:
+    """Opaque page token = the GSI LastEvaluatedKey (status/created_at/job_id),
+    base64'd. The viewer passes it back as ?cursor= to resume the next page."""
+    return base64.urlsafe_b64encode(
+        json.dumps(lek, sort_keys=True).encode()).decode()
 
-    Pages through LastEvaluatedKey until it has `n` items or the status is
-    exhausted (a single Query returns only one ~1 MB page). jobs-by-status is an
-    INCLUDE projection carrying only the small _LIST_PROJECTION_ATTRS (model/
-    character/subject denormalized at dispatch — NO workflow_json), so each row
-    read is ~1 KB instead of the old ALL-projection ~47 KB: ~12x fewer read units
-    per row, and far more rows fit in the 1 MB page. Still bound `n` — read
-    capacity scales with rows read."""
+
+def _decode_cursor(cursor: str, status: str) -> dict:
+    """Inverse of _encode_cursor. Validates the token is a well-formed GSI key
+    {status, created_at, job_id} (all string attrs) for the requested partition
+    — a stale/forged/malformed cursor must be a clean 400, not a DynamoDB
+    ValidationException (a 500) or a cross-status read."""
+    key = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+    if (not isinstance(key, dict)
+            or set(key) != {"status", "created_at", "job_id"}
+            or not all(isinstance(v, dict) and isinstance(v.get("S"), str)
+                       for v in key.values())
+            or key["status"]["S"] != status):
+        raise ValueError("malformed cursor")
+    return key
+
+
+def _query_page(
+    status: str, limit: int, start_key: dict | None
+) -> tuple[list, dict | None]:
+    """One keyset page of the `limit` newest jobs in `status`, via the
+    jobs-by-status GSI, resuming after `start_key` (ExclusiveStartKey) when
+    given. Each page reads exactly `limit` rows off the index — no offset
+    re-scan — so paging the whole history costs O(N) reads total, not O(N²).
+
+    jobs-by-status is an INCLUDE projection carrying only the small
+    _LIST_PROJECTION_ATTRS (model/character/subject denormalized at dispatch — NO
+    workflow_json), so each row read is ~1 KB instead of the old ALL-projection
+    ~47 KB. Returns (page, next_start_key); next_start_key is None when the
+    status is exhausted.
+
+    The inner loop only re-queries when DynamoDB hands back a short page (its own
+    ~1 MB cap) before `limit` is reached; the LastEvaluatedKey it returns is the
+    resume point for the *next* page."""
     items: list = []
-    kwargs: dict = {}
     names = {f"#p{i}": a for i, a in enumerate(_LIST_PROJECTION_ATTRS)}
     names["#s"] = "status"  # alias for the key condition
     projection = ", ".join(f"#p{i}" for i in range(len(_LIST_PROJECTION_ATTRS)))
-    while len(items) < n:
+    kwargs: dict = {}
+    if start_key:
+        kwargs["ExclusiveStartKey"] = start_key
+    lek = None
+    while len(items) < limit:
         r = ddb.query(
             TableName=JOBS_TABLE,
             IndexName="jobs-by-status",
@@ -699,7 +732,7 @@ def _query_newest(status: str, n: int) -> list:
             ExpressionAttributeValues={":s": {"S": status}},
             ProjectionExpression=projection,
             ScanIndexForward=False,  # newest (highest created_at) first
-            Limit=n - len(items),
+            Limit=limit - len(items),
             **kwargs,
         )
         items.extend(r.get("Items", []))
@@ -707,15 +740,29 @@ def _query_newest(status: str, n: int) -> list:
         if not lek:
             break
         kwargs["ExclusiveStartKey"] = lek
-    return items[:n]
+    return items[:limit], lek
+
+
+def _query_newest(status: str, n: int) -> list:
+    """The `n` newest job records in `status` (legacy multi-status list path) —
+    a keyset page from the top, discarding the resume cursor."""
+    items, _ = _query_page(status, n, None)
+    return items
 
 
 def _list_jobs(event: dict) -> dict:
-    """GET /jobs?status=complete,failed,cancelled&limit=64&offset=0
+    """GET /jobs?status=complete&limit=150[&cursor=…|&offset=0]
 
-    Queries the jobs-by-status GSI (paginated — see _query_newest) once per
-    requested status, merges, sorts by submission time (created_at)
-    newest-first, then applies offset/limit in Python.
+    Single status (the viewer gallery + pending strip): keyset pagination over
+    the jobs-by-status GSI. `cursor` resumes after the previous page; each page
+    reads exactly `limit` rows (see _query_page); the response carries
+    `next_cursor` (null at the end of the history). The gallery's head refresh
+    just re-fetches the first page (no cursor) and merges by created_at.
+
+    Multi-status (or a stale client still paging by offset): the legacy
+    offset/limit merge — query each status's newest (offset+limit), sort by
+    created_at, slice. offset>0 with no cursor routes here so old tabs keep
+    working through the cutover.
     """
     qs = event.get("queryStringParameters") or {}
     statuses = [s.strip() for s in (qs.get("status") or "").split(",") if s.strip()]
@@ -727,9 +774,7 @@ def _list_jobs(event: dict) -> dict:
 
     try:
         # 8000 cap: the lite list job is ~600 B, so even a full 8000-job
-        # response stays well under Lambda's 6 MB limit. The viewer's gallery
-        # fetches the lot in one call so its client-side paging/search see
-        # every generation.
+        # response stays well under Lambda's 6 MB limit.
         limit = max(1, min(int(qs.get("limit") or 64), 8000))
     except ValueError:
         limit = 64
@@ -737,12 +782,31 @@ def _list_jobs(event: dict) -> dict:
         offset = max(0, int(qs.get("offset") or 0))
     except ValueError:
         offset = 0
+    cursor = qs.get("cursor")
 
-    # Each status contributes its newest (offset+limit) records by created_at
-    # (the GSI sort key). Since the merge below also sorts by created_at, the
-    # fetch order and sort order match, so the top (offset+limit) of the merge
-    # is exactly the global newest however the statuses interleave.
-    items: list[dict] = []
+    # Keyset path: a single status that isn't an offset-paged stale client.
+    # Reads exactly `limit` rows per page (resumed by cursor) — no offset
+    # re-scan of everything above the page.
+    if len(statuses) == 1 and not (offset and not cursor):
+        status = statuses[0]
+        start_key = None
+        if cursor:
+            try:
+                start_key = _decode_cursor(cursor, status)
+            except Exception:  # noqa: BLE001 — any malformed token is a 400
+                return _resp(400, {"error": "bad cursor"})
+        items, lek = _query_page(status, limit, start_key)
+        jobs = [_serialize_job(it, lite=True) for it in items]
+        return _resp(200, {
+            "jobs": jobs,
+            "limit": limit,
+            "next_cursor": _encode_cursor(lek) if lek else None,
+        })
+
+    # Legacy offset/limit merge across statuses. Each status contributes its
+    # newest (offset+limit) records by created_at (the GSI sort key); the merge
+    # sorts the same way, so the top (offset+limit) is the global newest.
+    items = []
     for status in statuses:
         items.extend(_query_newest(status, offset + limit))
 
@@ -754,7 +818,10 @@ def _list_jobs(event: dict) -> dict:
     # `total` is the size of the fetched candidate pool (capped per status at
     # offset+limit), not a true count of all matching jobs. Fine for the
     # current callers — none of them page on it.
-    return _resp(200, {"jobs": jobs, "limit": limit, "offset": offset, "total": len(items)})
+    return _resp(200, {
+        "jobs": jobs, "limit": limit, "offset": offset,
+        "total": len(items), "next_cursor": None,
+    })
 
 
 def _serialize_job(it: dict, lite: bool = False) -> dict:
