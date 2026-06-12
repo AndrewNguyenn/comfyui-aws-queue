@@ -179,6 +179,18 @@
     const m = Math.floor(s / 60);
     return `${m}:${String(Math.floor(s - m * 60)).padStart(2, "0")}`;
   }
+  // Render wall-time for a finished job: worker-claim -> outputs-uploaded
+  // (started_at -> completed_at, both ISO-8601 UTC on the job record). This
+  // span includes output upload and excludes queue wait, so it reads as
+  // "render time," not pure ComfyUI sampling. Empty for still-running or
+  // failed jobs (no completed_at) so the row falls back to a dash.
+  function fmtDuration(start, end) {
+    if (!start || !end) return "";
+    const s = (new Date(end).getTime() - new Date(start).getTime()) / 1000;
+    if (!isFinite(s) || s < 0) return "";
+    const r = Math.round(s);
+    return r < 60 ? `${r}s` : `${Math.floor(r / 60)}m ${r % 60}s`;
+  }
   // Minutes a job has been waiting, and a compact "39m" / "1h 12m" rendering.
   const ageMin = (iso) =>
     iso ? Math.floor(Math.max(0, Date.now() - new Date(iso).getTime()) / 60000) : 0;
@@ -1155,6 +1167,7 @@
             `<div class="field"><div class="k">Model</div><div class="v">${esc(job.model || "—")}</div></div>` +
             `<div class="field"><div class="k">Type</div><div class="v">${esc(job.type || "—")}</div></div>` +
             `<div class="field"><div class="k">Created</div><div class="v">${esc(fmtWhen(job.created_at))}</div></div>` +
+            `<div class="field"><div class="k">Render</div><div class="v">${esc(fmtDuration(job.started_at, job.completed_at) || "—")}</div></div>` +
             `<div class="field"><div class="k">Job</div><div class="v">${esc(job.job_id.slice(0, 8))}</div></div>` +
             // Filled in by the /jobs/{id} pre-fetch below — the /jobs list
             // response is lite and carries no prompts/params.
