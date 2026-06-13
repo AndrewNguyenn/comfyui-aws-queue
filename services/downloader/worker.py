@@ -70,6 +70,7 @@ def lambda_handler(event: dict, _context: Any) -> dict:
             file_meta["downloadUrl"], token, s3_key, total_bytes, download_id
         )
         _add_to_catalog(file_meta, model_type, s3_key, bytes_done, version_id, meta)
+        _write_loramanager_metadata(file_meta, model_type, s3_key, bytes_done, meta)
         _set_status(download_id, "complete")
         return {"ok": True, "download_id": download_id, "s3_key": s3_key}
 
@@ -378,6 +379,62 @@ def _add_to_catalog(
         ddb.put_item(TableName=MODELS_TABLE, Item=item)
     except Exception as e:  # noqa: BLE001
         print(f"warning: could not add to catalog: {e!r}")
+
+
+def _write_loramanager_metadata(
+    file_meta: dict,
+    model_type: str,
+    s3_key: str,
+    size_bytes: int,
+    meta: dict,
+) -> None:
+    """Pre-seed comfyui-lora-manager's per-file ``<name>.metadata.json`` next to a
+    downloaded LoRA so the GPU fleet never re-hashes it on boot.
+
+    The loras dir is a READ-ONLY mount-s3 mount, so lora-manager can't persist the
+    metadata it generates — left unseeded it SHA256-re-hashes EVERY lora on EVERY
+    ComfyUI startup, which OOM-kills ComfyUI on the 16 GB workers. CivitAI already
+    returns the file's SHA256 (and our S3 copy is the same byte stream), so seeding
+    it here is free and stops the storm at the source. lora-manager loads an existing
+    ``.metadata.json`` and skips hashing iff it parses and ``sha256`` is non-empty.
+    LoRA only; non-fatal — a download must never fail over a metadata side-file.
+    """
+    if model_type != "lora":
+        return
+    try:
+        sha256 = ((file_meta.get("hashes") or {}).get("SHA256") or "").lower()
+        if not sha256:
+            print(f"no civitai SHA256 for {s3_key}; skipping lora-manager metadata (worker hashes once)")
+            return
+        base = file_meta["name"]            # e.g. "X.safetensors"
+        name = base.rsplit(".", 1)[0]       # "X"
+        images = meta.get("images") or []
+        preview_url = (images[0].get("url", "") if images else "") or ""
+        metadata = {
+            "file_name": name,
+            "model_name": (meta.get("model") or {}).get("name") or name,
+            "file_path": f"/opt/comfy/models/loras/{base}",
+            "size": int(size_bytes),
+            "modified": 0.0,
+            "sha256": sha256,
+            "base_model": meta.get("baseModel") or "",
+            "preview_url": preview_url,
+            "preview_nsfw_level": 0,
+            "notes": "",
+            "hash_status": "completed",
+            "usage_tips": "{}",
+            "from_civitai": True,
+        }
+        meta_key = f"{s3_key.rsplit('.', 1)[0]}.metadata.json"
+        s3.put_object(
+            Bucket=MODELS_BUCKET,
+            Key=meta_key,
+            Body=json.dumps(metadata).encode(),
+            ContentType="application/json",
+        )
+        print(f"seeded lora-manager metadata: {meta_key}")
+    except Exception as e:  # noqa: BLE001
+        print(f"warning: lora-manager metadata seed failed for {s3_key} (non-fatal): {e!r}")
 
 
 def _set_status(download_id: str, status: str) -> None:
