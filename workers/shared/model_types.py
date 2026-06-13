@@ -53,6 +53,12 @@ TYPE_DIR: dict[str, str] = {
     # mounts the wildcards/ S3 prefix at Impact-Pack's custom_wildcards path
     # instead. kickoff.py ALLOWED_TYPES still lists it so the downloader
     # accepts the type.
+    # Florence2 / VLM weights. kijai's DownloadAndLoadFlorence2Model loads from
+    # models/LLM/<repo-name>/ and SKIPS the HuggingFace download iff that dir
+    # already exists — so pre-seeding the LLM/ S3 prefix (e.g.
+    # LLM/Florence-2-base-PromptGen-v2.0/) and mounting it here means the Z-Image
+    # VLM never re-downloads on a cold worker. A directory tree, not a single file.
+    "LLM": "LLM",
 }
 
 

@@ -56,6 +56,8 @@ ALLOWED_TYPES = (
     "insightface",       # → models/insightface — InsightFace face-analysis sets (FaceID)
     "wildcards",         # → models/wildcards — prompt wildcard .txt files (a .zip
                          #   pack is unzipped by the download worker)
+    "LLM",               # → models/LLM — VLM weights (Florence2) the Z-Image VLM
+                         #   loads; pre-seeded as a dir tree, mounted read-only
 )
 DOWNLOAD_TTL = timedelta(hours=24)
 
