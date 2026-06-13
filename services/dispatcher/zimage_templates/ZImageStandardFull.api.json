@@ -356,7 +356,7 @@
  },
  "471": {
   "inputs": {
-   "clip_name": "zImageTurbo_turbo_txt.safetensors",
+   "clip_name": "qwen_3_4b_fp8_mixed.safetensors",
    "type": "lumina2",
    "device": "default"
   },
