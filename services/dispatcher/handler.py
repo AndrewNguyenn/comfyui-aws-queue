@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,7 @@ from botocore.exceptions import ClientError
 from anima import maybe_rewrite_to_anima
 from extract import _extract_model, _extract_subject
 from workflow_router import classify_workflow
+from zimage import maybe_rewrite_to_zimage
 
 # AWS clients are created at module load (re-used across warm invocations).
 sqs = boto3.client("sqs")
@@ -234,6 +236,22 @@ def _arm_reaper() -> None:
         print(f"reaper arm failed (non-fatal): {e!r}")
 
 
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
+
+
+def _safe_input_image_name(name: Any) -> str:
+    """Sanitize a client-supplied input-image filename to a safe basename the
+    worker can write under ComfyUI's ``input/`` (no path traversal, ASCII only).
+    Returns '' when unusable. Ensures an image extension so LoadImage accepts it."""
+    base = os.path.basename(str(name or "")).strip()
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", base)[:124]  # cap stem first…
+    if not base or base in (".", ".."):
+        return ""
+    if not base.lower().endswith(_IMAGE_EXTS):
+        base += ".png"  # …so truncation can never drop the extension
+    return base
+
+
 def _post_prompt(event: dict) -> dict:
     body = json.loads(event.get("body") or "{}")
 
@@ -250,6 +268,37 @@ def _post_prompt(event: dict) -> dict:
     anima_rewritten = anima_workflow is not None
     if anima_rewritten:
         workflow = anima_workflow
+
+    # Z-Image is a Lumina2 architecture (UNET+CLIP+VAE), not SDXL — same None-CLIP
+    # failure mode as Anima if loaded via CheckpointLoaderSimple. If the submission
+    # references a Z-Image model, swap in the official Z-Image workflow, carrying
+    # over the model + prompts + an OPTIONAL user-uploaded reference image that the
+    # workflow's VLM (Florence-2) captions and feeds into the prompt. Mutually
+    # exclusive with the Anima rewrite (a model is at most one architecture).
+    zimage_rewritten = False
+    input_image_key = ""
+    input_image_name = ""
+    if not anima_rewritten:
+        raw_img = body.get("input_image")
+        if isinstance(raw_img, dict):
+            k = str(raw_img.get("key") or "").strip()
+            # Only accept keys the upload endpoint mints (uploads/<date>/<uuid>);
+            # the worker downloads this from the uploads bucket. No traversal.
+            if k.startswith("uploads/") and ".." not in k:
+                input_image_key = k
+                input_image_name = _safe_input_image_name(raw_img.get("name"))
+        zimage_workflow = maybe_rewrite_to_zimage(
+            workflow,
+            input_image_name=input_image_name or None,
+            options=body.get("zimage_options"),
+        )
+        zimage_rewritten = zimage_workflow is not None
+        if zimage_rewritten:
+            workflow = zimage_workflow
+        else:
+            # Not a Z-Image job — drop any stray input-image refs so we never tag a
+            # normal job with one (the worker only fetches for Z-Image jobs anyway).
+            input_image_key = input_image_name = ""
 
     explicit_type = body.get("type")
     if explicit_type in ("image", "video"):
@@ -278,7 +327,15 @@ def _post_prompt(event: dict) -> dict:
         "attempt_count": {"N": "0"},
         # True when the submitted graph was swapped for the Anima workflow.
         "anima_rewritten": {"BOOL": anima_rewritten},
+        # True when swapped for the Z-Image workflow.
+        "zimage_rewritten": {"BOOL": zimage_rewritten},
     }
+    # Z-Image VLM input image: the worker stages this from the uploads bucket into
+    # ComfyUI's input/<name> before the run (the template's LoadImage references the
+    # name). Stored only for a Z-Image job that carried a valid upload key.
+    if zimage_rewritten and input_image_key and input_image_name:
+        item["input_image_key"] = {"S": input_image_key}
+        item["input_image_name"] = {"S": input_image_name}
     # Denormalize the fields the /jobs list derives — model (all rows; the
     # gallery's model label) and character/subject (the pending-strip grouping)
     # — as small attrs (~120 B) computed from the SAME `workflow` we store in
