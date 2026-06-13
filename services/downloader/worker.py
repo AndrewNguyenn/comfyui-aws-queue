@@ -389,17 +389,24 @@ def _write_loramanager_metadata(
     meta: dict,
 ) -> None:
     """Pre-seed comfyui-lora-manager's per-file ``<name>.metadata.json`` next to a
-    downloaded LoRA so the GPU fleet never re-hashes it on boot.
+    downloaded model so the GPU fleet never re-hashes it on boot.
 
-    The loras dir is a READ-ONLY mount-s3 mount, so lora-manager can't persist the
-    metadata it generates — left unseeded it SHA256-re-hashes EVERY lora on EVERY
-    ComfyUI startup, which OOM-kills ComfyUI on the 16 GB workers. CivitAI already
-    returns the file's SHA256 (and our S3 copy is the same byte stream), so seeding
-    it here is free and stops the storm at the source. lora-manager loads an existing
+    lora-manager scans the loras, checkpoints AND diffusion_models dirs and SHA256-
+    hashes every unseeded model on EVERY ComfyUI startup. Those dirs are READ-ONLY
+    mount-s3 mounts, so it can never persist its own cache — left unseeded it re-hashes
+    on every boot, which OOM-kills ComfyUI on the 16 GB workers. CivitAI already returns
+    the file's SHA256 (and our S3 copy is the same byte stream), so seeding it here is
+    free and stops the storm at the source. lora-manager loads an existing
     ``.metadata.json`` and skips hashing iff it parses and ``sha256`` is non-empty.
-    LoRA only; non-fatal — a download must never fail over a metadata side-file.
+    Only the types lora-manager scans; non-fatal — a download must never fail over it.
     """
-    if model_type != "lora":
+    # catalog type -> ComfyUI model dir, for the dirs lora-manager scans + hashes.
+    comfy_dir = {
+        "lora": "loras",
+        "checkpoint": "checkpoints",
+        "diffusion_models": "diffusion_models",
+    }.get(model_type)
+    if not comfy_dir:
         return
     try:
         sha256 = ((file_meta.get("hashes") or {}).get("SHA256") or "").lower()
@@ -413,7 +420,7 @@ def _write_loramanager_metadata(
         metadata = {
             "file_name": name,
             "model_name": (meta.get("model") or {}).get("name") or name,
-            "file_path": f"/opt/comfy/models/loras/{base}",
+            "file_path": f"/opt/comfy/models/{comfy_dir}/{base}",
             "size": int(size_bytes),
             "modified": 0.0,
             "sha256": sha256,
@@ -425,6 +432,11 @@ def _write_loramanager_metadata(
             "usage_tips": "{}",
             "from_civitai": True,
         }
+        # checkpoints/diffusion_models load as CheckpointMetadata, which has a sub_type.
+        if model_type != "lora":
+            metadata["sub_type"] = (
+                "diffusion_model" if model_type == "diffusion_models" else "checkpoint"
+            )
         meta_key = f"{s3_key.rsplit('.', 1)[0]}.metadata.json"
         s3.put_object(
             Bucket=MODELS_BUCKET,

@@ -82,9 +82,32 @@ def test_seed_writes_valid_lorametadata_schema():
     assert m["hash_status"] == "completed"
 
 
-def test_seed_skips_non_lora_types():
-    assert _seed(_LORA_FILE, "checkpoint", "checkpoint/X.safetensors", 1, _VMETA) == []
+def test_seed_skips_unscanned_types():
+    # lora-manager only scans loras/checkpoints/diffusion_models — others are skipped
     assert _seed(_LORA_FILE, "vae", "vae/X.safetensors", 1, _VMETA) == []
+    assert _seed(_LORA_FILE, "controlnet", "controlnet/X.safetensors", 1, _VMETA) == []
+    assert _seed(_LORA_FILE, "embedding", "embedding/X.safetensors", 1, _VMETA) == []
+
+
+def test_seed_checkpoint_uses_checkpoints_dir_and_subtype():
+    f = {"name": "myCkpt_v1.safetensors", "hashes": {"SHA256": "DEAD" + "0" * 60}}
+    calls = _seed(f, "checkpoint", "checkpoint/myCkpt_v1.safetensors", 7_000_000_000, _VMETA)
+    assert len(calls) == 1
+    assert calls[0]["Key"] == "checkpoint/myCkpt_v1.metadata.json"
+    m = _json.loads(calls[0]["Body"])
+    assert m["file_path"] == "/opt/comfy/models/checkpoints/myCkpt_v1.safetensors"
+    assert m["sub_type"] == "checkpoint"
+    assert m["sha256"] == ("dead" + "0" * 60)
+
+
+def test_seed_diffusion_models_subtype():
+    f = {"name": "anima_base.safetensors", "hashes": {"SHA256": "BEEF" + "0" * 60}}
+    calls = _seed(f, "diffusion_models", "diffusion_models/anima_base.safetensors", 5_000_000_000, _VMETA)
+    assert len(calls) == 1
+    assert calls[0]["Key"] == "diffusion_models/anima_base.metadata.json"
+    m = _json.loads(calls[0]["Body"])
+    assert m["file_path"] == "/opt/comfy/models/diffusion_models/anima_base.safetensors"
+    assert m["sub_type"] == "diffusion_model"
 
 
 def test_seed_skips_when_no_civitai_sha256():
