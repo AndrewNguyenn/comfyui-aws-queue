@@ -58,13 +58,18 @@ OUTPUTS_BUCKET = os.environ["OUTPUTS_BUCKET"]
 JOBS_TABLE = os.environ["JOBS_TABLE"]
 MODELS_TABLE = os.environ["MODELS_TABLE"]
 REGION = os.environ["AWS_REGION"]
+# Bucket holding user-uploaded VLM reference images (Z-Image jobs). Read-only
+# grant; absent on older deploys, so default empty and skip staging if unset.
+UPLOADS_BUCKET = os.environ.get("UPLOADS_BUCKET", "")
 VISIBILITY_TIMEOUT_SEC = int(os.environ.get("VISIBILITY_TIMEOUT_SECONDS", "900"))
 HEARTBEAT_INTERVAL_SEC = 60
 CANCEL_POLL_INTERVAL_SEC = 5  # how often the cancel-watch thread re-checks DDB
 COMFY_OUTPUT_DIR = Path("/opt/comfy/output")
+COMFY_INPUT_DIR = Path("/opt/comfy/input")  # where LoadImage reads input/<name>
 
 sqs = boto3.client("sqs", region_name=REGION)
 ddb = boto3.client("dynamodb", region_name=REGION)
+s3 = boto3.client("s3", region_name=REGION)
 
 _IMDS = "http://169.254.169.254/latest"
 _imds_http = urllib3.PoolManager(timeout=urllib3.Timeout(connect=1.0, read=2.0))
@@ -240,6 +245,10 @@ def main() -> int:
             # I/O for multi-LoRA workflows.
             _prefetch_referenced_models(workflow)
 
+            # Z-Image jobs may carry a VLM reference image: stage it into
+            # ComfyUI's input/ before submit so the template's LoadImage resolves.
+            _stage_input_image(job_record)
+
             # Snapshot output dir BEFORE starting the job so we can scan for
             # new files after (handles custom nodes that bypass standard outputs).
             since = uploader.snapshot_marker()
@@ -345,7 +354,31 @@ def _read_job(job_id: str) -> dict | None:
         "type": item.get("type", {"S": ""})["S"],
         "workflow_json": item.get("workflow_json", {"S": "{}"})["S"],
         "client_id": item.get("client_id", {"S": ""})["S"],
+        # Z-Image VLM reference image (uploads-bucket key + the input/<name> the
+        # template's LoadImage references). Absent on every non-Z-Image job.
+        "input_image_key": item.get("input_image_key", {"S": ""})["S"],
+        "input_image_name": item.get("input_image_name", {"S": ""})["S"],
     }
+
+
+def _stage_input_image(job_record: dict) -> None:
+    """Stage a Z-Image job's VLM reference image from the uploads bucket into
+    ComfyUI's input/ dir so the template's LoadImage resolves to input/<name>.
+
+    Best-effort: a fetch failure must NOT abort the job — at worst the VLM node
+    errors and the job surfaces as a 0-output (the documented missing-input
+    behavior), which is better than crashing the worker over one image."""
+    key = job_record.get("input_image_key") or ""
+    name = os.path.basename(job_record.get("input_image_name") or "")  # no traversal
+    if not key or not name or not UPLOADS_BUCKET:
+        return
+    try:
+        COMFY_INPUT_DIR.mkdir(parents=True, exist_ok=True)
+        dest = COMFY_INPUT_DIR / name
+        s3.download_file(UPLOADS_BUCKET, key, str(dest))
+        log.info("staged VLM input image s3://%s/%s -> %s", UPLOADS_BUCKET, key, dest)
+    except Exception as e:  # noqa: BLE001 — never fail the job over the input image
+        log.warning("failed to stage input image %s (non-fatal): %r", key, e)
 
 
 def _claim_job(job_id: str, instance_type: str = "") -> bool:
