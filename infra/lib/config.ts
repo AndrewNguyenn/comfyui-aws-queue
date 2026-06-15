@@ -217,10 +217,11 @@ export const APP_CONFIG: AppConfig = {
 
   scaling: {
     imageMin: 0,
-    // 6 concurrent image workers. g5.xlarge is 4 vCPU → 24 vCPU total, within
-    // the 48-vCPU G/VT spot quota (approved 2026-06-08), still leaving headroom
-    // for the video fleet (shared pool).
-    imageMax: 6,
+    // 3 concurrent image workers (lowered from 6 to cap the peak fleet burn rate /
+    // cost ceiling). g5.xlarge 4 vCPU → 12 vCPU; on a drought the 2xlarge fallbacks
+    // (8 vCPU) → 24 vCPU — both well within the 48-vCPU G/VT spot quota, leaving
+    // room for the video fleet (shared pool).
+    imageMax: 3,
     videoMin: 0,
     videoMax: 3, // v3: lowered from 5 (resolves N2)
     targetBacklogPerTask: 25, // v3: raised from 10 (resolves N2)
