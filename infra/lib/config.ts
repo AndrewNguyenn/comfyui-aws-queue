@@ -165,8 +165,17 @@ export const APP_CONFIG: AppConfig = {
       // full fall-back to it = 48 vCPU = the entire G/VT spot quota (shared with
       // video) — only reachable in a deep drought at max scale; raise the quota
       // or lower imageMax if that becomes real.
-      primaryInstanceType: 'g5.xlarge',
-      fallbackInstanceTypes: ['g6.xlarge', 'g6.2xlarge'],
+      // 2026-07-12: moved the PRIMARY to 32 GB-RAM instances. Z-Image (a FLOW-arch
+      // model: ~6 GB UNET + ~5.6 GB qwen text encoder + VAE ≈ 12 GB of weights +
+      // ComfyUI working set) OOM-kills ComfyUI (rc=-9) on a 16 GB .xlarge even after
+      // stripping the FaceDetailer/upscale — exactly the FLOW-class OOM the g6.2xlarge
+      // note above predicted. g5.2xlarge = same A10G (24 GB VRAM, sm_86) but 8 vCPU /
+      // 32 GB RAM; g6.2xlarge (L4) + g6e.xlarge (L40S, 4 vCPU/32 GB) are 32 GB
+      // fallbacks. All ≥32 GB RAM so no pool can OOM a FLOW job. 16 GB g5/g6.xlarge
+      // pools are intentionally dropped. imageMax 3 × 8 vCPU = 24, under the 48 G/VT
+      // spot quota (shared with video).
+      primaryInstanceType: 'g5.2xlarge',
+      fallbackInstanceTypes: ['g6.2xlarge', 'g6e.xlarge'],
       rootVolumeGb: 150,
       // gp3 250 MB/s / 6000 IOPS (above the 125/3000 floor). The cold-start
       // bottleneck is the ECR image pull+extract to this root volume. Measured
