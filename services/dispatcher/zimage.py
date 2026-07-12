@@ -195,6 +195,38 @@ def _prune_vlm_branch(workflow: dict) -> None:
     _gc_unreachable(workflow, _SAVER_NODE)
 
 
+# Heavy post-processing the 16 GB image workers can't sustain, bypassed so
+# Z-Image jobs complete reliably (see comfytaggenerator diagnosis 2026-07-12):
+#   - FaceDetailer (node 80) loads a SECOND full SDXL checkpoint (~7 GB,
+#     CheckpointLoaderSimple 485) on top of the ~13 GB z-image stack -> the OS
+#     OOM-kills ComfyUI (Errno 111 :8188). This was the dominant failure.
+#   - UltimateSDUpscale (node 42) is a tiled SD-refine that runs ~750 s and
+#     overruns the 840 s worker cap (and its captured graph is even missing the
+#     required batch_size input, which drops the save chain at validation).
+# We rewire the cheap post chain (sharpen/gamma/film-grain/vignette) onto the
+# base decoded image, so both heavy branches become unreachable from the saver
+# and are GC'd. The base Z-Image turbo output is a complete image; an upscale/
+# detail pass can be re-run on favorites later.
+_BASE_IMAGE_NODE = "506"    # easy cleanGpuUsed — passthrough of the base VAEDecode (84)
+_COMPOSITE_NODE = "542"     # ImageCompositeMasked — dest/source were FaceDetailer
+_RESOLUTION_NODE = "546"    # Get resolution [Crystools] — image was FaceDetailer
+
+
+def _bypass_heavy_postprocessing(workflow: dict) -> None:
+    """Rewire the post chain onto the base decoded image so the FaceDetailer +
+    UltimateSDUpscale become unreachable from the saver and get GC'd. No-op on any
+    node the template no longer has (defensive, like the VLM prune)."""
+    base = [_BASE_IMAGE_NODE, 0]
+    comp = workflow.get(_COMPOSITE_NODE)
+    if isinstance(comp, dict):
+        comp.setdefault("inputs", {})["destination"] = list(base)
+        comp["inputs"]["source"] = list(base)
+    res = workflow.get(_RESOLUTION_NODE)
+    if isinstance(res, dict):
+        res.setdefault("inputs", {})["image"] = list(base)
+    _gc_unreachable(workflow, _SAVER_NODE)
+
+
 # ---------------------------------------------------------------------------
 # Per-model sampler overrides (extensible; empty = template defaults)
 # ---------------------------------------------------------------------------
@@ -264,6 +296,10 @@ def build_zimage_workflow(
         _set_input_image(workflow, input_image_name)
     else:
         _prune_vlm_branch(workflow)
+
+    # Bypass the OOM/timeout-inducing FaceDetailer + SD-upscale so the job runs
+    # reliably on the 16 GB workers.
+    _bypass_heavy_postprocessing(workflow)
 
     _inject_seed(workflow, random.randint(0, _SEED_MAX - 1))
     return workflow
