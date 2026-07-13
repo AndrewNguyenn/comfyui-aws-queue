@@ -68,6 +68,9 @@ ZIMAGE_MODELS: frozenset[str] = frozenset(
         "moodypromix_zitv12dpofp8",
         "moodyrealmix_zitv7fp8",
         "divingzimageturbo_v60fp8",
+        # fp8 realism mixes added 2026-07 (both cataloged as diffusion_models).
+        "moodyrealmix_xhsedition",  # Moody Real Mix — XHS Edition (v3092393)
+        "zit_v12",                  # Zit_winpicAsianRealism v1.2 (v3112544)
         # Official Tongyi-MAI variants (catalog when added; harmless until then).
         "zimagebase_base",
         "zimageturbo_turbo",
