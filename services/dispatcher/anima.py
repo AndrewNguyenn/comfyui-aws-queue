@@ -433,22 +433,29 @@ def _resolve_options(options: Optional[dict]) -> dict[str, Any]:
 # node 5 stays as an empty passthrough, and core-node semantics avoid any
 # dependency on LoraManager's custom cache/name resolution. LoRA files come from
 # the catalog's ``lora`` type (mounted at models/loras/), value = the filename.
+#
+# ``resolve_loras`` + the two limits below are PUBLIC: zimage.py's LoRA stack
+# imports them directly rather than duplicating the validation (same options
+# shape, same limits; only the graph-splice strategy differs per template's
+# topology, so each module keeps its own ``_LORA_CHAIN_BASE_ID`` / injection).
 
 _LORA_TARGET_NODE = "5"      # the LoraManager passthrough whose model/clip we feed
 _LORA_CHAIN_BASE_ID = 9001   # chain node ids 9001.. (template ids are all <= ~102)
-_LORA_MAX_COUNT = 8
-_LORA_STRENGTH_LIMIT = 4.0   # |strength| clamp; core LoraLoader allows negatives
+LORA_MAX_COUNT = 8
+LORA_STRENGTH_LIMIT = 4.0    # |strength| clamp; core LoraLoader allows negatives
 
 
-def _resolve_loras(options: Optional[dict]) -> list[dict]:
-    """Sanitized ``[{"name": str, "strength": float}]`` from anima_options.
-    Malformed entries are dropped (never raises); the list is capped."""
+def resolve_loras(options: Optional[dict]) -> list[dict]:
+    """Sanitized ``[{"name": str, "strength": float}]`` from a submission's
+    ``loras`` option list (``anima_options.loras`` / ``zimage_options.loras`` —
+    shared by both dispatcher substitutions). Malformed entries are dropped
+    (never raises); the list is capped at ``LORA_MAX_COUNT``."""
     opts = options if isinstance(options, dict) else {}
     raw = opts.get("loras")
     if not isinstance(raw, list):
         return []
     out: list[dict] = []
-    for entry in raw[: _LORA_MAX_COUNT * 2]:
+    for entry in raw[: LORA_MAX_COUNT * 2]:
         if not isinstance(entry, dict):
             continue
         name = entry.get("name")
@@ -460,9 +467,9 @@ def _resolve_loras(options: Optional[dict]) -> list[dict]:
         strength = entry.get("strength")
         if isinstance(strength, bool) or not isinstance(strength, (int, float)):
             strength = 1.0
-        strength = max(-_LORA_STRENGTH_LIMIT, min(_LORA_STRENGTH_LIMIT, float(strength)))
+        strength = max(-LORA_STRENGTH_LIMIT, min(LORA_STRENGTH_LIMIT, float(strength)))
         out.append({"name": name, "strength": strength})
-        if len(out) >= _LORA_MAX_COUNT:
+        if len(out) >= LORA_MAX_COUNT:
             break
     return out
 
@@ -677,7 +684,7 @@ def build_anima_workflow(
     # feeding the LoraManager passthrough. Never raises; sanitized + capped. The
     # chain sits upstream of the KSampler so it survives every reduction subset.
     try:
-        _inject_loras(workflow, _resolve_loras(options))
+        _inject_loras(workflow, resolve_loras(options))
     except Exception:  # noqa: BLE001 — a bad lora list must never break submission
         pass
 

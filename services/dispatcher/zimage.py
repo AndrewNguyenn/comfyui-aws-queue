@@ -42,7 +42,7 @@ from typing import Any, Optional
 # Reuse Anima's prompt tracer verbatim — the frontend submits the same catpony
 # graph (sampler.positive -> CLIPTextEncode.text -> String Literal), so the
 # extraction is identical. Public function; no private coupling.
-from anima import extract_prompts
+from anima import extract_prompts, resolve_loras
 
 # rgthree's Seed node validates seed <= 2**50; stay under it.
 _SEED_MAX = 2 ** 50
@@ -262,6 +262,72 @@ def _apply_model_sampler(workflow: dict, model: str) -> None:
             slider["inputs"]["Xf"] = float(over["steps"])
 
 
+# ---------------------------------------------------------------------------
+# LoRA stack injection
+# ---------------------------------------------------------------------------
+#
+# ``zimage_options.loras`` is an optional list of {"name": "<file>", "strength": f}
+# entries. Validation (``resolve_loras``) is SHARED with anima.py — same options
+# shape, same limits — imported rather than duplicated; see anima.py's LoRA
+# section for the rationale. Only the graph-splice strategy differs here: a
+# chain of CORE ``LoraLoader`` nodes spliced between the base UNETLoader (474) /
+# CLIPLoader (471) and ALL of their direct consumers. Unlike Anima (which targets
+# one fixed LoraManager passthrough node), the Z-Image template already has TWO
+# distinct direct consumers of the base loaders — "Power Lora Loader (rgthree)"
+# node 21 (model) and "CLIPSetLastLayer" node 473 (clip) — so the injection scans
+# for and rewires every direct reference generically rather than hardcoding a
+# single target node. LoRA files come from the catalog's ``lora`` type (mounted
+# at models/loras/), value = the filename.
+
+_LORA_CHAIN_BASE_ID = 9001   # chain node ids 9001.. (template ids are all <= ~558)
+
+
+def _inject_loras(wf: dict, loras: list[dict]) -> None:
+    """Insert a chain of core LoraLoader nodes between the base UNETLoader /
+    CLIPLoader and ALL of their direct consumers, then rewire every other
+    node's direct ``[<unet_id>, 0]`` model link / ``[<clip_id>, 0]`` clip link
+    onto the chain tail (LoraLoader output 0 = MODEL, 1 = CLIP). The chain
+    nodes themselves are exempt from rewiring. No-op (graph unchanged) when
+    the list is empty or the base loaders aren't found."""
+    if not loras:
+        return
+    unet_id = _first_node_id(wf, _UNET_CLASS)
+    clip_id = _first_node_id(wf, "CLIPLoader")
+    if unet_id is None or clip_id is None:
+        return
+
+    prev_model, prev_clip = [unet_id, 0], [clip_id, 0]
+    chain_ids: set[str] = set()
+    for i, lora in enumerate(loras):
+        nid = str(_LORA_CHAIN_BASE_ID + i)
+        chain_ids.add(nid)
+        wf[nid] = {
+            "inputs": {
+                "lora_name": lora["name"],
+                "strength_model": lora["strength"],
+                "strength_clip": lora["strength"],
+                "model": list(prev_model),
+                "clip": list(prev_clip),
+            },
+            "class_type": "LoraLoader",
+            "_meta": {"title": f"LoRA {i + 1}: {lora['name']}"},
+        }
+        prev_model, prev_clip = [nid, 0], [nid, 1]
+
+    for nid, node in wf.items():
+        if nid in chain_ids or not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs") or {}
+        for key, val in list(inputs.items()):
+            if not (isinstance(val, list) and len(val) == 2):
+                continue
+            src, slot = str(val[0]), val[1]
+            if src == str(unet_id) and slot == 0:
+                inputs[key] = list(prev_model)
+            elif src == str(clip_id) and slot == 0:
+                inputs[key] = list(prev_clip)
+
+
 def build_zimage_workflow(
     model: str,
     positive: str,
@@ -275,8 +341,9 @@ def build_zimage_workflow(
 
     ``input_image_name`` (a filename the worker has staged into ComfyUI's
     ``input/``) routes that image into the VLM. When absent the VLM branch is
-    pruned and it runs as txt2img. ``options`` is reserved (future detailer/upscale
-    toggles); unused today.
+    pruned and it runs as txt2img. ``options["loras"]`` (see ``_inject_loras``)
+    chains optional core LoraLoader nodes onto the base UNETLoader/CLIPLoader;
+    absent/empty leaves the workflow byte-identical to today's output.
 
     The prompt nodes are ALWAYS overwritten (even with an empty string) so the
     template's authored sample prompt can never leak into a user's job."""
@@ -294,6 +361,19 @@ def build_zimage_workflow(
     neg_id = _first_node_id(workflow, _NEGATIVE_CLASS)
     if neg_id:
         workflow[neg_id].setdefault("inputs", {})["negative"] = negative
+
+    # Optional LoRA stack (zimage_options.loras) — chained core LoraLoader nodes
+    # spliced between the base loaders and their consumers. Runs BEFORE the
+    # VLM-prune / heavy-postprocessing GC passes below so the chain is already in
+    # place when those passes compute reachability from the saver; the chain
+    # feeds the KSampler via node 21 (the rgthree passthrough), which survives
+    # both the VLM prune and the heavy-postprocessing bypass, so it's never
+    # GC'd. Never raises; sanitized + capped. No-op when no valid loras are
+    # given, so the workflow stays unchanged from today's output.
+    try:
+        _inject_loras(workflow, resolve_loras(options))
+    except Exception:  # noqa: BLE001 — a bad lora list must never break submission
+        pass
 
     if input_image_name:
         _set_input_image(workflow, input_image_name)

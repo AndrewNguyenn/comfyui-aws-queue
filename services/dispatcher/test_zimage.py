@@ -1,4 +1,5 @@
 """Tests for Z-Image detection / substitution / VLM-input handling."""
+import copy
 import json
 import os
 
@@ -123,3 +124,92 @@ def test_maybe_rewrite_carries_prompt_and_model():
 
 def test_maybe_rewrite_none_for_non_zimage():
     assert zimage.maybe_rewrite_to_zimage(_catpony_like("cyberrealisticPony_v180Coreshift.safetensors")) is None
+
+
+# --- LoRA stack injection ---------------------------------------------------
+
+def _seed_normalized(wf: dict) -> dict:
+    """Deep copy of ``wf`` with every literal ``seed``/``noise_seed`` int
+    zeroed, so two builds that differ only by the per-call random seed compare
+    equal."""
+    out = copy.deepcopy(wf)
+    for node in out.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs") or {}
+        for key in ("seed", "noise_seed"):
+            if isinstance(inputs.get(key), int):
+                inputs[key] = 0
+    return out
+
+
+def test_loras_absent_is_noop():
+    wf = zimage.build_zimage_workflow("moodyProMix_zitV13.safetensors", "p", "n", options={})
+    assert not any(n.get("class_type") == "LoraLoader" for n in wf.values())
+    # Byte-identical (seed aside) to the options=None baseline — the docstring's
+    # promise that an empty/missing lora list leaves today's output unchanged.
+    baseline = zimage.build_zimage_workflow("moodyProMix_zitV13.safetensors", "p", "n", options=None)
+    assert _seed_normalized(wf) == _seed_normalized(baseline)
+
+
+def test_loras_chain_wiring():
+    opts = {"loras": [{"name": "a.safetensors", "strength": 0.8},
+                      {"name": "b", "strength": 1.2}]}
+    wf = zimage.build_zimage_workflow("moodyProMix_zitV13.safetensors", "p", "n", options=opts)
+    l1, l2 = wf["9001"], wf["9002"]
+    assert l1["class_type"] == "LoraLoader" and l1["inputs"]["lora_name"] == "a.safetensors"
+    assert l1["inputs"]["model"] == ["474", 0] and l1["inputs"]["clip"] == ["471", 0]
+    assert l1["inputs"]["strength_model"] == 0.8
+    # bare name gets the extension appended
+    assert l2["inputs"]["lora_name"] == "b.safetensors"
+    assert l2["inputs"]["model"] == ["9001", 0] and l2["inputs"]["clip"] == ["9001", 1]
+    # the two direct consumers of the base loaders (rgthree passthrough's model
+    # input + CLIPSetLastLayer's clip input) now feed from the chain end
+    assert wf["21"]["inputs"]["model"] == ["9002", 0]
+    assert wf["473"]["inputs"]["clip"] == ["9002", 1]
+    # base loaders themselves are untouched
+    assert wf["474"]["inputs"]["unet_name"] == "moodyProMix_zitV13.safetensors"
+    assert "clip_name" in wf["471"]["inputs"]
+
+
+def test_loras_malformed_entries_dropped():
+    opts = {"loras": ["junk", {"strength": 1}, {"name": ""},
+                      {"name": "ok.safetensors", "strength": "high"},
+                      {"name": "clamp.safetensors", "strength": 99}]}
+    wf = zimage.build_zimage_workflow("moodyProMix_zitV13.safetensors", "p", "n", options=opts)
+    chain = [n for n in wf.values() if n.get("class_type") == "LoraLoader"]
+    assert len(chain) == 2
+    assert chain[0]["inputs"]["strength_model"] == 1.0      # bad strength -> default
+    assert chain[1]["inputs"]["strength_model"] == 4.0      # clamped
+
+
+def test_loras_capped_at_max():
+    opts = {"loras": [{"name": f"l{i}.safetensors"} for i in range(20)]}
+    wf = zimage.build_zimage_workflow("moodyProMix_zitV13.safetensors", "p", "n", options=opts)
+    assert sum(1 for n in wf.values() if n.get("class_type") == "LoraLoader") == 8
+
+
+def test_loras_survive_txt2img_and_vlm_paths():
+    # The chain feeds the KSampler via node 21 (rgthree passthrough), which
+    # survives both the VLM-prune and the heavy-postprocessing-bypass GC passes
+    # on either code path — so the chain must stay intact and dangling-free.
+    opts = {"loras": [{"name": "x.safetensors", "strength": 1.0}]}
+    for img in ("input.png", None):
+        wf = zimage.build_zimage_workflow(
+            "moodyProMix_zitV13.safetensors", "p", "n", input_image_name=img, options=opts
+        )
+        assert any(n.get("class_type") == "LoraLoader" for n in wf.values())
+        ids = set(wf)
+        for n in wf.values():
+            for v in (n.get("inputs") or {}).values():
+                if isinstance(v, list) and len(v) == 2:
+                    assert str(v[0]) in ids
+
+
+def test_loras_via_maybe_rewrite():
+    out = zimage.maybe_rewrite_to_zimage(
+        _catpony_like("moodyProMix_zitV13.safetensors"),
+        options={"loras": [{"name": "a.safetensors", "strength": 1.0}]},
+    )
+    assert out is not None
+    assert any(n.get("class_type") == "LoraLoader" for n in out.values())
