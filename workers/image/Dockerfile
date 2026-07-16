@@ -39,7 +39,7 @@ RUN curl -fsSL -o /tmp/mount-s3.deb \
 
 # ---------- ComfyUI ----------
 WORKDIR /opt/comfy
-ARG COMFYUI_TAG=v0.20.1
+ARG COMFYUI_TAG=v0.27.0
 # Constraints to keep NGC's torch ecosystem intact:
 #   1. Strip torch + torchvision + torchaudio from ComfyUI's requirements.txt
 #      (NGC ships custom-built torch+torchvision whose C++ ops only register
