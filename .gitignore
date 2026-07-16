@@ -56,3 +56,6 @@ cdk.local.json
 # Docker build context noise
 .dockerignore.local
 .claude/
+
+# civitupload — local script + CivitAI session cookie; never commit
+civitupload/
