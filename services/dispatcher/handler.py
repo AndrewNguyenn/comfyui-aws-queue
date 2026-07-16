@@ -32,6 +32,7 @@ from botocore.exceptions import ClientError
 
 from anima import maybe_rewrite_to_anima
 from extract import _extract_model, _extract_subject
+from krea import maybe_rewrite_to_krea
 from workflow_router import classify_workflow
 from zimage import maybe_rewrite_to_zimage
 
@@ -300,6 +301,23 @@ def _post_prompt(event: dict) -> dict:
             # normal job with one (the worker only fetches for Z-Image jobs anyway).
             input_image_key = input_image_name = ""
 
+    # Krea 2 is a Qwen-Image-like architecture (UNET+CLIP+VAE), not SDXL — same
+    # None-CLIP failure mode as Anima/Z-Image if loaded via CheckpointLoaderSimple.
+    # If the submission references a Krea 2 model, swap in the official Krea 2
+    # "simple gen" workflow, carrying over the model + prompts. Mutually exclusive
+    # with the Anima/Z-Image rewrites (a model is at most one architecture); the
+    # three allowlists are disjoint so evaluation order doesn't matter.
+    krea_rewritten = False
+    if not anima_rewritten and not zimage_rewritten:
+        krea_workflow = maybe_rewrite_to_krea(
+            workflow,
+            input_image_name=input_image_name or None,
+            options=body.get("krea_options"),
+        )
+        krea_rewritten = krea_workflow is not None
+        if krea_rewritten:
+            workflow = krea_workflow
+
     explicit_type = body.get("type")
     if explicit_type in ("image", "video"):
         job_type = explicit_type
@@ -329,6 +347,8 @@ def _post_prompt(event: dict) -> dict:
         "anima_rewritten": {"BOOL": anima_rewritten},
         # True when swapped for the Z-Image workflow.
         "zimage_rewritten": {"BOOL": zimage_rewritten},
+        # True when swapped for the Krea 2 workflow.
+        "krea_rewritten": {"BOOL": krea_rewritten},
     }
     # Z-Image VLM input image: the worker stages this from the uploads bucket into
     # ComfyUI's input/<name> before the run (the template's LoadImage references the
