@@ -13,7 +13,10 @@
     "inputs": {
       "lora_name": "krea2_turbo_lora_rank_64_bf16.safetensors",
       "strength_model": 0.6,
-      "model": ["1", 0]
+      "model": [
+        "1",
+        0
+      ]
     },
     "class_type": "LoraLoaderModelOnly",
     "_meta": {
@@ -24,7 +27,10 @@
     "inputs": {
       "lora_name": "krea2filterbypass.safetensors",
       "strength_model": 1.0,
-      "model": ["2", 0]
+      "model": [
+        "2",
+        0
+      ]
     },
     "class_type": "LoraLoaderModelOnly",
     "_meta": {
@@ -45,7 +51,10 @@
   "5": {
     "inputs": {
       "text": "",
-      "clip": ["4", 0]
+      "clip": [
+        "4",
+        0
+      ]
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
@@ -55,7 +64,10 @@
   "6": {
     "inputs": {
       "text": "",
-      "clip": ["4", 0]
+      "clip": [
+        "4",
+        0
+      ]
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
@@ -81,14 +93,26 @@
       "steps": 6,
       "steps_to_run": -1,
       "denoise": 1.0,
-      "cfg": 1.0,
+      "cfg": 1.4,
       "seed": 0,
       "sampler_mode": "standard",
       "bongmath": true,
-      "model": ["3", 0],
-      "positive": ["5", 0],
-      "negative": ["6", 0],
-      "latent_image": ["7", 0]
+      "model": [
+        "13",
+        0
+      ],
+      "positive": [
+        "5",
+        0
+      ],
+      "negative": [
+        "6",
+        0
+      ],
+      "latent_image": [
+        "7",
+        0
+      ]
     },
     "class_type": "ClownsharKSampler_Beta",
     "_meta": {
@@ -103,14 +127,26 @@
       "steps": 2,
       "steps_to_run": -1,
       "denoise": 0.2,
-      "cfg": 1.0,
+      "cfg": 1.4,
       "seed": 0,
       "sampler_mode": "standard",
       "bongmath": true,
-      "model": ["3", 0],
-      "positive": ["5", 0],
-      "negative": ["6", 0],
-      "latent_image": ["8", 0]
+      "model": [
+        "13",
+        0
+      ],
+      "positive": [
+        "5",
+        0
+      ],
+      "negative": [
+        "6",
+        0
+      ],
+      "latent_image": [
+        "8",
+        0
+      ]
     },
     "class_type": "ClownsharKSampler_Beta",
     "_meta": {
@@ -128,8 +164,14 @@
   },
   "11": {
     "inputs": {
-      "samples": ["9", 0],
-      "vae": ["10", 0]
+      "samples": [
+        "9",
+        0
+      ],
+      "vae": [
+        "10",
+        0
+      ]
     },
     "class_type": "VAEDecode",
     "_meta": {
@@ -138,12 +180,29 @@
   },
   "12": {
     "inputs": {
-      "images": ["11", 0],
+      "images": [
+        "11",
+        0
+      ],
       "filename_prefix": "krea2"
     },
     "class_type": "SaveImage",
     "_meta": {
       "title": "Save Image"
+    }
+  },
+  "13": {
+    "inputs": {
+      "lora_name": "AmateurSlider-KREA2_v1.safetensors",
+      "strength_model": 1.5,
+      "model": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoraLoaderModelOnly (Amateur Slider, baked chain tail)"
     }
   }
 }

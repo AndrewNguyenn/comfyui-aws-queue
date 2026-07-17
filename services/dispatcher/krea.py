@@ -16,14 +16,17 @@ Krea 2 model we **discard the submitted graph** and run the official Krea 2
 and (b) their positive/negative prompt text.
 
 We substitute the **Krea2Simple** template (``krea_templates/``): UNETLoader ->
-two BAKED LoraLoaderModelOnly passes (turbo lora @0.6, filter-bypass lora @1.0)
--> two ClownsharKSampler_Beta passes (a 6-step base pass + a 2-step
-low-denoise refiner pass) -> VAEDecode -> SaveImage. The turbo + filter-bypass
-loras are REQUIRED for these fast 6+2-step settings to produce good output —
-that's why they're baked into the template rather than left to the caller (a
-plain UNETLoader without them would need ~20-30 steps). cfg is pinned at 1.0
-on both passes (the published workflow wires a literal 1 into cfg, not the
-widget's 5, so we match the literal).
+three BAKED LoraLoaderModelOnly passes (turbo lora @0.6, filter-bypass lora
+@1.0, amateur slider @1.5) -> two ClownsharKSampler_Beta passes (a 6-step base
+pass + a 2-step low-denoise refiner pass) -> VAEDecode -> SaveImage. The turbo
++ filter-bypass loras are REQUIRED for these fast 6+2-step settings to produce
+good output — that's why they're baked into the template rather than left to
+the caller (a plain UNETLoader without them would need ~20-30 steps). The
+amateur slider (civitai 2773343) counteracts the turbo pipeline's waxy
+"plastic skin" tendency with amateur-photo noise/texture — the same role
+igbaddie plays for Z-Image, but baked server-side. cfg is 1.4 (the published
+workflow uses 1.0, where the negative prompt is inert; 1.4 re-enables the
+negative at a modest speed cost — 2026-07-17 anti-plastic pass).
 
 Detection is an **explicit allowlist** (``KREA_MODELS``) — deliberately NOT a
 name heuristic, same rationale as Anima/Z-Image. DUPLICATED in
@@ -116,7 +119,7 @@ _UNET_CLASS = "UNETLoader"
 _CLIP_CLASS = "CLIPLoader"
 _POSITIVE_NODE = "5"        # CLIPTextEncode (Positive)
 _NEGATIVE_NODE = "6"        # CLIPTextEncode (Negative)
-_BAKED_TAIL_NODE = "3"      # LoraLoaderModelOnly (Filter Bypass) — baked chain tail
+_BAKED_TAIL_NODE = "13"     # LoraLoaderModelOnly (Amateur Slider) — baked chain tail
 
 
 def _load_template() -> dict:

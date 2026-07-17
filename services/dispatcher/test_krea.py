@@ -109,7 +109,7 @@ def test_template_bongmath_and_cfg_pinned():
     samplers = [n for n in wf.values() if n.get("class_type") == "ClownsharKSampler_Beta"]
     assert len(samplers) == 2
     for s in samplers:
-        assert s["inputs"]["cfg"] == 1.0
+        assert s["inputs"]["cfg"] == 1.4
         assert s["inputs"]["bongmath"] is True
         assert s["inputs"]["sampler_mode"] == "standard"
 
@@ -135,16 +135,20 @@ def test_template_two_pass_settings():
 def test_baked_loras_present_with_exact_strengths():
     out = krea.build_krea_workflow("krea2_raw_fp8_scaled.safetensors", "p", "n")
     baked = [n for n in out.values() if n.get("class_type") == "LoraLoaderModelOnly"]
-    assert len(baked) == 2
+    assert len(baked) == 3
     turbo = next(n for n in baked if "turbo" in n["inputs"]["lora_name"].lower())
     bypass = next(n for n in baked if "filterbypass" in n["inputs"]["lora_name"].lower())
+    amateur = next(n for n in baked if "amateurslider" in n["inputs"]["lora_name"].lower())
     assert turbo["inputs"]["strength_model"] == 0.6
     assert bypass["inputs"]["strength_model"] == 1.0
-    # chain order: UNETLoader -> turbo -> filterbypass (baked chain tail)
+    assert amateur["inputs"]["strength_model"] == 1.5
+    # chain order: UNETLoader -> turbo -> filterbypass -> amateur (baked chain tail)
     unet_id = next(i for i, n in out.items() if n.get("class_type") == "UNETLoader")
     assert turbo["inputs"]["model"] == [unet_id, 0]
     turbo_id = next(i for i, n in out.items() if n is turbo)
     assert bypass["inputs"]["model"] == [turbo_id, 0]
+    bypass_id = next(i for i, n in out.items() if n is bypass)
+    assert amateur["inputs"]["model"] == [bypass_id, 0]
 
 
 # --- substitution: model + prompts -----------------------------------------
@@ -270,8 +274,8 @@ def test_loras_chain_wiring():
     wf = krea.build_krea_workflow("krea2_raw_fp8_scaled.safetensors", "p", "n", options=opts)
     l1, l2 = wf["9001"], wf["9002"]
     assert l1["class_type"] == "LoraLoader" and l1["inputs"]["lora_name"] == "a.safetensors"
-    # chain anchors: model from the baked chain tail (node 3), clip from CLIPLoader (node 4)
-    assert l1["inputs"]["model"] == ["3", 0] and l1["inputs"]["clip"] == ["4", 0]
+    # chain anchors: model from the baked chain tail (node 13), clip from CLIPLoader (node 4)
+    assert l1["inputs"]["model"] == ["13", 0] and l1["inputs"]["clip"] == ["4", 0]
     assert l1["inputs"]["strength_model"] == 0.8
     # bare name gets the extension appended
     assert l2["inputs"]["lora_name"] == "b.safetensors"
@@ -282,7 +286,7 @@ def test_loras_chain_wiring():
     assert wf["9"]["inputs"]["model"] == ["9002", 0]
     assert wf["5"]["inputs"]["clip"] == ["9002", 1]
     assert wf["6"]["inputs"]["clip"] == ["9002", 1]
-    # baked loras themselves are untouched (still chained UNET -> turbo -> filterbypass)
+    # baked loras themselves are untouched (still chained UNET -> turbo -> filterbypass -> amateur)
     assert wf["1"]["inputs"]["unet_name"] == "krea2_raw_fp8_scaled.safetensors"
     assert wf["3"]["inputs"]["lora_name"] == "krea2filterbypass.safetensors"
 
