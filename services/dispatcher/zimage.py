@@ -62,6 +62,7 @@ ZIMAGE_MODELS: frozenset[str] = frozenset(
         "moodypromix_zitv13",
         "moodyrealmix_zitv7",
         "divingzimageturbo_v60fp16",
+        "divingzimageturbo_v70fp16",  # Diving v7.0 (v3126573) — fp16-only release
         # fp8 variants (~5.7GB) — the default for the cloud fleet: the fp16 full
         # stack + 3x SD-upscale overran the 840s worker cap, fp8 halves VRAM and
         # uses the L4 fp8 tensor cores. Template's text encoder is also fp8.
