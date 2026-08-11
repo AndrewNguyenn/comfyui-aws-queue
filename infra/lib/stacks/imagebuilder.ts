@@ -150,6 +150,55 @@ export class ImageBuilderStack extends Stack {
       status: 'ENABLED',
     });
 
+    // ---- Lifecycle policy: keep only the newest 3 golden AMIs ----
+    // Every monthly bake (+ every worker-image rebuild, via the CodeBuild
+    // post_build re-bake trigger noted above) leaves its 150 GB EBS snapshot
+    // behind — there was no cleanup at all before this, ~$6.5/mo and growing
+    // (4 AMIs / 4 snapshots measured 2026-08-10, one bake older than the
+    // current cadence would fully warrant). Image Builder's native lifecycle
+    // policy does deregister + snapshot delete in one DELETE action.
+    //
+    // Scoping so this can NEVER touch a non-golden AMI: resourceSelection
+    // targets ONLY images built from the `comfy-image-golden` recipe (any
+    // version — recipeSelection.semanticVersion supports the `x` wildcard,
+    // so a future RECIPE_VERSION bump doesn't silently stop being covered).
+    // That's on top of the AWS-managed execution-role policy below, which is
+    // itself independently scoped to resources tagged `CreatedBy: EC2 Image
+    // Builder` (verified via `aws iam get-policy-version` on
+    // EC2ImageBuilderLifecycleExecutionPolicy) — two independent boundaries,
+    // neither of which can reach an unrelated AMI/snapshot in this account.
+    const lifecycleRole = new iam.Role(this, 'GoldenAmiLifecycleRole', {
+      assumedBy: new iam.ServicePrincipal('imagebuilder.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName(
+          'service-role/EC2ImageBuilderLifecycleExecutionPolicy',
+        ),
+      ],
+    });
+    new imagebuilder.CfnLifecyclePolicy(this, 'GoldenAmiLifecyclePolicy', {
+      name: 'comfy-image-golden-lifecycle',
+      description: 'Keep the newest 3 comfy-image-golden AMIs; deregister + delete snapshots for the rest.',
+      executionRole: lifecycleRole.roleArn,
+      resourceType: 'AMI_IMAGE',
+      status: 'ENABLED',
+      resourceSelection: {
+        recipes: [{ name: recipe.name!, semanticVersion: 'x.x.x' }],
+      },
+      policyDetails: [
+        {
+          action: {
+            type: 'DELETE',
+            includeResources: { amis: true, snapshots: true },
+          },
+          // COUNT filter's `value` is the number of NEWEST resources to
+          // KEEP, not a deletion threshold (verified against the API doc —
+          // the field name is misleading). retainAtLeast doesn't apply to
+          // COUNT filters (age-based only), so it's omitted here.
+          filter: { type: 'COUNT', value: 3 },
+        },
+      ],
+    });
+
     // ---- Publisher Lambda: on Image Builder "AVAILABLE", write the new AMI id
     // to the SSM param (create-or-update). Replaces the native distribution SSM
     // write, which the AWS-managed Image Builder SLR can't perform.
