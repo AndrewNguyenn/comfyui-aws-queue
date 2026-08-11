@@ -1,10 +1,18 @@
 # syntax=docker/dockerfile:1.6
 #
-# Image-fleet worker (g4dn.xlarge, T4 GPU, Turing sm_75).
+# Image-fleet worker. NOT g4dn/T4 (rejected — see infra/lib/config.ts
+# fleets.image for the measured ~3.2x-slower / OOM-prone writeup). Current
+# fleet spans A10G (g5.2xlarge, Ampere sm_86) and L4/L40S (g6.2xlarge,
+# g6e.xlarge, Ada sm_89) instances — all >=32 GB system RAM, 24 GB VRAM. See
+# infra/lib/config.ts fleets.image for the current primary/fallback order
+# (it shifts as spot pricing + per-model benchmarks change).
 #
-# Note: SageAttention 2.x requires Ampere (sm_80+). T4 is Turing (sm_75) so we
-# use xformers instead. SDXL throughput on T4 with xformers comfortably exceeds
-# the 100 imgs/hr target. (See IMPLEMENTATION_PLAN.md section 15 C1.)
+# Note: SageAttention 2.x requires Ampere+ (sm_80+), which this fleet's A10G/
+# L4/L40S GPUs all satisfy, but a production canary against the live fleet
+# (2026-06-08) found it sped up only ~7% of real jobs (upscale/detailer nodes
+# dominate wall-clock, not attention) — NO-GO for now, stayed on xformers
+# below. Ready SageAttention impl on branch image-sageattention if that
+# balance ever shifts. (See IMPLEMENTATION_PLAN.md section 15 C1.)
 
 # ---------- Stage 1: build base ----------
 FROM nvcr.io/nvidia/pytorch:24.10-py3 AS base
