@@ -13,16 +13,15 @@ What it does, for both fleets (image + video):
      the ASG min/max, so this holds.
   2. ECS service -> desiredCount=0. This is only a transient courtesy that stops
      tasks being scheduled in the moment — it is NOT belt-and-suspenders: the
-     comfy-image-scaler Lambda (every 60s) and the video App-Auto-Scaling target
-     re-raise desiredCount above 0 within ~a minute if their queue is non-empty.
+     comfy-fleet-scaler Lambda (every 60s, both fleets) re-raises desiredCount
+     above 0 within ~a minute if a fleet's queue is non-empty.
      That resurrected "want" is harmless — MaxSize=0 means it can never be
      satisfied, so no instance launches (the steady state is just the service
      wanting tasks the capacity provider can't place; no cost).
 Running instances drain via the ASG lifecycle hook and terminate; in-flight jobs
 on them are lost (that's the point of an emergency stop). To suspend the scaler
 churn entirely (cleaner but not required for the hold), a future version could
-also disable the comfy-image-scaler EventBridge rule and the video scalable
-target on fire.
+also disable the comfy-fleet-scaler EventBridge rule on fire.
 
 SAFE TESTING: invoke directly with {"dry_run": true} (or set env DRY_RUN=1) to
 log what it WOULD change (incl. each ASG's current min/max/desired) WITHOUT

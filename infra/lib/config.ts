@@ -125,7 +125,8 @@ export const APP_CONFIG: AppConfig = {
   fleets: {
     image: {
       fleetName: 'image',
-      // g5.xlarge ONLY (A10G: 24 GB VRAM, native bf16, sm_86; 4 vCPU, 16 GB RAM).
+      // HISTORY (superseded — fleet was g5.xlarge-only until 2026-07-12; see the
+      // dated blocks below for the current mix):
       // We trialled a g4dn (T4) lowest-price config for cost and it BACKFIRED for
       // this SDXL + ESRGAN-upscale workload (measured 2026-06-08):
       //   - SPEED: T4 ran ~192 s/image vs A10G ~61 s — ~3.2x slower. At g4dn.xlarge
