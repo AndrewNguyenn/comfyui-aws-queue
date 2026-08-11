@@ -3,7 +3,6 @@ import { Construct } from 'constructs';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
-import * as appscaling from 'aws-cdk-lib/aws-applicationautoscaling';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
@@ -29,7 +28,9 @@ export interface ComputeStackProps extends StackProps {
  *
  * Each fleet has its own ASG with mixed-instance spot policy and capacity-rebalance.
  * Capacity provider managed scaling enabled (target 100). Service-level scaling
- * uses backlog-per-task target tracking.
+ * for BOTH fleets is owned by one graduated/sticky Lambda (see makeFleetScaler /
+ * services/fleet_scaler) — not ECS Application Auto Scaling target-tracking,
+ * which video used until 2026-08-10 and which was too slow to scale in.
  *
  * IMPORTANT: This stack will fail to launch instances until the AWS account has
  * spot vCPU quota for G/VT > 0. See README "Prerequisites" — request quota first.
@@ -70,7 +71,7 @@ export class ComputeStack extends Stack {
       serviceName: 'comfy-image',
       cluster: this.cluster,
       taskDefinition: imageTaskDef,
-      desiredCount: 0, // Owned by the comfy-image-scaler Lambda (see below)
+      desiredCount: 0, // Owned by the comfy-fleet-scaler Lambda (see below)
       capacityProviderStrategies: [
         {
           capacityProvider: imageCapacityProvider.capacityProviderName,
@@ -93,7 +94,6 @@ export class ComputeStack extends Stack {
     (imageService.node.defaultChild as ecs.CfnService).addPropertyDeletionOverride(
       'DesiredCount',
     );
-    this.makeImageQueueScaler(imageService, queue.imageJobsQueue, config);
 
     // ----- VIDEO fleet -----
     this.videoAsg = this.makeFleetAsg('video', config.fleets.video, {
@@ -116,7 +116,7 @@ export class ComputeStack extends Stack {
       serviceName: 'comfy-video',
       cluster: this.cluster,
       taskDefinition: videoTaskDef,
-      desiredCount: 0,
+      desiredCount: 0, // Owned by the comfy-fleet-scaler Lambda (see below)
       capacityProviderStrategies: [
         {
           capacityProvider: videoCapacityProvider.capacityProviderName,
@@ -129,103 +129,73 @@ export class ComputeStack extends Stack {
         ecs.PlacementConstraint.memberOf(`attribute:fleet == video`),
       ],
     });
-    this.attachSqsTargetTracking(
-      'video',
-      videoService,
-      queue.videoJobsQueue,
-      config.scaling.videoMin,
-      config.scaling.videoMax,
-      config,
+    // Same reasoning as the image service above: the fleet scaler owns
+    // DesiredCount outright, so a task-def-revision deploy must not let CFN
+    // reset it back to 0 mid-batch.
+    (videoService.node.defaultChild as ecs.CfnService).addPropertyDeletionOverride(
+      'DesiredCount',
     );
+
+    // ONE Lambda drives both fleets' desired counts — see makeFleetScaler.
+    // Replaces video's former ECS Application Auto Scaling target-tracking
+    // policy (removed 2026-08-10): target-tracking's scale-in alarm needs
+    // ~15 consecutive minutes below target to fire, so every video burst
+    // paid ~15-30 min of idle GPU at burst end. The graduated/sticky Lambda
+    // releases one worker per tick (~1-2 min) once a fleet's queue drains,
+    // same as image already did.
+    this.makeFleetScaler(imageService, queue.imageJobsQueue, videoService, queue.videoJobsQueue, config);
   }
 
   /**
-   * Application Auto Scaling target tracking driven by SQS visible-message
-   * count. Scales the ECS service desired count up when messages queue,
-   * down when the queue empties. Capacity provider follows the service
-   * (already wired) so the ASG provisions instances as needed.
-   *
-   * Why target=1 (not BacklogPerTask): for our 1-user scale (max=1 image,
-   * max=3 video), a target of 1 visible message per task means any single
-   * job triggers scale-up. Target tracking caps at maxCapacity so a 50-msg
-   * burst doesn't blow past max. Simpler than metric-math BacklogPerTask
-   * and behaves the same at this scale.
-   *
-   * Cooldowns: aggressive scale-out (60s — boot is the slow part anyway,
-   * no point dawdling), patient scale-in (15 min — keeps worker warm
-   * across short pauses in interactive use).
+   * Graduated + sticky autoscaler for BOTH fleets. ONE Lambda runs every
+   * minute, reads each fleet's live queue depth, and sets that fleet's ECS
+   * service desired count independently: ramp UP lazily by depth (see
+   * services/fleet_scaler/handler.py for the per-fleet band tables), hold
+   * (never shed) on the way DOWN, and release to 0 only when a fleet's queue
+   * is fully cleared (nothing visible AND nothing in flight), one worker per
+   * tick. It owns both services' desiredCount outright (CFN no longer
+   * manages either — see the DeletionOverride calls above); each ASG's
+   * MaxSize bounds its own fleet.
    */
-  private attachSqsTargetTracking(
-    fleetName: 'image' | 'video',
-    service: ecs.Ec2Service,
-    queue: import('aws-cdk-lib/aws-sqs').IQueue,
-    minCapacity: number,
-    maxCapacity: number,
-    _config: AppConfig,
-  ): void {
-    const target = service.autoScaleTaskCount({
-      minCapacity,
-      maxCapacity,
-    });
-
-    // targetValue=0.5: the AlarmHigh threshold becomes 0.5 (metric > 0.5),
-    // so a single visible message (= 1.0) triggers scale-out. AlarmLow
-    // threshold is 0.45 (metric < 0.45), so empty queue (= 0) scales in.
-    // Using targetValue=1 was a bug: alarm = metric > 1, so 1 message sat
-    // at the boundary forever and nothing fired.
-    target.scaleToTrackCustomMetric(`${fleetName}TrackBacklog`, {
-      metric: queue.metricApproximateNumberOfMessagesVisible({
-        period: Duration.minutes(1),
-        statistic: 'Maximum',
-      }),
-      targetValue: 0.5,
-      scaleOutCooldown: Duration.seconds(60),
-      scaleInCooldown: Duration.minutes(15),
-    });
-  }
-
-  /**
-   * Graduated + sticky image-fleet autoscaler. A Lambda runs every minute,
-   * reads the live image-queue depth, and sets the comfy-image ECS service's
-   * desired count: ramp UP lazily by depth (50→1, 150→2, 300→3, ≥300→max),
-   * hold (never shed) on the way DOWN, and release to 0 only when the queue is
-   * fully cleared (nothing visible AND nothing in flight), one worker per tick.
-   * See services/image_scaler/handler.py. It owns desiredCount outright (CFN no
-   * longer manages it — see the DeletionOverride above); the ASG MaxSize bounds it.
-   */
-  private makeImageQueueScaler(
-    service: ecs.Ec2Service,
-    queue: import('aws-cdk-lib/aws-sqs').IQueue,
+  private makeFleetScaler(
+    imageService: ecs.Ec2Service,
+    imageQueue: import('aws-cdk-lib/aws-sqs').IQueue,
+    videoService: ecs.Ec2Service,
+    videoQueue: import('aws-cdk-lib/aws-sqs').IQueue,
     config: AppConfig,
   ): void {
-    const fn = new lambda.Function(this, 'ImageScalerFn', {
-      functionName: 'comfy-image-scaler',
+    const fn = new lambda.Function(this, 'FleetScalerFn', {
+      functionName: 'comfy-fleet-scaler',
       runtime: lambda.Runtime.PYTHON_3_12,
       architecture: lambda.Architecture.ARM_64,
       handler: 'handler.lambda_handler',
       code: lambda.Code.fromAsset(
-        path.join(__dirname, '../../../services/image_scaler'),
+        path.join(__dirname, '../../../services/fleet_scaler'),
         { exclude: ['__pycache__', '*.pyc'] }
       ),
       timeout: Duration.seconds(30),
       memorySize: 128,
       logRetention: logs.RetentionDays.ONE_WEEK,
       environment: {
-        IMAGE_QUEUE_URL: queue.queueUrl,
         CLUSTER: this.cluster.clusterName,
-        SERVICE: service.serviceName,
-        MAX_WORKERS: String(config.scaling.imageMax),
+        IMAGE_QUEUE_URL: imageQueue.queueUrl,
+        IMAGE_SERVICE: imageService.serviceName,
+        IMAGE_MAX_WORKERS: String(config.scaling.imageMax),
+        VIDEO_QUEUE_URL: videoQueue.queueUrl,
+        VIDEO_SERVICE: videoService.serviceName,
+        VIDEO_MAX_WORKERS: String(config.scaling.videoMax),
       },
     });
-    queue.grant(fn, 'sqs:GetQueueAttributes');
+    imageQueue.grant(fn, 'sqs:GetQueueAttributes');
+    videoQueue.grant(fn, 'sqs:GetQueueAttributes');
     fn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['ecs:DescribeServices', 'ecs:UpdateService'],
-        resources: [service.serviceArn],
+        resources: [imageService.serviceArn, videoService.serviceArn],
       })
     );
-    new events.Rule(this, 'ImageScalerSchedule', {
-      ruleName: 'comfy-image-scaler-tick',
+    new events.Rule(this, 'FleetScalerSchedule', {
+      ruleName: 'comfy-fleet-scaler-tick',
       schedule: events.Schedule.rate(Duration.minutes(1)),
       targets: [new targets.LambdaFunction(fn)],
     });

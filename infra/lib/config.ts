@@ -59,8 +59,6 @@ export interface AppConfig {
     readonly videoMin: number;
     readonly videoMax: number;
     readonly targetBacklogPerTask: number;
-    readonly scaleOutCooldown: Duration;
-    readonly scaleInCooldown: Duration;
   };
 
   readonly cost: {
@@ -233,9 +231,16 @@ export const APP_CONFIG: AppConfig = {
     imageMax: 3,
     videoMin: 0,
     videoMax: 3, // v3: lowered from 5 (resolves N2)
+    // NOTE: targetBacklogPerTask is a leftover from a BacklogPerTask design
+    // that was never wired up (both fleets used a flat targetValue=1 message
+    // instead — see attachSqsTargetTracking's history) and is unread anywhere
+    // in the codebase even before scaleOutCooldown/scaleInCooldown below were
+    // removed. Left in place — out of scope for this change.
     targetBacklogPerTask: 25, // v3: raised from 10 (resolves N2)
-    scaleOutCooldown: Duration.minutes(5), // v3: raised from 1 min (resolves N2)
-    scaleInCooldown: Duration.minutes(15),
+    // scaleOutCooldown/scaleInCooldown REMOVED 2026-08-10: they only fed
+    // attachSqsTargetTracking's target-tracking policy, which no longer
+    // exists (video's target-tracking scaling was replaced by the graduated
+    // Lambda scaler — see compute.ts makeFleetScaler / services/fleet_scaler).
   },
 
   cost: {
