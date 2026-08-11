@@ -8,15 +8,15 @@ Scale-UP is graduated and lazy — workers track the visible backlog:
 
     visible queue depth  ->  target workers
     0                         0
-    1 - 24                    2
-    25 - 74                   4
-    >= 75                     MAX_WORKERS (fleet cap)
+    1 - 11                    1
+    12 - 39                   2
+    >= 40                     MAX_WORKERS (fleet cap, currently 3)
 
-These bands were tuned aggressive (2026-06-08) once the golden AMI cut cold
-boots from ~8 min to ~2.5 min: spinning workers up early is now cheap, so we
-reach the full fleet at a far lower backlog than the original ladder (which
-needed 300 queued to hit MAX). A ~100-job batch now goes straight to the full
-fleet instead of 3 workers.
+Bands re-tuned 2026-08-10: the previous ladder (1-24->2, 25-74->4) booted a
+SECOND worker for a single queued job. At ~60 s/image on A10G, a dozen queued
+images finishes in ~12 min on ONE worker — acceptable latency for a
+low-volume deployment. A second worker now only kicks in once a real backlog
+(12+) has formed, and the third (== MAX_WORKERS) only past 40 queued.
 
 Scale-DOWN is sticky — we never shed workers while work remains. Once N workers
 are up they stay up (`max(current, target)`) for as long as anything is visible
@@ -38,7 +38,7 @@ import boto3
 QUEUE_URL = os.environ["IMAGE_QUEUE_URL"]
 CLUSTER = os.environ["CLUSTER"]
 SERVICE = os.environ["SERVICE"]
-MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "4"))
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "3"))
 
 sqs = boto3.client("sqs")
 ecs = boto3.client("ecs")
@@ -47,16 +47,16 @@ ecs = boto3.client("ecs")
 def step_target(visible: int) -> int:
     """Graduated scale-up target by visible (waiting) queue depth.
 
-    Aggressive bands (see module docstring) — fast golden-AMI boots make early
-    scale-up cheap, so we hit the full fleet at 75 queued instead of 300.
+    See module docstring for the bands + rationale (2026-08-10 re-tune: 1
+    queued job -> 1 worker, not 2).
     """
     if visible <= 0:
         return 0
-    if visible < 25:
+    if visible < 12:
+        return 1
+    if visible < 40:
         return 2
-    if visible < 75:
-        return 4
-    return MAX_WORKERS  # >= 75, full fleet
+    return MAX_WORKERS  # >= 40, full fleet
 
 
 def decide(visible: int, inflight: int, current: int) -> int:

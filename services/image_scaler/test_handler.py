@@ -13,7 +13,7 @@ sys.modules.setdefault("boto3", types.SimpleNamespace(client=lambda *a, **k: Non
 os.environ.setdefault("IMAGE_QUEUE_URL", "x")
 os.environ.setdefault("CLUSTER", "c")
 os.environ.setdefault("SERVICE", "s")
-os.environ["MAX_WORKERS"] = "6"  # matches config.ts scaling.imageMax
+os.environ["MAX_WORKERS"] = "3"  # matches config.ts scaling.imageMax
 
 _spec = importlib.util.spec_from_file_location(
     "scaler_handler", os.path.join(os.path.dirname(__file__), "handler.py")
@@ -23,47 +23,47 @@ _spec.loader.exec_module(h)
 
 
 def test_step_target_bands():
-    # aggressive bands: <25→2, 25-74→4, ≥75→MAX_WORKERS(6)
-    cases = {0: 0, 1: 2, 24: 2, 25: 4, 74: 4, 75: 6, 100: 6, 300: 6, 9999: 6}
+    # 1 queued job -> 1 worker (not 2): <12→1, 12-39→2, ≥40→MAX_WORKERS(3)
+    cases = {0: 0, 1: 1, 11: 1, 12: 2, 39: 2, 40: 3, 100: 3, 300: 3, 9999: 3}
     for visible, expected in cases.items():
         assert h.step_target(visible) == expected, (visible, h.step_target(visible))
 
 
 def test_lazy_ramp_up():
     # fresh batches ramp to the band target
-    assert h.decide(visible=10, inflight=0, current=0) == 2    # trickle
-    assert h.decide(visible=50, inflight=0, current=0) == 4    # moderate
-    assert h.decide(visible=100, inflight=0, current=0) == 6   # backlog -> full fleet
-    assert h.decide(visible=30, inflight=0, current=2) == 4    # ramps 2 -> 4
+    assert h.decide(visible=5, inflight=0, current=0) == 1    # trickle
+    assert h.decide(visible=20, inflight=0, current=0) == 2   # moderate
+    assert h.decide(visible=50, inflight=0, current=0) == 3   # backlog -> full fleet
+    assert h.decide(visible=15, inflight=0, current=1) == 2   # ramps 1 -> 2
 
 
 def test_sticky_down_holds_until_clear():
-    # a 300+ batch ramped to 6 holds 6 all the way down while work remains
-    assert h.decide(visible=200, inflight=6, current=6) == 6
-    assert h.decide(visible=40, inflight=6, current=6) == 6
-    assert h.decide(visible=0, inflight=6, current=6) == 6  # drained but busy
+    # a 40+ batch ramped to 3 (MAX) holds 3 all the way down while work remains
+    assert h.decide(visible=100, inflight=3, current=3) == 3
+    assert h.decide(visible=20, inflight=3, current=3) == 3
+    assert h.decide(visible=0, inflight=3, current=3) == 3  # drained but busy
 
 
 def test_release_steps_down_one_per_tick():
     # fully cleared releases gradually (false-empty caps damage to one worker)
-    assert h.decide(visible=0, inflight=0, current=6) == 5
     assert h.decide(visible=0, inflight=0, current=3) == 2
+    assert h.decide(visible=0, inflight=0, current=2) == 1
     assert h.decide(visible=0, inflight=0, current=1) == 0
     assert h.decide(visible=0, inflight=0, current=0) == 0
 
 
 def test_new_work_during_release_re_holds():
-    # stepped down to 5 after a clear, then a small batch arrives -> hold 5
-    # (current 5 > step_target(30)=4, so stickiness keeps the live fleet)
-    assert h.decide(visible=30, inflight=0, current=5) == 5
+    # stepped down to 2 after a clear, then a small batch arrives -> hold 2
+    # (current 2 > step_target(5)=1, so stickiness keeps the live fleet)
+    assert h.decide(visible=5, inflight=0, current=2) == 2
 
 
 def test_lowered_cap_shrinks_live_fleet():
     # MAX_WORKERS lowered below current pulls a live fleet down to the new cap
     saved = h.MAX_WORKERS
-    h.MAX_WORKERS = 2
+    h.MAX_WORKERS = 1
     try:
-        assert h.decide(visible=400, inflight=0, current=4) == 2
+        assert h.decide(visible=400, inflight=0, current=3) == 1
     finally:
         h.MAX_WORKERS = saved
 
