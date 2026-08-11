@@ -396,7 +396,10 @@ export class ComputeStack extends Stack {
       // Grace period so a freshly-launched spot instance has time to boot
       // and register before EC2 health checks can act on it.
       healthCheck: autoscaling.HealthCheck.ec2({ grace: Duration.seconds(300) }),
-      newInstancesProtectedFromScaleIn: false,
+      // Required by the capacity provider's managed termination protection
+      // (see makeCapacityProvider): the CP removes scale-in protection only
+      // from drained/idle instances before the ASG terminates them.
+      newInstancesProtectedFromScaleIn: true,
     });
 
     return asg;
@@ -413,7 +416,14 @@ export class ComputeStack extends Stack {
       capacityProviderName: `cp-${fleetName}-spot`,
       autoScalingGroup: asg,
       enableManagedScaling: true,
-      enableManagedTerminationProtection: false, // Spot interrupts can't be protected
+      // ENABLED so the capacity provider owns scale-in: it unprotects only
+      // drained/idle instances, so the ASG never issues a raw terminate that
+      // wedges in the drain lifecycle hook. A DISABLED CP once left a spot
+      // instance stuck in Terminating:Wait for ~17h, jamming the ASG's
+      // scale-in and holding ~2 GPUs up across idle windows (2026-07-12).
+      // NOTE: scale-in protection does NOT block spot reclamation — AWS still
+      // reclaims spot regardless; this only governs *voluntary* ASG scale-in.
+      enableManagedTerminationProtection: true,
       targetCapacityPercent: 100,
       minimumScalingStepSize: 1,
       maximumScalingStepSize: 1,
