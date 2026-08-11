@@ -172,8 +172,29 @@ export const APP_CONFIG: AppConfig = {
       // fallbacks. All ≥32 GB RAM so no pool can OOM a FLOW job. 16 GB g5/g6.xlarge
       // pools are intentionally dropped. imageMax 3 × 8 vCPU = 24, under the 48 G/VT
       // spot quota (shared with video).
-      primaryInstanceType: 'g5.2xlarge',
-      fallbackInstanceTypes: ['g6.2xlarge', 'g6e.xlarge'],
+      //
+      // 2026-08-10: swapped PRIMARY to g6.2xlarge on fresh job-ledger data. 94%
+      // of the last 30 days' jobs are Z-Image fp8 (divingZImageTurbo_v60Fp8),
+      // which needs one of these 32 GB-RAM pools (see the 2026-07-12 note
+      // above). Measured median job duration by instance type for that model
+      // (2,429 jobs, 5s<dur<1200s filter): g5.2xlarge (A10G) 76s, g6.2xlarge
+      // (L4) 58s, g6e.xlarge (L40S) 47s — L4/L40S beat the A10G because Ada has
+      // native fp8 support; Ampere upcasts fp8, costing time. At measured spot
+      // prices (g5.2xlarge ~$1.11/hr, g6.2xlarge ~$0.92/hr, g6e.xlarge
+      // ~$1.74/hr) that's ~$0.0234/image (g5.2xlarge) vs ~$0.0148/image
+      // (g6.2xlarge) vs ~$0.0227/image (g6e.xlarge) — g6.2xlarge is BOTH the
+      // fastest and the cheapest of the three, ~35% cheaper per image than
+      // either alternative. Under the OLD config (primary g5.2xlarge,
+      // CAPACITY_OPTIMIZED_PRIORITIZED) only 5.8% of jobs actually landed on
+      // the primary; 66.6% fell through to g6.2xlarge and 26.9% to the pricier
+      // g6e.xlarge anyway — the allocator was already routing most traffic off
+      // the "primary". Making g6.2xlarge the explicit primary (and switching
+      // the spot allocation strategy to PRICE_CAPACITY_OPTIMIZED — see
+      // compute.ts) fixes both: the common case now gets the fastest+cheapest
+      // pool directly, and g6e.xlarge only fires in a real g5/g6.2xlarge
+      // drought instead of absorbing over a quarter of all traffic.
+      primaryInstanceType: 'g6.2xlarge',
+      fallbackInstanceTypes: ['g5.2xlarge', 'g6e.xlarge'],
       rootVolumeGb: 150,
       // gp3 250 MB/s / 6000 IOPS (above the 125/3000 floor). The cold-start
       // bottleneck is the ECR image pull+extract to this root volume. Measured

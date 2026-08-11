@@ -134,25 +134,37 @@ ComfyUI `/history` `outputs` shows which nodes actually ran.
   seen until the worker is rotated.
 - **Worker rotation strands in-flight jobs** as zombie `running` records — when
   rotating the `comfy-image` task definition, expect to clean those up.
-- The image fleet is a **spot ASG: `g5.xlarge` primary + `g6.xlarge` (L4)
-  fallback** (A10G: 24 GB VRAM, native bf16, sm_86; 4 vCPU, 16 GB RAM),
-  `capacity-optimized-prioritized` (g5 first, g6 only on a g5 shortfall).
-  **g6.xlarge fallback added 2026-06-08** to survive g5 spot droughts (live
-  `UnfulfillableCapacity` walls observed that day): L4 has the same 24 GB VRAM +
-  4 vCPU/16 GB sizing, Ada/sm_89, all 5 AZs; ~15-40% slower than A10G but
-  completes (de-risked — the video fleet already runs Ada, and the golden AMI's
-  driver + NGC fat binaries cover sm_86+sm_89). Still **NO g4dn** (T4).
-  **Why not g4dn:** a g4dn (T4) `lowest-price` cost experiment backfired for the
-  SDXL+ESRGAN-upscale workload (measured 2026-06-08) — the T4 ran **~192 s/image
-  vs A10G's ~61 s (~3.2× slower)**, so at ~$0.24/hr vs ~$0.48/hr it was **~$12.95
-  vs $8.11 per 1000 images (~60% MORE expensive per image)**; and the T4's 16 GB
-  VRAM forced ComfyUI to offload ~14 GB to pinned CPU RAM, **OOM-killing ComfyUI
-  on the 16 GB-RAM g4dn.xlarge** (jobs failed `[Errno 111] Connection refused` to
-  `:8188`; the 32 GB g4dn.2xlarge survived but was still slow/pricey). xformers
-  efficient attention also fails to load on the worker image (build mismatch vs
-  the NGC torch), worsening VRAM pressure. **FLOW/Flux-class jobs are still
-  unreliable** (g5.xlarge has 16 GB sys RAM — can't mmap 20 GB+ checkpoints).
-  See `infra/lib/config.ts` for the canonical config. The us-east-1 G/VT spot
+- The image fleet is a **spot ASG on 2xlarge (32 GB RAM) instances since
+  2026-07-12** — `g5.2xlarge` (A10G, sm_86), `g6.2xlarge` (L4, sm_89), and
+  `g6e.xlarge` (L40S, sm_89) — all 24 GB VRAM, 8 vCPU except g6e.xlarge (4
+  vCPU/32 GB). Moved off the 16 GB `.xlarge` pools because Z-Image (a
+  FLOW-arch model: ~6 GB UNET + ~5.6 GB qwen text encoder + VAE ≈ 12 GB of
+  weights + ComfyUI working set) OOM-killed ComfyUI (rc=-9) on a 16 GB
+  `.xlarge` even after stripping FaceDetailer/upscale — so FLOW/Flux-class
+  jobs, previously unreliable, are now fine (all three pools are ≥32 GB RAM).
+  **Primary is `g6.2xlarge` since 2026-08-10** (was `g5.2xlarge`), re-ranked
+  on real job-ledger data: 94% of jobs are Z-Image fp8
+  (`divingZImageTurbo_v60Fp8`), and Ada (g6.2xlarge/g6e.xlarge) has native
+  fp8 support that Ampere (g5.2xlarge) lacks and has to upcast — measured
+  median job duration g5.2xlarge 76s vs g6.2xlarge 58s vs g6e.xlarge 47s,
+  and at measured spot prices that's ~$0.0234/image (g5.2xlarge) vs
+  ~$0.0148/image (g6.2xlarge) vs ~$0.0227/image (g6e.xlarge) — g6.2xlarge is
+  both the fastest AND ~35% cheaper per image than either alternative.
+  Fallback order is `[g5.2xlarge, g6e.xlarge]`. Allocation strategy is also
+  now `price-capacity-optimized` (was `capacity-optimized-prioritized`,
+  which under-used the nominal primary: only 5.8% of jobs actually landed on
+  it, with 26.9% falling to the ~2x-priced g6e.xlarge).
+  **Still NO g4dn** (T4). **Why not g4dn:** a g4dn (T4) `lowest-price` cost
+  experiment backfired for the SDXL+ESRGAN-upscale workload (measured
+  2026-06-08) — the T4 ran **~192 s/image vs A10G's ~61 s (~3.2× slower)**,
+  so at ~$0.24/hr vs ~$0.48/hr it was **~$12.95 vs $8.11 per 1000 images
+  (~60% MORE expensive per image)**; and the T4's 16 GB VRAM forced ComfyUI
+  to offload ~14 GB to pinned CPU RAM, **OOM-killing ComfyUI on the 16
+  GB-RAM g4dn.xlarge** (jobs failed `[Errno 111] Connection refused` to
+  `:8188`; the 32 GB g4dn.2xlarge survived but was still slow/pricey).
+  xformers efficient attention also fails to load on the worker image (build
+  mismatch vs the NGC torch), worsening VRAM pressure. See
+  `infra/lib/config.ts` for the canonical config. The us-east-1 G/VT spot
   vCPU quota (raised to **48**, approved 2026-06-08) gates concurrency, but
-  `scaling.imageMax` is **4** (4× g5.xlarge = 16 vCPU), leaving most of the pool
-  (**shared with the video fleet**) free.
+  `scaling.imageMax` is **3** (3× 8 vCPU 2xlarge = 24 vCPU), leaving most of
+  the pool (**shared with the video fleet**) free.

@@ -344,14 +344,22 @@ export class ComputeStack extends Stack {
           // account's on-demand G/VT quota is 0 anyway).
           onDemandBaseCapacity: 0,
           onDemandPercentageAboveBaseCapacity: 0,
-          // capacity-optimized-PRIORITIZED for both fleets — honors the
-          // launchTemplate overrides order (primaryInstanceType first) and
-          // optimizes for spot capacity (fewest interruptions) as the tiebreak.
-          // (We briefly ran image on LOWEST_PRICE to force g4/T4 for cost, but
-          // the T4 was ~3x slower, pricier per image, AND OOM-unstable on
-          // g4dn.xlarge — reverted to g5.xlarge-only; see config.ts.)
+          // price-capacity-optimized for both fleets (switched from
+          // capacity-optimized-PRIORITIZED 2026-08-10). Prioritized honored
+          // the launchTemplate overrides order (primaryInstanceType first)
+          // ONLY as a capacity tiebreak, not a price signal — measured on the
+          // image fleet's real job ledger, it sent just 5.8% of jobs to the
+          // (cheaper, faster) g6.2xlarge primary and 26.9% to g6e.xlarge, an
+          // ~2x-priced pool that should only fire in a real drought (see
+          // config.ts fleets.image for the per-instance-type cost/latency
+          // data). price-capacity-optimized picks from the lowest-priced
+          // pools among those with good capacity, so it won't pay g6e's
+          // premium just because prioritized capacity-optimized picked it.
+          // (We also once briefly ran image on plain LOWEST_PRICE to force
+          // g4/T4 for cost, but the T4 was ~3x slower, pricier per image, AND
+          // OOM-unstable on g4dn.xlarge — reverted; see config.ts.)
           spotAllocationStrategy:
-            autoscaling.SpotAllocationStrategy.CAPACITY_OPTIMIZED_PRIORITIZED,
+            autoscaling.SpotAllocationStrategy.PRICE_CAPACITY_OPTIMIZED,
         },
       },
       minCapacity,
