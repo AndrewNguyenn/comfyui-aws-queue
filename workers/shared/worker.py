@@ -357,28 +357,38 @@ def _read_job(job_id: str) -> dict | None:
         # Z-Image VLM reference image (uploads-bucket key + the input/<name> the
         # template's LoadImage references). Absent on every non-Z-Image job.
         "input_image_key": item.get("input_image_key", {"S": ""})["S"],
+        "input_video_key": item.get("input_video_key", {"S": ""})["S"],
+        "input_video_name": item.get("input_video_name", {"S": ""})["S"],
         "input_image_name": item.get("input_image_name", {"S": ""})["S"],
     }
 
 
 def _stage_input_image(job_record: dict) -> None:
-    """Stage a Z-Image job's VLM reference image from the uploads bucket into
-    ComfyUI's input/ dir so the template's LoadImage resolves to input/<name>.
+    """Stage a job's uploaded inputs from the uploads bucket into ComfyUI's
+    input/ dir so the template's loader resolves to input/<name>.
 
-    Best-effort: a fetch failure must NOT abort the job — at worst the VLM node
-    errors and the job surfaces as a 0-output (the documented missing-input
-    behavior), which is better than crashing the worker over one image."""
-    key = job_record.get("input_image_key") or ""
-    name = os.path.basename(job_record.get("input_image_name") or "")  # no traversal
-    if not key or not name or not UPLOADS_BUCKET:
-        return
-    try:
-        COMFY_INPUT_DIR.mkdir(parents=True, exist_ok=True)
-        dest = COMFY_INPUT_DIR / name
-        s3.download_file(UPLOADS_BUCKET, key, str(dest))
-        log.info("staged VLM input image s3://%s/%s -> %s", UPLOADS_BUCKET, key, dest)
-    except Exception as e:  # noqa: BLE001 — never fail the job over the input image
-        log.warning("failed to stage input image %s (non-fatal): %r", key, e)
+    Two kinds, both optional and independent: a Z-Image VLM reference image or
+    a SCAIL-2 reference character (LoadImage), and a SCAIL-2 driving video
+    (VHS_LoadVideo).
+
+    Best-effort: a fetch failure must NOT abort the job — at worst the loader
+    node errors and the job surfaces as a 0-output (the documented
+    missing-input behavior), which is better than crashing the worker."""
+    for kind, key_attr, name_attr in (
+        ("image", "input_image_key", "input_image_name"),
+        ("video", "input_video_key", "input_video_name"),
+    ):
+        key = job_record.get(key_attr) or ""
+        name = os.path.basename(job_record.get(name_attr) or "")  # no traversal
+        if not key or not name or not UPLOADS_BUCKET:
+            continue
+        try:
+            COMFY_INPUT_DIR.mkdir(parents=True, exist_ok=True)
+            dest = COMFY_INPUT_DIR / name
+            s3.download_file(UPLOADS_BUCKET, key, str(dest))
+            log.info("staged input %s s3://%s/%s -> %s", kind, UPLOADS_BUCKET, key, dest)
+        except Exception as e:  # noqa: BLE001 — never fail the job over an input
+            log.warning("failed to stage input %s %s (non-fatal): %r", kind, key, e)
 
 
 def _claim_job(job_id: str, instance_type: str = "") -> bool:

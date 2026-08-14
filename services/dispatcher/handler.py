@@ -33,6 +33,7 @@ from botocore.exceptions import ClientError
 from anima import maybe_rewrite_to_anima
 from extract import _extract_model, _extract_subject
 from krea import maybe_rewrite_to_krea
+from scail import maybe_build_scail
 from workflow_router import classify_workflow
 from zimage import maybe_rewrite_to_zimage
 
@@ -238,6 +239,7 @@ def _arm_reaper() -> None:
 
 
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
+_VIDEO_EXTS = (".mp4", ".webm", ".mov", ".mkv", ".avi", ".gif")
 
 
 def _safe_input_image_name(name: Any) -> str:
@@ -253,8 +255,26 @@ def _safe_input_image_name(name: Any) -> str:
     return base
 
 
+def _safe_input_video_name(name: Any) -> str:
+    """Sanitize a client-supplied driving-video filename, as
+    ``_safe_input_image_name`` does for images. Ensures a video extension so
+    VHS_LoadVideo accepts it."""
+    base = os.path.basename(str(name or "")).strip()
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", base)[:124]
+    if not base or base in (".", ".."):
+        return ""
+    if not base.lower().endswith(_VIDEO_EXTS):
+        base += ".mp4"
+    return base
+
+
 def _post_prompt(event: dict) -> dict:
     body = json.loads(event.get("body") or "{}")
+
+    # SCAIL needs the uploaded reference image that the Z-Image branch would
+    # otherwise discard, so decide up front whether this is a SCAIL request.
+    scail_options = body.get("scail_options")
+    scail_requested = isinstance(scail_options, dict) and bool(scail_options)
 
     workflow = body.get("prompt") or body.get("workflow")
     if not workflow or not isinstance(workflow, dict):
@@ -296,9 +316,10 @@ def _post_prompt(event: dict) -> dict:
         zimage_rewritten = zimage_workflow is not None
         if zimage_rewritten:
             workflow = zimage_workflow
-        else:
-            # Not a Z-Image job — drop any stray input-image refs so we never tag a
-            # normal job with one (the worker only fetches for Z-Image jobs anyway).
+        elif not scail_requested:
+            # Not a Z-Image or SCAIL job — drop any stray input-image refs so we
+            # never tag a normal job with one (the worker only fetches for jobs
+            # that declare an input).
             input_image_key = input_image_name = ""
 
     # Krea 2 is a Qwen-Image-like architecture (UNET+CLIP+VAE), not SDXL — same
@@ -317,6 +338,33 @@ def _post_prompt(event: dict) -> dict:
         krea_rewritten = krea_workflow is not None
         if krea_rewritten:
             workflow = krea_workflow
+
+    # SCAIL-2 motion transfer. Not a rewriter like the three above — there is no
+    # submitted graph to substitute, because the inputs (reference character,
+    # driving video, duration) have no txt2img-shaped equivalent. When
+    # scail_options is present we discard the placeholder prompt and build the
+    # pose-control graph outright. Mutually exclusive with the rewriters: a
+    # request is either a SCAIL video job or an image job, never both.
+    scail_built = False
+    input_video_key = ""
+    input_video_name = ""
+    if scail_requested and not (anima_rewritten or zimage_rewritten or krea_rewritten):
+        raw_vid = body.get("input_video")
+        if isinstance(raw_vid, dict):
+            k = str(raw_vid.get("key") or "").strip()
+            if k.startswith("uploads/") and ".." not in k:
+                input_video_key = k
+                input_video_name = _safe_input_video_name(raw_vid.get("name"))
+        scail_workflow = maybe_build_scail(
+            scail_options,
+            ref_image_name=input_image_name or None,
+            drive_video_name=input_video_name or None,
+        )
+        scail_built = scail_workflow is not None
+        if scail_built:
+            workflow = scail_workflow
+        else:
+            input_video_key = input_video_name = ""
 
     explicit_type = body.get("type")
     if explicit_type in ("image", "video"):
@@ -349,13 +397,19 @@ def _post_prompt(event: dict) -> dict:
         "zimage_rewritten": {"BOOL": zimage_rewritten},
         # True when swapped for the Krea 2 workflow.
         "krea_rewritten": {"BOOL": krea_rewritten},
+        # True when the SCAIL-2 pose-control workflow was built from scratch.
+        "scail_built": {"BOOL": scail_built},
     }
     # Z-Image VLM input image: the worker stages this from the uploads bucket into
     # ComfyUI's input/<name> before the run (the template's LoadImage references the
     # name). Stored only for a Z-Image job that carried a valid upload key.
-    if zimage_rewritten and input_image_key and input_image_name:
+    if (zimage_rewritten or scail_built) and input_image_key and input_image_name:
         item["input_image_key"] = {"S": input_image_key}
         item["input_image_name"] = {"S": input_image_name}
+    # SCAIL driving video: staged the same way, for VHS_LoadVideo.
+    if scail_built and input_video_key and input_video_name:
+        item["input_video_key"] = {"S": input_video_key}
+        item["input_video_name"] = {"S": input_video_name}
     # Denormalize the fields the /jobs list derives — model (all rows; the
     # gallery's model label) and character/subject (the pending-strip grouping)
     # — as small attrs (~120 B) computed from the SAME `workflow` we store in

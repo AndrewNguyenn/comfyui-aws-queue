@@ -191,3 +191,52 @@ def test_template_is_not_mutated_between_builds():
     original = json.load(open(TEMPLATE))
     _build(frames=161, width=768, seed=7)
     assert json.load(open(TEMPLATE)) == original
+
+
+# --- handler: driving-video filename sanitising ----------------------------
+# Imported the same way test_source.py does (stubbed boto3, dummy env) so the
+# module-level AWS clients don't need real credentials.
+
+def _handler():
+    import importlib.util
+    import sys
+    import types
+
+    class _Inert:
+        def __getattr__(self, _):
+            return lambda **kw: None
+
+    sys.modules.setdefault("boto3", types.SimpleNamespace(client=lambda *a, **k: _Inert()))
+    _bc = types.ModuleType("botocore")
+    _exc = types.ModuleType("botocore.exceptions")
+    _exc.ClientError = type("ClientError", (Exception,), {})
+    _bc.exceptions = _exc
+    sys.modules.setdefault("botocore", _bc)
+    sys.modules.setdefault("botocore.exceptions", _exc)
+    for k in ("JOBS_TABLE", "MODELS_TABLE", "OBJECT_INFO_TABLE",
+              "IMAGE_QUEUE_URL", "VIDEO_QUEUE_URL"):
+        os.environ.setdefault(k, "x")
+    sys.path.insert(0, HERE)
+    spec = importlib.util.spec_from_file_location(
+        "dispatcher_handler_scail", os.path.join(HERE, "handler.py")
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_video_name_is_sanitised_and_traversal_is_stripped():
+    h = _handler()
+    assert h._safe_input_video_name("dance.mp4") == "dance.mp4"
+    assert h._safe_input_video_name("../../etc/passwd") == "passwd.mp4"
+    assert "/" not in h._safe_input_video_name("a/b/c.mov")
+    assert h._safe_input_video_name("") == ""
+    assert h._safe_input_video_name("..") == ""
+
+
+def test_video_name_gains_an_extension_vhs_accepts():
+    h = _handler()
+    assert h._safe_input_video_name("clip").endswith(".mp4")
+    # already-valid container extensions are preserved
+    for ext in (".mp4", ".webm", ".mov", ".mkv"):
+        assert h._safe_input_video_name("clip" + ext) == "clip" + ext
