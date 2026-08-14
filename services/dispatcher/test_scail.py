@@ -240,3 +240,16 @@ def test_video_name_gains_an_extension_vhs_accepts():
     # already-valid container extensions are preserved
     for ext in (".mp4", ".webm", ".mov", ".mkv"):
         assert h._safe_input_video_name("clip" + ext) == "clip" + ext
+
+
+def test_unbuildable_scail_request_is_rejected_not_queued_as_an_image_job():
+    # Without this the empty placeholder graph falls through to the image fleet
+    # and returns 0 outputs instead of an error.
+    h = _handler()
+    resp = h._post_prompt({"body": json.dumps({
+        "prompt": {},
+        "scail_options": {"prompt": "a woman dancing"},
+        # no input_image / input_video
+    })})
+    assert resp["statusCode"] == 400
+    assert "reference image" in json.loads(resp["body"])["error"]

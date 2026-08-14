@@ -368,6 +368,15 @@ def _post_prompt(event: dict) -> dict:
         else:
             input_video_key = input_video_name = ""
 
+    # A SCAIL request we could not build (missing upload, unreadable template)
+    # must fail loudly. Falling through would queue the empty placeholder graph
+    # to the IMAGE fleet, where it burns a worker and returns 0 outputs — the
+    # failure mode that reads as "the job silently did nothing".
+    if scail_requested and not scail_built and not workflow:
+        return _resp(400, {
+            "error": "scail_options requires an uploaded reference image and driving video"
+        })
+
     explicit_type = body.get("type")
     if explicit_type in ("image", "video"):
         job_type = explicit_type
