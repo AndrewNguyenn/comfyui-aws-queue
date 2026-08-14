@@ -33,17 +33,42 @@ else
         TYPES[$key]=$val
     done < <(cd /opt/worker && python3 -m model_types --bash)
 
+    # Per-mount cache budget is WEIGHTED, not an even split. This fleet used to
+    # divide the NVMe evenly, which was fine when no video weights existed. The
+    # SCAIL-2 pipeline breaks that: a single 15.3 GiB diffusion model plus a
+    # 10.6 GiB umt5 text encoder both exceed the ~7.5 GiB an even split yields
+    # across our catalog types, so every job would re-stream them from S3 and
+    # thrash the LRU. Weight the two mounts that hold the hot-set accordingly.
+    # Each cap = weight/total_weight * (NVMe - reserve), so the sum stays bounded
+    # below the NVMe regardless of instance/disk size.
+    cache_weight() {
+        case "$1" in
+            diffusion_models) echo 45 ;;  # SCAIL-2 14B fp8_scaled ~15.3 GiB
+            text_encoders)    echo 25 ;;  # umt5-xxl-enc-bf16 ~10.6 GiB
+            lora)             echo 5 ;;   # lightx2v distill + character LoRAs
+            detection)        echo 5 ;;   # vitpose-l-wholebody + yolov10m ONNX
+            clip_vision)      echo 3 ;;   # CLIP-ViT-H ~3.7 GiB
+            vae)              echo 2 ;;
+            nlf)              echo 2 ;;
+            *)                echo 1 ;;   # unused on the video fleet
+        esac
+    }
     NVME_MIB=$(df -m --output=avail "$CACHE_ROOT" | tail -1 | tr -d ' ')
-    NUM_MOUNTS=${#TYPES[@]}
     RESERVE_MIB=10240
-    CACHE_PER_MOUNT_MB=$(( (NVME_MIB - RESERVE_MIB) / NUM_MOUNTS ))
-    if [ "$CACHE_PER_MOUNT_MB" -lt 512 ]; then CACHE_PER_MOUNT_MB=512; fi
-    echo "NVMe ${NVME_MIB} MiB / ${NUM_MOUNTS} mounts → ${CACHE_PER_MOUNT_MB} MiB per mount"
+    AVAIL_MIB=$(( NVME_MIB - RESERVE_MIB ))
+    if [ "$AVAIL_MIB" -lt 1024 ]; then AVAIL_MIB=1024; fi
+    TOTAL_WEIGHT=0
+    for s3_type in "${!TYPES[@]}"; do
+        TOTAL_WEIGHT=$(( TOTAL_WEIGHT + $(cache_weight "$s3_type") ))
+    done
+    echo "NVMe ${NVME_MIB} MiB, ${AVAIL_MIB} MiB cacheable across weight ${TOTAL_WEIGHT}"
 
     for s3_type in "${!TYPES[@]}"; do
         comfy_dir=${TYPES[$s3_type]}
         mount_at="$COMFY_MODELS/$comfy_dir"
         cache_dir="$CACHE_ROOT/mount-s3/$s3_type"
+        cache_mb=$(( AVAIL_MIB * $(cache_weight "$s3_type") / TOTAL_WEIGHT ))
+        if [ "$cache_mb" -lt 512 ]; then cache_mb=512; fi
         mkdir -p "$mount_at" "$cache_dir"
         if mountpoint -q "$mount_at"; then
             MOUNTS+=("$mount_at")
@@ -53,12 +78,12 @@ else
         if mount-s3 \
                 --prefix "$s3_type/" \
                 --cache "$cache_dir" \
-                --max-cache-size "$CACHE_PER_MOUNT_MB" \
+                --max-cache-size "$cache_mb" \
                 --allow-other \
                 --metadata-ttl 60 \
                 --read-only \
                 "$MODELS_BUCKET" "$mount_at"; then
-            echo "  mounted s3://$MODELS_BUCKET/$s3_type/ at $mount_at"
+            echo "  mounted s3://$MODELS_BUCKET/$s3_type/ at $mount_at (cache ${cache_mb} MiB)"
             MOUNTS+=("$mount_at")
         else
             echo "  WARN: mount-s3 failed for $s3_type (continuing)"

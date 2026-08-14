@@ -63,8 +63,9 @@ else
     # fleet never uses (diffusion_models / unet / text_encoders — Flux/video-class)
     # get a small floor. Each cap = weight/total_weight * (NVMe - reserve), so the
     # sum stays bounded below the NVMe regardless of instance/disk size, and
-    # mount-s3 LRU-evicts within each per-mount cap. (Video keeps the even split —
-    # its workload needs the diffusion/unet caches; see workers/video/entrypoint.sh.)
+    # mount-s3 LRU-evicts within each per-mount cap. (The video fleet uses the same
+    # scheme with diffusion_models/text_encoders weighted up for SCAIL-2; see
+    # workers/video/entrypoint.sh.)
     cache_weight() {
         case "$1" in
             checkpoint) echo 45 ;;   # the pinned hot-set lives here (~90 GiB on a 250 GB NVMe)

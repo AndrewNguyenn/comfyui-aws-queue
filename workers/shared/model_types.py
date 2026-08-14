@@ -53,6 +53,16 @@ TYPE_DIR: dict[str, str] = {
     # mounts the wildcards/ S3 prefix at Impact-Pack's custom_wildcards path
     # instead. kickoff.py ALLOWED_TYPES still lists it so the downloader
     # accepts the type.
+    # ONNX pose/detection models for the SCAIL-2 video pipeline. kijai's
+    # ComfyUI-WanAnimatePreprocess registers its own "detection" folder_paths
+    # entry (and appends .onnx to the allowed extensions) reading
+    # models/detection/ — vitpose-l-wholebody.onnx + yolov10m.onnx live here.
+    "detection": "detection",
+    # Neural Localizer Fields pose models for ComfyUI-SCAIL-pose's
+    # NLFModelLoader, which reads models/nlf/. Cataloging these beats the
+    # pack's download-at-runtime node: spot workers would otherwise re-pull
+    # from GitHub on every cold boot.
+    "nlf": "nlf",
     # Florence2 / VLM weights. kijai's DownloadAndLoadFlorence2Model loads from
     # models/LLM/<repo-name>/ and SKIPS the HuggingFace download iff that dir
     # already exists — so pre-seeding the LLM/ S3 prefix (e.g.

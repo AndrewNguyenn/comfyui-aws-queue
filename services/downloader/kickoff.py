@@ -56,6 +56,9 @@ ALLOWED_TYPES = (
     "insightface",       # → models/insightface — InsightFace face-analysis sets (FaceID)
     "wildcards",         # → models/wildcards — prompt wildcard .txt files (a .zip
                          #   pack is unzipped by the download worker)
+    "detection",         # → models/detection — ONNX pose/detect models (ViTPose,
+                         #   YOLO) for the SCAIL-2 video pipeline
+    "nlf",               # → models/nlf — Neural Localizer Fields pose models
     "LLM",               # → models/LLM — VLM weights (Florence2) the Z-Image VLM
                          #   loads; pre-seeded as a dir tree, mounted read-only
 )
