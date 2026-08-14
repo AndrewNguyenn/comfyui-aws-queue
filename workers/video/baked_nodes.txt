@@ -1,0 +1,14 @@
+# Custom-node packs baked into the VIDEO worker image at build time.
+# Format: <name> <git-url> [<commit-or-ref>]
+#
+# The Wan wrapper, VideoHelperSuite and Manager are cloned directly in the
+# Dockerfile above this step (Manager needs GitPython pre-installed before its
+# requirements.txt, and the wrapper is pinned by ARG) — they get their .baked
+# markers there. This list covers the SCAIL-2 pose-control additions.
+#
+# All three are pinned: WanAnimatePreprocess and SCAIL-pose are young, fast
+# moving repos, and an unpinned rebuild silently changing pose semantics would
+# be very hard to attribute later. Float a pin by dropping the SHA.
+comfyui-kjnodes https://github.com/kijai/ComfyUI-KJNodes 6ab7e8130e449ed2c0037589bcf84146ceb7fc9c
+comfyui-wananimatepreprocess https://github.com/kijai/ComfyUI-WanAnimatePreprocess 0e0b6a2a555625acf4d4aefb780e27d06937132f
+comfyui-scail-pose https://github.com/kijai/ComfyUI-SCAIL-pose 1db9ac3b44b93c336402512c118d35a89a0bee58

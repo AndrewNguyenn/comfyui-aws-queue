@@ -16,7 +16,11 @@ it when the user clicks Install in the editor's ComfyUI-Manager UI (it
 intercepts `POST /manager/queue/install`).
 
 **The common set is BAKED into the worker image at build time.**
-- `workers/image/baked_nodes.txt` — the curated pack list.
+- `workers/image/baked_nodes.txt` — the curated pack list (image fleet).
+- `workers/video/baked_nodes.txt` — the video fleet's SCAIL-2 pose-control
+  packs (KJNodes, WanAnimatePreprocess, SCAIL-pose). The Wan wrapper, VHS and
+  Manager are still cloned directly in `workers/video/Dockerfile` and get their
+  `.baked` markers there.
 - `workers/shared/bake_nodes.py` — runs in `workers/image/Dockerfile` during
   `docker build`: clones + installs each pack, drops a `.baked` marker in it.
 - At worker boot `manifest_installer.sync()` reads the manifest; a pack with a

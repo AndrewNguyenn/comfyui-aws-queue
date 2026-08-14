@@ -48,7 +48,7 @@ RUN curl -fsSL -o /tmp/mount-s3.deb \
 
 # ---------- ComfyUI ----------
 WORKDIR /opt/comfy
-ARG COMFYUI_TAG=v0.20.1
+ARG COMFYUI_TAG=v0.27.0
 RUN git clone --depth 1 --branch ${COMFYUI_TAG} \
         https://github.com/comfyanonymous/ComfyUI.git . \
     && pip install -r requirements.txt
@@ -70,8 +70,11 @@ RUN python -c "import sageattention; print('sageattention import OK, attrs:', [a
 # ---------- ComfyUI custom nodes for Wan video ----------
 WORKDIR /opt/comfy/custom_nodes
 
-# Pin by SHA — kijai's wrapper has no tagged releases.
-ARG WAN_WRAPPER_SHA=main
+# Pin by SHA — kijai's wrapper has no tagged releases. This SHA is the first
+# one we validated that contains SCAIL/nodes.py (WanVideoAddSCAILPoseEmbeds /
+# WanVideoAddSCAILReferenceEmbeds); anything older cannot run the SCAIL-2
+# pipeline at all.
+ARG WAN_WRAPPER_SHA=088128b224242e110d3906c6750e9a3a348a659b
 RUN git clone https://github.com/kijai/ComfyUI-WanVideoWrapper.git \
     && cd ComfyUI-WanVideoWrapper \
     && git checkout ${WAN_WRAPPER_SHA} \
@@ -92,6 +95,16 @@ RUN mkdir -p ComfyUI-Manager && \
     pip install --no-cache-dir GitPython && \
     pip install --no-cache-dir -r ComfyUI-Manager/requirements.txt
 
+# ---------- Mark the hand-cloned packs as baked ----------
+# The runtime manifest_installer skips any pack carrying a .baked marker.
+# bake_nodes.py writes these itself, but the three packs above are cloned
+# directly by this Dockerfile and were missing markers — so a manifest listing
+# any of them made every cold worker re-clone and re-pip-install a pack that
+# was already in the image.
+RUN for d in ComfyUI-WanVideoWrapper ComfyUI-VideoHelperSuite ComfyUI-Manager; do \
+        echo "baked at image build" > /opt/comfy/custom_nodes/$d/.baked; \
+    done
+
 # ---------- AWS + worker shared deps ----------
 COPY workers/shared/requirements.txt /tmp/req.txt
 RUN pip install -r /tmp/req.txt && rm /tmp/req.txt
@@ -102,7 +115,24 @@ COPY workers/shared/ /opt/worker/
 COPY workers/video/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# ---------- Bake the SCAIL-2 pose-control node packs ----------
+# KJNodes (ImageResizeKJv2 / SimpleCalculatorKJ / ImageConcatMulti),
+# WanAnimatePreprocess (ONNX ViTPose + YOLO detection) and SCAIL-pose (NLF
+# predict + pose render). Routed through bake_nodes.py rather than more hand
+# clones so they get the foundation repairs: WanVideoWrapper, KJNodes and both
+# pose packs each pull an opencv variant, and mixed variants clobber one cv2/
+# dir and crash ComfyUI outright on startup. _force_clean_opencv() runs last
+# and collapses them to a single pinned headless build.
+COPY workers/video/baked_nodes.txt /tmp/baked_nodes.txt
+RUN cd /opt/worker && python3 bake_nodes.py /tmp/baked_nodes.txt
+
 RUN mkdir -p /opt/comfy/output
+
+# Keep the NGC torchaudio: this base ships a working one and no video pack
+# pulls a real wheel over it, so the image fleet's re-stub would only destroy
+# what Wan's audio-conditioned families (s2v, multitalk, HuMo) import for real.
+# Read by manifest_installer at both bake time and every worker boot.
+ENV COMFY_KEEP_TORCHAUDIO=1
 
 # ---------- Smoke test ----------
 RUN cd /opt/comfy && python -c "import sys; sys.path.insert(0, '.'); import comfy" || \
