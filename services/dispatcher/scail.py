@@ -1,5 +1,22 @@
 """
-SCAIL-2 video motion transfer.
+Video generation: SCAIL-2 motion transfer, and stock Wan 2.1 I2V.
+
+Two modes, selected by ``scail_options["mode"]``:
+
+  pose (default) — SCAIL-2. Reference character + driving video -> the character
+                   performing the driving motion.
+  i2v            — stock Wan 2.1 I2V-14B. Reference character + prompt, no
+                   driving video.
+
+They live in one family because they share their entire model stack: the same
+umt5 encoder, Wan 2.1 VAE, CLIP-ViT-H and lightx2v I2V distill LoRA, differing
+only in the diffusion model and the conditioning branch. The parameter clamps
+below (frame stride, dimension snapping, context windows) apply to both.
+
+i2v is a genuinely separate model, not SCAIL with the pose input omitted: the
+wrapper's sampler indexes ``scail_data["pose_latent"]`` without a guard, so a
+pose-less SCAIL run raises KeyError once sampling starts rather than degrading
+to prompt-driven generation.
 
 SCAIL (https://github.com/zai-org/SCAIL) is a Wan 2.1 14B derivative that takes
 a **reference character image** plus a **driving pose sequence** and generates
@@ -43,9 +60,28 @@ import os
 import random
 from typing import Optional
 
-_TEMPLATE_PATH = os.path.join(
-    os.path.dirname(__file__), "scail_templates", "Scail2PoseControl.api.json"
-)
+_TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "scail_templates")
+
+# Two modes share this family because they share their whole model stack — the
+# umt5 encoder, the Wan 2.1 VAE, CLIP-ViT-H and the lightx2v I2V distill LoRA are
+# the same files on disk; only the diffusion model and the conditioning branch
+# differ. Splitting them into separate families would duplicate every parameter
+# clamp for no benefit.
+#
+#   pose — SCAIL-2 motion transfer. Reference character + driving video.
+#   i2v  — stock Wan 2.1 I2V. Reference character + prompt, no driving video.
+#
+# SCAIL cannot do i2v's job: its sampler path indexes scail_data["pose_latent"]
+# unguarded, so a pose-less SCAIL run is a KeyError, not a prompt-driven fallback.
+_TEMPLATES = {
+    "pose": "Scail2PoseControl.api.json",
+    "i2v": "WanI2V.api.json",
+}
+_DEFAULT_MODE = "pose"
+
+# Per-mode default framing: SCAIL's reference workflow is portrait (a standing
+# person filling the frame); stock I2V is trained landscape.
+_DEFAULT_DIMS = {"pose": (512, 896), "i2v": (832, 480)}
 
 # Match the other families' seed cap for cross-family consistency.
 _SEED_MAX = 2 ** 50
@@ -115,12 +151,12 @@ def _resolve_frames(options: dict) -> int:
     return _MIN_FRAMES
 
 
-def _load_template() -> Optional[dict]:
+def _load_template(mode: str) -> Optional[dict]:
     try:
-        with open(_TEMPLATE_PATH, encoding="utf-8") as fh:
+        with open(os.path.join(_TEMPLATE_DIR, _TEMPLATES[mode]), encoding="utf-8") as fh:
             return json.load(fh)
     except Exception as e:  # noqa: BLE001
-        print(f"scail: template load failed: {e!r}")
+        print(f"scail: template load failed for mode {mode!r}: {e!r}")
         return None
 
 
@@ -138,46 +174,59 @@ def maybe_build_scail(
     """
     if not isinstance(options, dict) or not options:
         return None
-    if not ref_image_name or not drive_video_name:
-        print("scail: missing reference image or driving video; not building")
+
+    mode = str(options.get("mode") or _DEFAULT_MODE).lower()
+    if mode not in _TEMPLATES:
+        print(f"scail: unknown mode {mode!r}; not building")
+        return None
+    # The reference character is required by both modes — it is the subject.
+    # A driving video is required only by pose: it is the sole source for the
+    # pose branch. i2v takes its motion from the prompt, so a driving video
+    # there would be silently ignored, which is worse than refusing it.
+    if not ref_image_name:
+        print("scail: missing reference image; not building")
+        return None
+    if mode == "pose" and not drive_video_name:
+        print("scail: pose mode needs a driving video; not building")
         return None
 
-    wf = _load_template()
+    wf = _load_template(mode)
     if wf is None:
         return None
 
     try:
         wf = copy.deepcopy(wf)
 
-        width = _snap_dim(options.get("width", 512))
-        height = _snap_dim(options.get("height", 896))
+        def_w, def_h = _DEFAULT_DIMS[mode]
+        width = _snap_dim(options.get("width", def_w))
+        height = _snap_dim(options.get("height", def_h))
         frames = _resolve_frames(options)
 
-        # Invariant 1: poses are consumed at exactly half the generation size.
-        pose_w, pose_h = width // 2, height // 2
-
         wf[_N_REF_LOAD]["inputs"]["image"] = ref_image_name
-        wf[_N_DRIVE_LOAD]["inputs"]["video"] = drive_video_name
+        wf[_N_REF_RESIZE]["inputs"]["width"] = width
+        wf[_N_REF_RESIZE]["inputs"]["height"] = height
 
-        for nid in (_N_REF_RESIZE, _N_DRIVE_RESIZE):
-            wf[nid]["inputs"]["width"] = width
-            wf[nid]["inputs"]["height"] = height
-
-        wf[_N_POSE_RENDER]["inputs"]["width"] = pose_w
-        wf[_N_POSE_RENDER]["inputs"]["height"] = pose_h
+        if mode == "pose":
+            wf[_N_DRIVE_LOAD]["inputs"]["video"] = drive_video_name
+            wf[_N_DRIVE_RESIZE]["inputs"]["width"] = width
+            wf[_N_DRIVE_RESIZE]["inputs"]["height"] = height
+            # Invariant 1: poses are consumed at exactly half the generation size.
+            wf[_N_POSE_RENDER]["inputs"]["width"] = width // 2
+            wf[_N_POSE_RENDER]["inputs"]["height"] = height // 2
 
         wf[_N_EMPTY]["inputs"]["width"] = width
         wf[_N_EMPTY]["inputs"]["height"] = height
         wf[_N_EMPTY]["inputs"]["num_frames"] = frames
 
-        # The driving video must supply exactly as many frames as we generate:
-        # fewer and the pose tensor is shorter than the latent (the sampler
-        # errors); more and the tail is silently discarded.
-        wf[_N_DRIVE_LOAD]["inputs"]["frame_load_cap"] = frames
-        if options.get("select_every_nth") is not None:
-            wf[_N_DRIVE_LOAD]["inputs"]["select_every_nth"] = max(
-                1, int(options["select_every_nth"])
-            )
+        if mode == "pose":
+            # The driving video must supply exactly as many frames as we
+            # generate: fewer and the pose tensor is shorter than the latent
+            # (the sampler errors); more and the tail is silently discarded.
+            wf[_N_DRIVE_LOAD]["inputs"]["frame_load_cap"] = frames
+            if options.get("select_every_nth") is not None:
+                wf[_N_DRIVE_LOAD]["inputs"]["select_every_nth"] = max(
+                    1, int(options["select_every_nth"])
+                )
 
         wf[_N_TEXT]["inputs"]["positive_prompt"] = str(options.get("prompt", "") or "")
         wf[_N_TEXT]["inputs"]["negative_prompt"] = str(

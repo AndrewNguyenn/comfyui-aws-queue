@@ -253,3 +253,95 @@ def test_unbuildable_scail_request_is_rejected_not_queued_as_an_image_job():
     })})
     assert resp["statusCode"] == 400
     assert "reference image" in json.loads(resp["body"])["error"]
+
+
+# --- i2v mode --------------------------------------------------------------
+# Stock Wan 2.1 I2V: reference character + prompt, no driving video.
+
+def _i2v(**opts):
+    return scail.maybe_build_scail(
+        {"prompt": "a woman walking", "mode": "i2v", **opts}, REF, None
+    )
+
+
+def test_i2v_builds_without_a_driving_video():
+    wf = _i2v()
+    assert wf is not None
+    assert classify_workflow(wf) == "video"
+
+
+def test_pose_mode_still_requires_a_driving_video():
+    assert scail.maybe_build_scail({"prompt": "x", "mode": "pose"}, REF, None) is None
+    assert scail.maybe_build_scail({"prompt": "x"}, REF, None) is None  # pose is default
+
+
+def test_both_modes_require_a_reference_character():
+    for mode in ("pose", "i2v"):
+        assert scail.maybe_build_scail({"prompt": "x", "mode": mode}, None, DRIVE) is None
+
+
+def test_unknown_mode_is_refused():
+    assert scail.maybe_build_scail({"prompt": "x", "mode": "wat"}, REF, DRIVE) is None
+
+
+def test_i2v_has_no_pose_or_driving_branch():
+    wf = _i2v()
+    classes = {n["class_type"] for n in wf.values()}
+    for absent in ("VHS_LoadVideo", "RenderNLFPoses", "NLFPredictPoses",
+                   "OnnxDetectionModelLoader", "PoseDetectionVitPoseToDWPose",
+                   "WanVideoAddSCAILPoseEmbeds", "WanVideoAddSCAILReferenceEmbeds"):
+        assert absent not in classes, absent
+
+
+def test_i2v_defaults_to_landscape_and_pose_to_portrait():
+    i = _i2v()[scail._N_EMPTY]["inputs"]
+    p = _build()[scail._N_EMPTY]["inputs"]
+    assert (i["width"], i["height"]) == (832, 480)
+    assert (p["width"], p["height"]) == (512, 896)
+
+
+def test_i2v_wires_the_reference_as_the_start_image():
+    wf = _i2v()
+    enc = wf[scail._N_EMPTY]["inputs"]
+    assert enc["start_image"] == [scail._N_REF_RESIZE, 0]
+    assert wf[scail._N_REF_LOAD]["inputs"]["image"] == REF
+
+
+def test_i2v_keeps_fun_or_fl2v_model_false():
+    # The widget DEFAULTS to True, which is correct only for Fun / FLF2V
+    # checkpoints. Left true on a stock I2V model the conditioning is wrong.
+    assert _i2v()[scail._N_EMPTY]["inputs"]["fun_or_fl2v_model"] is False
+
+
+def test_i2v_respects_frame_and_dimension_invariants():
+    wf = _i2v(frames=161, width=900, height=500)
+    e = wf[scail._N_EMPTY]["inputs"]
+    assert e["num_frames"] % 4 == 1
+    assert e["width"] % 32 == 0 and e["height"] % 32 == 0
+
+
+def test_i2v_links_all_resolve_and_nothing_is_orphaned():
+    wf = _i2v()
+    for nid, node in wf.items():
+        for key, val in node["inputs"].items():
+            if isinstance(val, list) and len(val) == 2 and isinstance(val[0], str):
+                assert val[0] in wf, f"{nid}.{key} -> missing {val[0]}"
+    out = [i for i, x in wf.items() if x["class_type"] == "VHS_VideoCombine"]
+    seen = set()
+
+    def walk(i):
+        if i in seen:
+            return
+        seen.add(i)
+        for v in wf[i]["inputs"].values():
+            if isinstance(v, list) and len(v) == 2 and v[0] in wf:
+                walk(v[0])
+
+    walk(out[0])
+    assert seen == set(wf), f"unreachable: {sorted(set(wf) - seen)}"
+
+
+def test_i2v_prompt_and_seed_wiring():
+    wf = _i2v(prompt="a knight riding", seed=99)
+    assert wf[scail._N_TEXT]["inputs"]["positive_prompt"] == "a knight riding"
+    assert wf[scail._N_SAMPLER]["inputs"]["seed"] == 99

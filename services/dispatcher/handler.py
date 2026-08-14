@@ -374,7 +374,8 @@ def _post_prompt(event: dict) -> dict:
     # failure mode that reads as "the job silently did nothing".
     if scail_requested and not scail_built and not workflow:
         return _resp(400, {
-            "error": "scail_options requires an uploaded reference image and driving video"
+            "error": "scail_options needs an uploaded reference image, plus a "
+                     "driving video when mode is 'pose'"
         })
 
     explicit_type = body.get("type")
