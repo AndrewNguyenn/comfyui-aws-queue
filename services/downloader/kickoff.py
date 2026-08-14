@@ -82,6 +82,7 @@ def lambda_handler(event: dict, _context: Any) -> dict:
 def _kickoff(event: dict) -> dict:
     body = json.loads(event.get("body") or "{}")
     civitai_url = body.get("civitai_url", "").strip()
+    hf_url = body.get("hf_url", "").strip()
     model_type = body.get("model_type", "").strip().lower()
     # Optional: select a SPECIFIC file from a multi-file CivitAI version by name
     # (case-insensitive, matched in the worker). Default (absent) keeps the
@@ -89,8 +90,25 @@ def _kickoff(event: dict) -> dict:
     # e.g. an Anima checkpoint's separate text encoder / VAE alongside the UNET.
     file_name = body.get("file_name", "").strip()
 
-    if not civitai_url or not _looks_like_civitai_url(civitai_url):
-        return _resp(400, {"error": "invalid civitai_url"})
+    # Exactly one source. CivitAI hosts the community fine-tunes; HuggingFace
+    # hosts the base/research weights (Wan, SCAIL, umt5, the ONNX pose models),
+    # which have no CivitAI mirror — so the video pipeline can't be provisioned
+    # through the CivitAI path at all.
+    if civitai_url and hf_url:
+        return _resp(400, {"error": "pass civitai_url or hf_url, not both"})
+    if hf_url:
+        if not _looks_like_hf_url(hf_url):
+            return _resp(400, {
+                "error": "invalid hf_url — expected "
+                         "https://huggingface.co/<owner>/<repo>/resolve/<rev>/<path>"
+            })
+        source, url = "huggingface", hf_url
+    elif civitai_url:
+        if not _looks_like_civitai_url(civitai_url):
+            return _resp(400, {"error": "invalid civitai_url"})
+        source, url = "civitai", civitai_url
+    else:
+        return _resp(400, {"error": "missing civitai_url or hf_url"})
     if model_type not in ALLOWED_TYPES:
         return _resp(400, {"error": f"model_type must be one of {ALLOWED_TYPES}"})
 
@@ -101,7 +119,10 @@ def _kickoff(event: dict) -> dict:
         TableName=DOWNLOADS_TABLE,
         Item={
             "download_id": {"S": download_id},
-            "civitai_url": {"S": civitai_url},
+            # Kept as the generic source URL under its legacy attr name so the
+            # status endpoint and any existing reader keep working unchanged.
+            "civitai_url": {"S": url},
+            "source": {"S": source},
             "model_type": {"S": model_type},
             "status": {"S": "queued"},
             "bytes_done": {"N": "0"},
@@ -113,7 +134,12 @@ def _kickoff(event: dict) -> dict:
     )
 
     # Async invoke (Event = fire-and-forget). Returns immediately.
-    payload = {"download_id": download_id, "civitai_url": civitai_url, "model_type": model_type}
+    payload = {
+        "download_id": download_id,
+        "civitai_url": url,
+        "source": source,
+        "model_type": model_type,
+    }
     if file_name:
         payload["file_name"] = file_name
     lam.invoke(
@@ -156,6 +182,19 @@ _CIVITAI_RE = re.compile(r"^https?://(www\.)?civitai\.(com|red)/")
 
 def _looks_like_civitai_url(url: str) -> bool:
     return bool(_CIVITAI_RE.match(url))
+
+
+# A single-file HuggingFace URL. Both the /resolve/ (raw) and /blob/ (web UI)
+# forms are accepted — people copy whichever the page gave them, and the worker
+# normalises /blob/ to /resolve/ before fetching. Repo-root URLs are rejected:
+# we download one file per request, not a whole repo.
+_HF_RE = re.compile(
+    r"^https?://(www\.)?huggingface\.co/[^/\s]+/[^/\s]+/(resolve|blob)/[^/\s]+/.+$"
+)
+
+
+def _looks_like_hf_url(url: str) -> bool:
+    return bool(_HF_RE.match(url))
 
 
 def _resp(status: int, body: Any) -> dict:

@@ -18,6 +18,7 @@ import json
 import os
 import re
 import time
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Any
 
@@ -47,13 +48,21 @@ def lambda_handler(event: dict, _context: Any) -> dict:
     civitai_url = event["civitai_url"]
     model_type = event["model_type"]
     file_name = event.get("file_name") or ""
+    # Absent on records queued before HF support existed — those are CivitAI.
+    source = event.get("source") or "civitai"
 
     try:
         _set_status(download_id, "resolving")
-        token = _civitai_token()
-        version_id = _parse_version_id(civitai_url, token)
-        meta = _fetch_metadata(version_id, token)
-        file_meta = _pick_file(meta, file_name)
+        if source == "huggingface":
+            token = _hf_token()
+            version_id = None
+            meta = {}
+            file_meta = _hf_file_meta(civitai_url, token)
+        else:
+            token = _civitai_token()
+            version_id = _parse_version_id(civitai_url, token)
+            meta = _fetch_metadata(version_id, token)
+            file_meta = _pick_file(meta, file_name)
         total_bytes = int(file_meta["sizeKB"] * 1024)
         _set_total(download_id, total_bytes, file_meta["name"])
 
@@ -69,8 +78,8 @@ def lambda_handler(event: dict, _context: Any) -> dict:
         bytes_done = _stream_to_s3(
             file_meta["downloadUrl"], token, s3_key, total_bytes, download_id
         )
-        _add_to_catalog(file_meta, model_type, s3_key, bytes_done, version_id, meta)
-        _write_loramanager_metadata(file_meta, model_type, s3_key, bytes_done, meta)
+        _add_to_catalog(file_meta, model_type, s3_key, bytes_done, version_id, meta, source)
+        _write_loramanager_metadata(file_meta, model_type, s3_key, bytes_done, meta, source)
         _set_status(download_id, "complete")
         return {"ok": True, "download_id": download_id, "s3_key": s3_key}
 
@@ -138,6 +147,69 @@ def _handle_wildcards(file_meta: dict, token: str, total_bytes: int, download_id
         ContentType="text/plain; charset=utf-8",
     )
     return 1
+
+
+HF_SECRET = "huggingface/api-token"
+
+_HF_BLOB_RE = re.compile(r"^(https?://(?:www\.)?huggingface\.co/[^/]+/[^/]+)/blob/(.+)$")
+
+
+def _hf_token() -> str:
+    """HuggingFace token, or '' when unset.
+
+    Unlike the CivitAI token this is genuinely optional — every model the video
+    pipeline needs is public. It only matters for gated or private repos, so a
+    missing secret is not an error.
+    """
+    try:
+        r = sm.get_secret_value(SecretId=HF_SECRET)
+        return json.loads(r["SecretString"])["token"]
+    except Exception as e:  # noqa: BLE001
+        print(f"huggingface token unavailable ({e!r}); proceeding unauthenticated")
+        return ""
+
+
+def _hf_file_meta(url: str, token: str) -> dict:
+    """Resolve a HuggingFace file URL into the same shape _pick_file returns.
+
+    Everything downstream (_stream_to_s3, the catalog row, the lora-manager
+    metadata seed) consumes {name, downloadUrl, sizeKB, hashes.SHA256}, so
+    matching that shape keeps the two sources on one code path.
+
+    A HEAD on the resolve URL gives us both values without downloading: HF sets
+    x-linked-size to the true LFS size (content-length is the pointer's, not the
+    file's — using it would report a multi-GB model as ~1 KB and break the
+    progress bar), and x-linked-etag to the LFS sha256, which is exactly the
+    hash lora-manager wants so the fleet never re-hashes the file on boot.
+    """
+    m = _HF_BLOB_RE.match(url)
+    if m:  # web-UI URL — /blob/ serves HTML, /resolve/ serves the bytes
+        url = f"{m.group(1)}/resolve/{m.group(2)}"
+
+    headers = {"User-Agent": "comfyui-aws-queue/1.0"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    r = http.request("HEAD", url, headers=headers, redirect=True)
+    if r.status >= 400:
+        raise RuntimeError(
+            f"huggingface HEAD failed: HTTP {r.status} "
+            f"(gated or private repos need the {HF_SECRET} secret)"
+        )
+
+    size = int(r.headers.get("x-linked-size") or r.headers.get("content-length") or 0)
+    if size <= 0:
+        raise RuntimeError("huggingface returned no usable file size")
+    sha = (r.headers.get("x-linked-etag") or "").strip('"').lower()
+    name = os.path.basename(urllib.parse.urlparse(url).path)
+    if not name:
+        raise RuntimeError(f"could not derive a filename from {url}")
+
+    return {
+        "name": name,
+        "downloadUrl": url,
+        "sizeKB": size / 1024.0,
+        "hashes": {"SHA256": sha} if sha else {},
+    }
 
 
 def _civitai_token() -> str:
@@ -356,8 +428,9 @@ def _add_to_catalog(
     model_type: str,
     s3_key: str,
     size_bytes: int,
-    version_id: int,
+    version_id: int | None,
     meta: dict,
+    source: str = "civitai",
 ) -> None:
     name = file_meta["name"].rsplit(".", 1)[0]
     preview_url = ""
@@ -371,10 +444,14 @@ def _add_to_catalog(
         "s3_key": {"S": s3_key},
         "size_gb": {"N": str(round(size_bytes / 1e9, 3))},
         "pinned": {"BOOL": False},
-        "civitai_version_id": {"N": str(version_id)},
         "preview_url": {"S": preview_url},
+        "source": {"S": source},
         "added_at": {"S": datetime.now(timezone.utc).isoformat()},
     }
+    # HuggingFace downloads have no version id; writing a placeholder 0 would
+    # read as "CivitAI version 0" to anything filtering on this attr.
+    if version_id is not None:
+        item["civitai_version_id"] = {"N": str(version_id)}
     try:
         ddb.put_item(TableName=MODELS_TABLE, Item=item)
     except Exception as e:  # noqa: BLE001
@@ -387,6 +464,7 @@ def _write_loramanager_metadata(
     s3_key: str,
     size_bytes: int,
     meta: dict,
+    source: str = "civitai",
 ) -> None:
     """Pre-seed comfyui-lora-manager's per-file ``<name>.metadata.json`` next to a
     downloaded model so the GPU fleet never re-hashes it on boot.
@@ -411,7 +489,7 @@ def _write_loramanager_metadata(
     try:
         sha256 = ((file_meta.get("hashes") or {}).get("SHA256") or "").lower()
         if not sha256:
-            print(f"no civitai SHA256 for {s3_key}; skipping lora-manager metadata (worker hashes once)")
+            print(f"no {source} SHA256 for {s3_key}; skipping lora-manager metadata (worker hashes once)")
             return
         base = file_meta["name"]            # e.g. "X.safetensors"
         name = base.rsplit(".", 1)[0]       # "X"
@@ -430,7 +508,7 @@ def _write_loramanager_metadata(
             "notes": "",
             "hash_status": "completed",
             "usage_tips": "{}",
-            "from_civitai": True,
+            "from_civitai": source == "civitai",
         }
         # checkpoints/diffusion_models load as CheckpointMetadata, which has a sub_type.
         if model_type != "lora":
