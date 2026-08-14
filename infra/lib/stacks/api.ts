@@ -183,7 +183,16 @@ export class ApiStack extends Stack {
     storage.downloadsTable.grantReadWriteData(this.downloadKickoffFn);
 
     // ----- Lambda: Download Worker -----
-    // Long-running. 15 min timeout, 1 GB memory, streams CivitAI → S3.
+    // Long-running. 15 min timeout, streams CivitAI/HuggingFace → S3.
+    //
+    // Memory is 10 GB not for buffering — the transfer is streamed through a
+    // multipart upload and ephemeral storage stays at 512 MB — but because
+    // Lambda allocates network bandwidth in proportion to memory. At 1 GB the
+    // download worker sustained ~1.2 GiB/min, which is fine for a 200 MB LoRA
+    // and hopeless for the model sizes video work needs: MiniMax H3's 19.5 GiB
+    // transformer projected to ~23 min against a hard 15 min ceiling, and its
+    // 25.3 GiB text encoder only just landed in 10.5 min. The ceiling cannot be
+    // raised (15 min is Lambda's maximum), so the only lever is throughput.
     this.downloadWorkerFn = new lambda.Function(this, 'DownloadWorkerFn', {
       ...commonLambdaProps,
       functionName: 'comfy-download-worker',
@@ -191,7 +200,7 @@ export class ApiStack extends Stack {
       handler: 'worker.lambda_handler',
       description: 'Streams model download from CivitAI to S3 multipart upload',
       timeout: Duration.minutes(15),
-      memorySize: 1024,
+      memorySize: 10240,
       ephemeralStorageSize: require('aws-cdk-lib').Size.mebibytes(512), // No big disk needed; streaming
     });
     storage.modelsBucket.grantWrite(this.downloadWorkerFn);
