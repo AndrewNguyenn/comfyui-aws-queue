@@ -325,3 +325,177 @@ def test_loras_via_maybe_rewrite():
     )
     assert out is not None
     assert any(n.get("class_type") == "LoraLoader" for n in out.values())
+
+
+
+# --- pre-baked-turbo checkpoints -------------------------------------------
+#
+# Krea2 TURBO fp8 and RedCraft RedMix 3.0 Lightning8 ship the distillation
+# merged into the weights, so the template's baked turbo lora must be spliced
+# out for them (KREA_PREBAKED_TURBO) — see krea.py's module docstring.
+
+PREBAKED = "krea2TurboFP8_krea2TURBO.safetensors"
+REDMIX = "redcraftMinimaxH3REDMIX_30Krea2.safetensors"
+BOTH_PREBAKED = (PREBAKED, REDMIX)
+
+
+def test_prebaked_turbo_models_are_all_allowlisted():
+    assert krea.KREA_PREBAKED_TURBO <= krea.KREA_MODELS
+
+
+def test_model_sampler_overrides_are_all_allowlisted():
+    assert set(krea._KREA_MODEL_SAMPLER) <= krea.KREA_MODELS
+
+
+def test_detect_new_krea_checkpoints():
+    for model in BOTH_PREBAKED:
+        wf = {"1": {"class_type": "UNETLoader", "inputs": {"unet_name": model}}}
+        assert krea.detect_krea_model(wf) == model
+
+
+def test_prebaked_turbo_drops_only_the_turbo_lora():
+    for model in BOTH_PREBAKED:
+        out = krea.build_krea_workflow(model, "p", "n")
+        names = [
+            n["inputs"]["lora_name"].lower()
+            for n in out.values()
+            if n.get("class_type") == "LoraLoaderModelOnly"
+        ]
+        assert not any("turbo" in n for n in names), f"{model}: turbo lora must be spliced out"
+        assert any("filterbypass" in n for n in names), model
+        assert any("amateurslider" in n for n in names), model
+
+
+def test_prebaked_turbo_rewires_chain_to_the_unet_loader():
+    for model in BOTH_PREBAKED:
+        out = krea.build_krea_workflow(model, "p", "n")
+        assert krea._TURBO_LORA_NODE not in out, model
+        unet_id = next(i for i, n in out.items() if n.get("class_type") == "UNETLoader")
+        bypass = next(
+            n for n in out.values()
+            if n.get("class_type") == "LoraLoaderModelOnly"
+            and "filterbypass" in n["inputs"]["lora_name"].lower()
+        )
+        assert bypass["inputs"]["model"] == [unet_id, 0], model
+        # samplers still read off the unchanged baked tail
+        for s in out.values():
+            if s.get("class_type") == "ClownsharKSampler_Beta":
+                assert s["inputs"]["model"] == [krea._BAKED_TAIL_NODE, 0], model
+        # no link anywhere still points at the deleted node
+        for n in out.values():
+            for val in (n.get("inputs") or {}).values():
+                if isinstance(val, list) and len(val) == 2:
+                    assert str(val[0]) != krea._TURBO_LORA_NODE, model
+
+
+def test_prebaked_build_differs_from_raw_by_exactly_the_turbo_node():
+    """The strongest guard on the splice: PREBAKED takes no sampler override,
+    so its graph must equal the raw build minus node 2 and nothing else."""
+    raw = _seed_normalized(krea.build_krea_workflow("krea2_raw_fp8_scaled.safetensors", "p", "n"))
+    pre = _seed_normalized(krea.build_krea_workflow(PREBAKED, "p", "n"))
+    assert set(raw) - set(pre) == {krea._TURBO_LORA_NODE}
+    assert set(pre) - set(raw) == set()
+    raw["1"]["inputs"]["unet_name"] = PREBAKED
+    raw["3"]["inputs"]["model"] = ["1", 0]
+    del raw[krea._TURBO_LORA_NODE]
+    assert raw == pre
+
+
+def test_raw_base_model_keeps_the_baked_turbo_lora():
+    out = krea.build_krea_workflow("krea2_raw_fp8_scaled.safetensors", "p", "n")
+    assert krea._TURBO_LORA_NODE in out
+    names = [
+        n["inputs"]["lora_name"].lower()
+        for n in out.values()
+        if n.get("class_type") == "LoraLoaderModelOnly"
+    ]
+    assert any("turbo" in n for n in names)
+
+
+def test_prebaked_decision_survives_a_path_prefixed_model_name():
+    """build_krea_workflow normalizes before deciding — a catalog path prefix
+    (as detect_krea_model can return) must not fall through to the raw path."""
+    for model in BOTH_PREBAKED:
+        out = krea.build_krea_workflow("diffusion_models/" + model, "p", "n")
+        assert krea._TURBO_LORA_NODE not in out, model
+
+
+def test_user_loras_still_splice_onto_the_tail_when_turbo_is_bypassed():
+    for model in BOTH_PREBAKED:
+        out = krea.build_krea_workflow(
+            model, "p", "n", options={"loras": [{"name": "x.safetensors", "strength": 0.8}]}
+        )
+        chain = [n for n in out.values() if n.get("class_type") == "LoraLoader"]
+        assert len(chain) == 1, model
+        assert chain[0]["inputs"]["model"] == [krea._BAKED_TAIL_NODE, 0], model
+        chain_id = next(i for i, n in out.items() if n is chain[0])
+        for s in out.values():
+            if s.get("class_type") == "ClownsharKSampler_Beta":
+                assert s["inputs"]["model"] == [chain_id, 0], model
+
+
+def test_prebaked_substitution_end_to_end():
+    for model in BOTH_PREBAKED:
+        out = krea.maybe_rewrite_to_krea(_catpony_like(model))
+        assert out is not None, model
+        unet = next(n for n in out.values() if n.get("class_type") == "UNETLoader")
+        assert unet["inputs"]["unet_name"] == model
+        assert all(n.get("class_type") in OBJECT_INFO_CLASSES for n in out.values())
+
+
+# --- _bypass_model_node guards ---------------------------------------------
+#
+# Every guard must leave the graph untouched — a hand-edited template that
+# trips one keeps the turbo lora (today's behaviour) rather than losing a link.
+
+def test_bypass_guards_leave_the_graph_untouched():
+    cases = {
+        "node missing": {"3": {"inputs": {"model": ["2", 0]}}},
+        "node not a dict": {"2": "nope", "3": {"inputs": {"model": ["2", 0]}}},
+        "no model input": {"2": {"inputs": {}}, "3": {"inputs": {"model": ["2", 0]}}},
+        "model is a literal": {"2": {"inputs": {"model": "x"}}, "3": {"inputs": {"model": ["2", 0]}}},
+        "upstream not in graph": {"2": {"inputs": {"model": ["99", 0]}},
+                                  "3": {"inputs": {"model": ["2", 0]}}},
+    }
+    for label, wf in cases.items():
+        before = copy.deepcopy(wf)
+        krea._bypass_model_node(wf, "2")
+        assert wf == before, f"{label}: graph must be unchanged"
+
+
+def test_bypass_only_rewires_model_inputs():
+    """A same-id link on another socket is not part of the MODEL chain and must
+    survive untouched — only ``model`` inputs are repointed."""
+    wf = {
+        "1": {"inputs": {}},
+        "2": {"inputs": {"model": ["1", 0]}},
+        "3": {"inputs": {"model": ["2", 0], "latent_image": ["2", 0]}},
+    }
+    krea._bypass_model_node(wf, "2")
+    assert wf["3"]["inputs"]["model"] == ["1", 0]
+    assert wf["3"]["inputs"]["latent_image"] == ["2", 0]
+
+
+# --- per-model sampler overrides -------------------------------------------
+
+def test_redmix_gets_its_published_step_floor_on_the_base_pass():
+    out = krea.build_krea_workflow(REDMIX, "p", "n")
+    base = out[krea._BASE_SAMPLER_NODE]["inputs"]
+    assert base["steps"] == 8
+    # tuned template values are NOT overridden by the model card's defaults
+    assert base["cfg"] == 1.4
+    assert base["sampler_name"] == "exponential/res_2s"
+    assert base["denoise"] == 1.0
+    # refiner pass is never per-model
+    refiner = next(
+        n for i, n in out.items()
+        if n.get("class_type") == "ClownsharKSampler_Beta" and i != krea._BASE_SAMPLER_NODE
+    )["inputs"]
+    assert refiner["steps"] == 2 and refiner["denoise"] == 0.2
+
+
+def test_unlisted_models_keep_the_template_sampler_settings():
+    for model in ("krea2_raw_fp8_scaled.safetensors", PREBAKED):
+        base = krea.build_krea_workflow(model, "p", "n")[krea._BASE_SAMPLER_NODE]["inputs"]
+        assert base["steps"] == 6, model
+        assert base["cfg"] == 1.4, model

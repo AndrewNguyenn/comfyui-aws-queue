@@ -18,7 +18,8 @@ and (b) their positive/negative prompt text.
 We substitute the **Krea2Simple** template (``krea_templates/``): UNETLoader ->
 three BAKED LoraLoaderModelOnly passes (turbo lora @0.6, filter-bypass lora
 @1.0, amateur slider @1.5) -> two ClownsharKSampler_Beta passes (a 6-step base
-pass + a 2-step low-denoise refiner pass) -> VAEDecode -> SaveImage. The turbo
+pass + a 2-step low-denoise refiner pass; the base pass's step/cfg settings are
+overridable per model via ``_KREA_MODEL_SAMPLER``) -> VAEDecode -> SaveImage. The turbo
 + filter-bypass loras are REQUIRED for these fast 6+2-step settings to produce
 good output — that's why they're baked into the template rather than left to
 the caller (a plain UNETLoader without them would need ~20-30 steps). The
@@ -27,6 +28,11 @@ amateur slider (civitai 2773343) counteracts the turbo pipeline's waxy
 igbaddie plays for Z-Image, but baked server-side. cfg is 1.4 (the published
 workflow uses 1.0, where the negative prompt is inert; 1.4 re-enables the
 negative at a modest speed cost — 2026-07-17 anti-plastic pass).
+
+The turbo lora is the one baked node that is NOT universal: a turbo/lightning
+*checkpoint* already has that distillation merged in, so applying it again
+overcooks the image. Those models are listed in ``KREA_PREBAKED_TURBO`` and
+have the turbo node spliced out of the chain at build time.
 
 Detection is an **explicit allowlist** (``KREA_MODELS``) — deliberately NOT a
 name heuristic, same rationale as Anima/Z-Image. DUPLICATED in
@@ -70,6 +76,28 @@ KREA_MODELS: frozenset[str] = frozenset(
     {
         "krea2_raw_fp8_scaled",
         "krea2_raw_bf16",  # not yet cataloged — harmless until then, same convention as zimage's official variants
+        "krea2turbofp8_krea2turbo",       # "Krea 2 TURBO" fp8 (civitai 2723583 v3060999)
+        "redcraftminimaxh3redmix_30krea2",  # RedCraft RedMix 3.0 Lightning8 fp8 (civitai 958009 v3139241)
+    }
+)
+
+# Krea 2 checkpoints that already have the step-distillation MERGED INTO THE
+# WEIGHTS (a "turbo"/"lightning" release, as opposed to the raw base model).
+# For these the template's baked ``krea2_turbo_lora`` is a SECOND helping of the
+# same distillation and visibly overcooks the image (blown contrast, plastic
+# skin, collapsed detail), so we drop that one node from the chain and run the
+# checkpoint on its own acceleration. Everything else about the template —
+# filter-bypass lora, amateur slider, the two sampler passes — is unchanged;
+# per-model step/cfg differences go in ``_KREA_MODEL_SAMPLER`` below, not here.
+#
+# Membership is a property of the WEIGHTS, not of the filename, so this is an
+# explicit allowlist for the same reason KREA_MODELS is. A model listed here
+# must also be in KREA_MODELS; a KREA_MODELS entry absent here keeps the baked
+# turbo lora (correct for the raw base models).
+KREA_PREBAKED_TURBO: frozenset[str] = frozenset(
+    {
+        "krea2turbofp8_krea2turbo",
+        "redcraftminimaxh3redmix_30krea2",
     }
 )
 
@@ -117,6 +145,8 @@ _template_cache: Optional[dict] = None
 # the ids are stable.
 _UNET_CLASS = "UNETLoader"
 _CLIP_CLASS = "CLIPLoader"
+_TURBO_LORA_NODE = "2"      # LoraLoaderModelOnly (Turbo, baked) — dropped for KREA_PREBAKED_TURBO
+_BASE_SAMPLER_NODE = "8"    # ClownsharKSampler_Beta (base pass, denoise 1.0)
 _POSITIVE_NODE = "5"        # CLIPTextEncode (Positive)
 _NEGATIVE_NODE = "6"        # CLIPTextEncode (Negative)
 _BAKED_TAIL_NODE = "13"     # LoraLoaderModelOnly (Amateur Slider) — baked chain tail
@@ -140,6 +170,79 @@ def _inject_seed(workflow: dict, seed: int) -> None:
         for key in ("seed", "noise_seed"):
             if isinstance(inputs.get(key), int):
                 inputs[key] = seed
+
+
+# ---------------------------------------------------------------------------
+# Per-model sampler overrides (extensible; unlisted = template defaults)
+# ---------------------------------------------------------------------------
+#
+# Transplanted from ``zimage.py``'s ``_ZIMAGE_MODEL_SAMPLER``/``_apply_model_sampler``
+# — same shape, same "keyed per-model so one model's recommendation doesn't
+# change every job" rationale. Applies to the BASE pass only (node 8); the
+# refiner is a fixed 2-step denoise-0.2 polish and is not per-model.
+#
+# Only settings we have a published source for go in here. In particular do NOT
+# blanket-apply a model page's "CFG=1" — the template runs cfg 1.4 on purpose
+# (at 1.0 the negative prompt is inert; see the module docstring), and that
+# tuning outranks a generic model-card default.
+#
+# redcraftminimaxh3redmix_30krea2: its Civitai page publishes 8-12 steps. The
+# template's base pass is 6 and the refiner runs at denoise 0.2, so it only
+# touches the tail of a schedule — effective sampling is 6, under that floor.
+# Raise the base pass to the published minimum; sampler/scheduler/cfg stay at
+# the template's tuned values.
+_KREA_MODEL_SAMPLER: dict[str, dict] = {
+    "redcraftminimaxh3redmix_30krea2": {"steps": 8},
+}
+
+
+def _apply_model_sampler(workflow: dict, model: str) -> None:
+    """Apply ``_KREA_MODEL_SAMPLER``'s base-pass overrides for ``model``.
+    No-op for unlisted models or a missing/!dict base sampler node."""
+    over = _KREA_MODEL_SAMPLER.get(_normalize_model(model))
+    if not over:
+        return
+    node = workflow.get(_BASE_SAMPLER_NODE)
+    if not isinstance(node, dict):
+        return
+    inputs = node.setdefault("inputs", {})
+    if "steps" in over:
+        inputs["steps"] = int(over["steps"])
+    for key in ("cfg", "sampler_name", "scheduler"):
+        if key in over:
+            inputs[key] = over[key]
+
+
+def _bypass_model_node(wf: dict, node_id: str) -> None:
+    """Splice a single-input model node OUT of the chain: every consumer of
+    ``[node_id, 0]`` is repointed at whatever fed that node's ``model`` input,
+    then the node is deleted.
+
+    Used to drop the baked turbo lora for checkpoints that already carry the
+    distillation (``KREA_PREBAKED_TURBO``). No-op unless the node exists AND is
+    fed by a ``model`` link to a node that is itself present, so a hand-edited
+    template can never be left with a dangling link — worst case the turbo lora
+    stays, which is today's behaviour. Only ``model`` inputs are rewired: this
+    splices a node out of the MODEL chain and must not touch a same-id link on
+    some other socket."""
+    node = wf.get(node_id)
+    if not isinstance(node, dict):
+        return
+    upstream = (node.get("inputs") or {}).get("model")
+    if not (isinstance(upstream, list) and len(upstream) == 2):
+        return
+    if str(upstream[0]) not in wf:
+        return
+    for nid, other in wf.items():
+        if nid == node_id or not isinstance(other, dict):
+            continue
+        inputs = other.get("inputs") or {}
+        for key, val in list(inputs.items()):
+            if key != "model":
+                continue
+            if isinstance(val, list) and len(val) == 2 and str(val[0]) == str(node_id) and val[1] == 0:
+                inputs[key] = list(upstream)
+    del wf[node_id]
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +324,11 @@ def build_krea_workflow(
     model -> every ``UNETLoader.unet_name``; positive/negative -> the two
     CLIPTextEncode nodes; plus a fresh valid seed on both sampler passes.
 
+    Two per-model adjustments ride along: the baked turbo lora is spliced out
+    for ``KREA_PREBAKED_TURBO`` checkpoints, and ``_KREA_MODEL_SAMPLER`` may
+    override the base pass's sampler settings. Both are no-ops for unlisted
+    models, leaving the output identical to the plain template.
+
     ``options["loras"]`` (see ``_inject_loras``) chains optional core
     LoraLoader nodes onto the baked chain tail / CLIPLoader; absent/empty
     leaves the workflow byte-identical (seed aside) to today's output.
@@ -233,6 +341,16 @@ def build_krea_workflow(
     for node in workflow.values():
         if isinstance(node, dict) and node.get("class_type") == _UNET_CLASS:
             node.setdefault("inputs", {})["unet_name"] = model
+
+    # Turbo/lightning checkpoints already carry the distillation — stacking the
+    # template's turbo lora on top overcooks them. Drop that one node; the rest
+    # of the baked chain (filter bypass, amateur slider) still applies. Runs
+    # BEFORE _inject_loras so user loras still splice onto the same tail.
+    if _normalize_model(model) in KREA_PREBAKED_TURBO:
+        _bypass_model_node(workflow, _TURBO_LORA_NODE)
+
+    # Per-model base-pass sampler settings (steps/cfg/sampler/scheduler).
+    _apply_model_sampler(workflow, model)
 
     pos = workflow.get(_POSITIVE_NODE)
     if isinstance(pos, dict):
