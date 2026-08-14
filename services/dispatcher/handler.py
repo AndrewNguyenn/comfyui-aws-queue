@@ -276,8 +276,10 @@ def _post_prompt(event: dict) -> dict:
     scail_options = body.get("scail_options")
     scail_requested = isinstance(scail_options, dict) and bool(scail_options)
 
-    workflow = body.get("prompt") or body.get("workflow")
-    if not workflow or not isinstance(workflow, dict):
+    # A SCAIL request legitimately carries no graph — the dispatcher builds it
+    # from scail_options — so an empty prompt is valid there and only there.
+    workflow = body.get("prompt") or body.get("workflow") or {}
+    if not isinstance(workflow, dict) or (not workflow and not scail_requested):
         return _resp(400, {"error": "missing or invalid 'prompt' (workflow JSON)"})
 
     # Anima is a Qwen-Image architecture, not SDXL — a normal checkpoint workflow
