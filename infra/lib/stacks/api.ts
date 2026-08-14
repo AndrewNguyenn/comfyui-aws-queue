@@ -185,7 +185,13 @@ export class ApiStack extends Stack {
     // ----- Lambda: Download Worker -----
     // Long-running. 15 min timeout, streams CivitAI/HuggingFace → S3.
     //
-    // Memory is 10 GB not for buffering — the transfer is streamed through a
+    // 3008 MB is this account's ceiling, not a choice: Lambda rejects anything
+    // higher with "'MemorySize' value failed to satisfy constraint: Member must
+    // have value less than or equal to 3008". Accounts provisioned before the
+    // 10 GB limit keep the old cap until a quota increase is requested. If
+    // downloads ever outgrow this again, that request is the lever.
+    //
+    // Memory is not for buffering — the transfer is streamed through a
     // multipart upload and ephemeral storage stays at 512 MB — but because
     // Lambda allocates network bandwidth in proportion to memory. At 1 GB the
     // download worker sustained ~1.2 GiB/min, which is fine for a 200 MB LoRA
@@ -200,8 +206,15 @@ export class ApiStack extends Stack {
       handler: 'worker.lambda_handler',
       description: 'Streams model download from CivitAI to S3 multipart upload',
       timeout: Duration.minutes(15),
-      memorySize: 10240,
+      memorySize: 3008,
       ephemeralStorageSize: require('aws-cdk-lib').Size.mebibytes(512), // No big disk needed; streaming
+      // The kickoff Lambda invokes this asynchronously, so Lambda's default of
+      // 2 automatic retries turns one timed-out multi-GB download into three
+      // concurrent invocations fetching the SAME file. They then starve each
+      // other of the very bandwidth that made the first one time out, and each
+      // restarts from zero — observed as progress percentages going backwards.
+      // A failed download should be re-requested deliberately, not multiplied.
+      retryAttempts: 0,
     });
     storage.modelsBucket.grantWrite(this.downloadWorkerFn);
     storage.modelsTable.grantWriteData(this.downloadWorkerFn);
