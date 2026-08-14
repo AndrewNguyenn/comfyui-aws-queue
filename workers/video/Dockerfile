@@ -73,16 +73,26 @@ RUN git clone --depth 1 --branch ${COMFYUI_TAG} \
 RUN test -f /opt/comfy/comfy_extras/nodes_minimax_h3.py \
     || (echo "ERROR: comfy_extras/nodes_minimax_h3.py missing — COMFYUI_TAG=${COMFYUI_TAG} predates native MiniMax H3 (needs >= v0.30.0)" && exit 1)
 
+# The matching 2.5.1 wheel still cannot import as shipped: its prebuilt
+# libtorchaudio.so is linked against UPSTREAM torch 2.5.1 while NGC ships a
+# custom build, so the extension load dies with an undefined-symbol OSError and
+# takes the whole import with it. patch_torchaudio_ext.py makes that load
+# non-fatal — we only need the pure-python DSP, and the C++ half covers file
+# I/O and sox, which nothing here uses.
 ARG TORCHAUDIO_VERSION=2.5.1
+COPY workers/video/patch_torchaudio_ext.py /tmp/patch_torchaudio_ext.py
 RUN pip install --no-deps --force-reinstall \
         --index-url https://download.pytorch.org/whl/cu124 \
         torchaudio==${TORCHAUDIO_VERSION} \
-    && python -c "import torch, torchaudio; \
+    && python3 /tmp/patch_torchaudio_ext.py \
+    && python -c "import torch, torchaudio, torchaudio.transforms as T; \
 print('torch', torch.__version__, '| torchaudio', torchaudio.__version__); \
 w = torch.zeros(1, 2, 16000); \
 r = torchaudio.functional.resample(w, 16000, 32000); \
 assert r.shape[-1] == 32000, r.shape; \
-print('torchaudio.functional.resample OK ->', tuple(r.shape))"
+m = T.MelSpectrogram(sample_rate=16000, n_mels=64)(torch.rand(1, 16000)); \
+assert m.shape[1] == 64, m.shape; \
+print('torchaudio DSP OK — resample', tuple(r.shape), 'mel', tuple(m.shape))"
 
 # ---------- SageAttention 2.x ----------
 # PyPI only publishes the 1.x series (latest 1.0.6). The 2.x line lives on
@@ -167,11 +177,15 @@ RUN cd /opt/worker && python3 bake_nodes.py /tmp/baked_nodes.txt
 # Belt and braces: COMFY_KEEP_TORCHAUDIO should stop the foundation repair from
 # touching it, but a custom node's requirements could still pull a different
 # wheel. Fail the BUILD here rather than lose every MiniMax node in production.
-RUN python -c "import torch, torchaudio; \
+# Re-apply the patch first: a node pack that reinstalled torchaudio would have
+# restored the unpatched (fatal) extension load.
+RUN python3 /tmp/patch_torchaudio_ext.py \
+    && python -c "import torch, torchaudio, torchaudio.transforms as T; \
 print('post-bake torch', torch.__version__, '| torchaudio', torchaudio.__version__); \
 assert torchaudio.__version__.startswith('2.5'), 'torchaudio clobbered: ' + torchaudio.__version__; \
 w = torch.zeros(1, 2, 16000); \
 assert torchaudio.functional.resample(w, 16000, 32000).shape[-1] == 32000; \
+assert T.MelSpectrogram(sample_rate=16000, n_mels=64)(torch.rand(1, 16000)).shape[1] == 64; \
 print('torchaudio OK after bake')"
 
 RUN mkdir -p /opt/comfy/output
