@@ -126,13 +126,25 @@ RUN chmod +x /entrypoint.sh
 COPY workers/video/baked_nodes.txt /tmp/baked_nodes.txt
 RUN cd /opt/worker && python3 bake_nodes.py /tmp/baked_nodes.txt
 
-RUN mkdir -p /opt/comfy/output
+# ---------- Re-assert the torchaudio stub ----------
+# ComfyUI v0.27.0 lists torchaudio in its own requirements.txt, so the core
+# install pulls a REAL torchaudio 2.11.0 — built against torch 2.11/CUDA 13,
+# while this NGC base is torch 2.5/CUDA 12.6. That mismatched pairing needs
+# libcudart.so.13 and crash-loops ComfyUI on every boot. bake_nodes.py already
+# re-stubs as its last step; assert it here too (hardcoded site-packages path)
+# and verify the import, so a broken stub fails the BUILD instead of the fleet.
+# Same treatment as the image worker — see workers/image/Dockerfile.
+RUN pip uninstall -y torchaudio 2>/dev/null || true \
+    && rm -rf /usr/local/lib/python3.10/dist-packages/torchaudio \
+              /usr/local/lib/python3.10/dist-packages/torchaudio-*.dist-info \
+    && mkdir -p /usr/local/lib/python3.10/dist-packages/torchaudio \
+    && printf '%s\n' \
+         '"""torchaudio stub — a real wheel needs a CUDA this base lacks."""' \
+         '__version__ = "0.0.0-stub"' \
+         > /usr/local/lib/python3.10/dist-packages/torchaudio/__init__.py \
+    && python -c "import torchaudio; print('torchaudio OK:', torchaudio.__version__)"
 
-# Keep the NGC torchaudio: this base ships a working one and no video pack
-# pulls a real wheel over it, so the image fleet's re-stub would only destroy
-# what Wan's audio-conditioned families (s2v, multitalk, HuMo) import for real.
-# Read by manifest_installer at both bake time and every worker boot.
-ENV COMFY_KEEP_TORCHAUDIO=1
+RUN mkdir -p /opt/comfy/output
 
 # ---------- Smoke test ----------
 RUN cd /opt/comfy && python -c "import sys; sys.path.insert(0, '.'); import comfy" || \

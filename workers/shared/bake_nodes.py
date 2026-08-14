@@ -53,9 +53,8 @@ def main(list_path: str) -> int:
     # node). See manifest_installer for the details.
     mi._force_clean_opencv()
     mi._force_transformers()
-    # torchaudio re-stub is image-fleet-only — skipped on the metadata and
-    # video images, which ship a real torchaudio worth keeping.
-    if not mi.KEEP_TORCHAUDIO:
+    # torchaudio re-stub is GPU-image-only — skipped on the metadata image.
+    if not mi.IS_METADATA:
         mi._restore_torchaudio_stub()
     mi._patch_image_metadata_extension()
 
