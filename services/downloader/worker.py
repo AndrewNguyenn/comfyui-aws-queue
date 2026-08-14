@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 import urllib.parse
 from datetime import datetime, timezone
@@ -75,7 +76,10 @@ def lambda_handler(event: dict, _context: Any) -> dict:
 
         s3_key = f"{model_type}/{file_meta['name']}"
         _set_status(download_id, "downloading")
-        bytes_done = _stream_to_s3(
+        # HuggingFace honours Range, so fetch it in parallel — a single stream
+        # cannot move a 19.5 GiB model inside Lambda's 15-minute ceiling.
+        transfer = _stream_to_s3_ranged if source == "huggingface" else _stream_to_s3
+        bytes_done = transfer(
             file_meta["downloadUrl"], token, s3_key, total_bytes, download_id
         )
         _add_to_catalog(file_meta, model_type, s3_key, bytes_done, version_id, meta, source)
@@ -316,6 +320,103 @@ def _pick_primary_file(meta: dict) -> dict:
 
 
 _STREAM_MAX_ATTEMPTS = 6
+
+
+# Parallel-range transfer sizing. 128 MiB parts with 8 workers keeps at most
+# ~1 GiB of part bodies resident, which fits comfortably inside the worker's
+# 3008 MB. 19.5 GiB / 128 MiB = 156 parts, far under S3's 10 000-part ceiling.
+_RANGE_PART_SIZE = 128 * 1024 * 1024
+_RANGE_WORKERS = 8
+
+
+def _stream_to_s3_ranged(
+    url: str, token: str, s3_key: str, total_bytes: int, download_id: str
+) -> int:
+    """Fetch a range-capable source into S3 with parallel ranged GETs.
+
+    The sequential path below is limited by ONE TCP connection, and at
+    video-model scale that is the binding constraint: MiniMax H3's 19.5 GiB
+    transformer sustained ~0.65 GiB/min single-streamed, which does not fit in
+    Lambda's hard 15-minute ceiling. Raising the function's memory did not help
+    — the bottleneck is per-connection throughput, not CPU — so the fix is to
+    open several connections at once.
+
+    Only safe where the origin honours Range with a 206; HuggingFace does.
+    CivitAI keeps the sequential reader, which already handles its CDN's habit
+    of dropping long connections.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    if not total_bytes:
+        raise RuntimeError("ranged transfer needs a known content length")
+
+    base_headers = {"User-Agent": "comfyui-aws-queue/1.0"}
+    if token:
+        base_headers["Authorization"] = f"Bearer {token}"
+
+    ranges = []
+    start = 0
+    while start < total_bytes:
+        end = min(start + _RANGE_PART_SIZE, total_bytes) - 1
+        ranges.append((len(ranges) + 1, start, end))  # PartNumber is 1-based
+        start = end + 1
+
+    mpu = s3.create_multipart_upload(Bucket=MODELS_BUCKET, Key=s3_key)
+    upload_id = mpu["UploadId"]
+
+    done_bytes = 0
+    lock = threading.Lock()
+    last_reported = 0
+
+    def _one(part_number: int, first: int, last: int) -> dict:
+        nonlocal done_bytes, last_reported
+        headers = dict(base_headers)
+        headers["Range"] = f"bytes={first}-{last}"
+        want = last - first + 1
+        for attempt in range(_STREAM_MAX_ATTEMPTS):
+            try:
+                r = http.request("GET", url, headers=headers, redirect=True)
+                if r.status != 206:
+                    # A 200 means the origin ignored Range and is sending the
+                    # whole file for every part — writing that would corrupt the
+                    # object, so refuse rather than assemble garbage.
+                    raise RuntimeError(f"expected 206 for {headers['Range']}, got {r.status}")
+                body = r.data
+                if len(body) != want:
+                    raise RuntimeError(f"short part {part_number}: {len(body)}/{want}")
+                resp = s3.upload_part(
+                    Bucket=MODELS_BUCKET, Key=s3_key, PartNumber=part_number,
+                    UploadId=upload_id, Body=body,
+                )
+                with lock:
+                    done_bytes += len(body)
+                    if done_bytes - last_reported >= PROGRESS_UPDATE_BYTES:
+                        _set_bytes_done(download_id, done_bytes)
+                        last_reported = done_bytes
+                return {"PartNumber": part_number, "ETag": resp["ETag"]}
+            except Exception as e:  # noqa: BLE001
+                if attempt == _STREAM_MAX_ATTEMPTS - 1:
+                    raise
+                print(f"part {part_number} attempt {attempt + 1} failed ({e!r}); retrying")
+                time.sleep(min(2 ** attempt, 30))
+        raise RuntimeError("unreachable")
+
+    try:
+        with ThreadPoolExecutor(max_workers=_RANGE_WORKERS) as pool:
+            parts = list(pool.map(lambda a: _one(*a), ranges))
+        parts.sort(key=lambda p: p["PartNumber"])
+        s3.complete_multipart_upload(
+            Bucket=MODELS_BUCKET, Key=s3_key, UploadId=upload_id,
+            MultipartUpload={"Parts": parts},
+        )
+        _set_bytes_done(download_id, done_bytes)
+        return done_bytes
+    except Exception:
+        try:
+            s3.abort_multipart_upload(Bucket=MODELS_BUCKET, Key=s3_key, UploadId=upload_id)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
 
 
 def _stream_to_s3(

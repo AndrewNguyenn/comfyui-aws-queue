@@ -145,3 +145,97 @@ def test_a_302_is_not_treated_as_an_error(monkeypatch):
     _patch_head(monkeypatch, _HEADERS, status=302)
     m = worker._hf_file_meta("https://huggingface.co/o/r/resolve/main/x.safetensors", "")
     assert int(m["sizeKB"] * 1024) == 16400000000
+
+
+# --- parallel ranged transfer ---------------------------------------------
+
+class _S3Rec:
+    def __init__(self):
+        self.parts = {}
+        self.completed = None
+        self.aborted = False
+
+    def create_multipart_upload(self, **kw):
+        return {"UploadId": "u1"}
+
+    def upload_part(self, **kw):
+        self.parts[kw["PartNumber"]] = kw["Body"]
+        return {"ETag": f'"etag{kw["PartNumber"]}"'}
+
+    def complete_multipart_upload(self, **kw):
+        self.completed = kw["MultipartUpload"]["Parts"]
+
+    def abort_multipart_upload(self, **kw):
+        self.aborted = True
+
+
+def _setup_ranged(monkeypatch, total, status=206, short=False):
+    rec = _S3Rec()
+    monkeypatch.setattr(worker, "s3", rec)
+    monkeypatch.setattr(worker, "_set_bytes_done", lambda *a, **k: None)
+
+    def fake_request(method, url, headers=None, **kw):
+        rng = headers["Range"].split("=")[1]
+        first, last = (int(x) for x in rng.split("-"))
+        n = last - first + 1
+        if short:
+            n -= 1
+        return _Resp({}, status)._with(b"\0" * n)
+
+    def _with(self, data):
+        self.data = data
+        return self
+
+    _Resp._with = _with
+    monkeypatch.setattr(worker.http, "request", fake_request)
+    return rec
+
+
+def test_ranged_transfer_covers_every_byte_exactly_once(monkeypatch):
+    total = worker._RANGE_PART_SIZE * 3 + 12345
+    rec = _setup_ranged(monkeypatch, total)
+    got = worker._stream_to_s3_ranged("https://hf/x", "", "k", total, "d")
+    assert got == total
+    assert sum(len(b) for b in rec.parts.values()) == total
+    # part numbers are 1-based and contiguous
+    assert sorted(rec.parts) == list(range(1, len(rec.parts) + 1))
+    assert [p["PartNumber"] for p in rec.completed] == sorted(rec.parts)
+
+
+def test_a_200_response_aborts_instead_of_corrupting(monkeypatch):
+    # A 200 means the origin ignored Range and is sending the WHOLE file for
+    # every part; assembling those would produce a corrupt object.
+    total = worker._RANGE_PART_SIZE * 2
+    rec = _setup_ranged(monkeypatch, total, status=200)
+    monkeypatch.setattr(worker.time, "sleep", lambda *_: None)
+    try:
+        worker._stream_to_s3_ranged("https://hf/x", "", "k", total, "d")
+    except Exception:
+        pass
+    else:
+        raise AssertionError("expected failure on a non-206 response")
+    assert rec.completed is None
+    assert rec.aborted
+
+
+def test_a_short_part_aborts_instead_of_completing(monkeypatch):
+    total = worker._RANGE_PART_SIZE * 2
+    rec = _setup_ranged(monkeypatch, total, short=True)
+    monkeypatch.setattr(worker.time, "sleep", lambda *_: None)
+    try:
+        worker._stream_to_s3_ranged("https://hf/x", "", "k", total, "d")
+    except Exception:
+        pass
+    else:
+        raise AssertionError("expected failure on a short part")
+    assert rec.completed is None and rec.aborted
+
+
+def test_unknown_length_is_refused(monkeypatch):
+    _setup_ranged(monkeypatch, 0)
+    try:
+        worker._stream_to_s3_ranged("https://hf/x", "", "k", 0, "d")
+    except RuntimeError as e:
+        assert "content length" in str(e)
+    else:
+        raise AssertionError("expected RuntimeError")
