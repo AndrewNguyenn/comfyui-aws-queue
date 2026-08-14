@@ -176,11 +176,14 @@ def _hf_file_meta(url: str, token: str) -> dict:
     metadata seed) consumes {name, downloadUrl, sizeKB, hashes.SHA256}, so
     matching that shape keeps the two sources on one code path.
 
-    A HEAD on the resolve URL gives us both values without downloading: HF sets
-    x-linked-size to the true LFS size (content-length is the pointer's, not the
-    file's — using it would report a multi-GB model as ~1 KB and break the
-    progress bar), and x-linked-etag to the LFS sha256, which is exactly the
-    hash lora-manager wants so the fleet never re-hashes the file on boot.
+    A HEAD on the resolve URL gives us both values without downloading, but it
+    must NOT follow redirects. huggingface.co answers with a 302 to its CDN and
+    puts x-linked-size (the true LFS size) and x-linked-etag (the LFS sha256) on
+    THAT hop; the CDN's final 200 carries only content-length and drops both.
+    Following the redirect therefore loses the sha256 silently — the size still
+    looks right, because the CDN's content-length happens to be correct, so the
+    only visible symptom is a missing .metadata.json and a fleet that re-hashes
+    a multi-GB model on every boot.
     """
     m = _HF_BLOB_RE.match(url)
     if m:  # web-UI URL — /blob/ serves HTML, /resolve/ serves the bytes
@@ -189,7 +192,7 @@ def _hf_file_meta(url: str, token: str) -> dict:
     headers = {"User-Agent": "comfyui-aws-queue/1.0"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    r = http.request("HEAD", url, headers=headers, redirect=True)
+    r = http.request("HEAD", url, headers=headers, redirect=False)
     if r.status >= 400:
         raise RuntimeError(
             f"huggingface HEAD failed: HTTP {r.status} "

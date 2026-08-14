@@ -56,6 +56,7 @@ def _patch_head(monkeypatch, headers, status=200):
 
     def fake_request(method, url, **kw):
         seen["method"], seen["url"] = method, url
+        seen["redirect"] = kw.get("redirect")
         return _Resp(headers, status)
 
     monkeypatch.setattr(worker.http, "request", fake_request)
@@ -127,3 +128,20 @@ def test_missing_sha_yields_no_hashes_entry(monkeypatch):
     _patch_head(monkeypatch, {"x-linked-size": "100"})
     m = worker._hf_file_meta("https://huggingface.co/o/r/resolve/main/x.safetensors", "")
     assert m["hashes"] == {}
+
+
+def test_head_does_not_follow_redirects(monkeypatch):
+    # huggingface.co puts x-linked-etag (the LFS sha256) on the 302 hop; its CDN's
+    # final 200 drops it and keeps only content-length. Following the redirect
+    # loses the hash silently — size still looks right — and the fleet then
+    # re-hashes multi-GB models on every boot.
+    seen = _patch_head(monkeypatch, _HEADERS, status=302)
+    m = worker._hf_file_meta("https://huggingface.co/o/r/resolve/main/x.safetensors", "")
+    assert seen["redirect"] is False
+    assert m["hashes"]["SHA256"] == "abc123def"
+
+
+def test_a_302_is_not_treated_as_an_error(monkeypatch):
+    _patch_head(monkeypatch, _HEADERS, status=302)
+    m = worker._hf_file_meta("https://huggingface.co/o/r/resolve/main/x.safetensors", "")
+    assert int(m["sizeKB"] * 1024) == 16400000000
