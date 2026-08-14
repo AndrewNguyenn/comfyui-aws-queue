@@ -173,7 +173,7 @@
   "33": {
     "class_type": "NLFModelLoader",
     "inputs": {
-      "nlf_model": "nlf_l_multi_0.3.2.torchscript"
+      "nlf_model": "nlf_l_multi_0.3.2_fp16.safetensors"
     }
   },
   "34": {
