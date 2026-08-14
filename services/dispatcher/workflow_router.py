@@ -25,6 +25,12 @@ VIDEO_NODE_PATTERNS = (
     "StableVideo",
     "Mochi",
     "Pyramid",
+    # MiniMax H3 emits video+audio through ComfyUI's native nodes, none of
+    # which match the patterns above — without these a MiniMax graph sniffs as
+    # "image" and lands on the image queue, where no worker can run it.
+    "MiniMaxH3",
+    "CreateVideo",
+    "SaveVideo",
 )
 
 

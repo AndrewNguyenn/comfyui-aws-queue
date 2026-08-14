@@ -33,6 +33,7 @@ from botocore.exceptions import ClientError
 from anima import maybe_rewrite_to_anima
 from extract import _extract_model, _extract_subject
 from krea import maybe_rewrite_to_krea
+from minimax import maybe_build_minimax
 from scail import maybe_build_scail
 from workflow_router import classify_workflow
 from zimage import maybe_rewrite_to_zimage
@@ -275,11 +276,16 @@ def _post_prompt(event: dict) -> dict:
     # otherwise discard, so decide up front whether this is a SCAIL request.
     scail_options = body.get("scail_options")
     scail_requested = isinstance(scail_options, dict) and bool(scail_options)
+    minimax_options = body.get("minimax_options")
+    minimax_requested = isinstance(minimax_options, dict) and bool(minimax_options)
+    # Both video families build from an uploaded reference image, which the
+    # Z-Image branch would otherwise discard.
+    wants_reference = scail_requested or minimax_requested
 
     # A SCAIL request legitimately carries no graph — the dispatcher builds it
     # from scail_options — so an empty prompt is valid there and only there.
     workflow = body.get("prompt") or body.get("workflow") or {}
-    if not isinstance(workflow, dict) or (not workflow and not scail_requested):
+    if not isinstance(workflow, dict) or (not workflow and not wants_reference):
         return _resp(400, {"error": "missing or invalid 'prompt' (workflow JSON)"})
 
     # Anima is a Qwen-Image architecture, not SDXL — a normal checkpoint workflow
@@ -318,7 +324,7 @@ def _post_prompt(event: dict) -> dict:
         zimage_rewritten = zimage_workflow is not None
         if zimage_rewritten:
             workflow = zimage_workflow
-        elif not scail_requested:
+        elif not wants_reference:
             # Not a Z-Image or SCAIL job — drop any stray input-image refs so we
             # never tag a normal job with one (the worker only fetches for jobs
             # that declare an input).
@@ -368,6 +374,26 @@ def _post_prompt(event: dict) -> dict:
         else:
             input_video_key = input_video_name = ""
 
+    # MiniMax H3: omni-modal video+audio from a reference image plus a prompt.
+    # Its own family — a different architecture from SCAIL/Wan, with a different
+    # frame grid (17k+5 at 24 fps), an area-capped canvas, and native ComfyUI
+    # nodes rather than a wrapper. Mutually exclusive with everything above.
+    minimax_built = False
+    if minimax_requested and not (
+        anima_rewritten or zimage_rewritten or krea_rewritten or scail_built
+    ):
+        minimax_workflow = maybe_build_minimax(
+            minimax_options, ref_image_name=input_image_name or None
+        )
+        minimax_built = minimax_workflow is not None
+        if minimax_built:
+            workflow = minimax_workflow
+
+    if minimax_requested and not minimax_built and not workflow:
+        return _resp(400, {
+            "error": "minimax_options requires an uploaded reference image"
+        })
+
     # A SCAIL request we could not build (missing upload, unreadable template)
     # must fail loudly. Falling through would queue the empty placeholder graph
     # to the IMAGE fleet, where it burns a worker and returns 0 outputs — the
@@ -411,11 +437,13 @@ def _post_prompt(event: dict) -> dict:
         "krea_rewritten": {"BOOL": krea_rewritten},
         # True when the SCAIL-2 pose-control workflow was built from scratch.
         "scail_built": {"BOOL": scail_built},
+        # True when the MiniMax H3 video+audio workflow was built from scratch.
+        "minimax_built": {"BOOL": minimax_built},
     }
     # Z-Image VLM input image: the worker stages this from the uploads bucket into
     # ComfyUI's input/<name> before the run (the template's LoadImage references the
     # name). Stored only for a Z-Image job that carried a valid upload key.
-    if (zimage_rewritten or scail_built) and input_image_key and input_image_name:
+    if (zimage_rewritten or scail_built or minimax_built) and input_image_key and input_image_name:
         item["input_image_key"] = {"S": input_image_key}
         item["input_image_name"] = {"S": input_image_name}
     # SCAIL driving video: staged the same way, for VHS_LoadVideo.

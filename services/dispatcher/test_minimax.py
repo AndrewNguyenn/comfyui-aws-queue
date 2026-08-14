@@ -1,0 +1,209 @@
+"""Tests for MiniMax H3 build + its three architecture-specific invariants."""
+import json
+import os
+
+import minimax
+from workflow_router import classify_workflow
+
+HERE = os.path.dirname(__file__)
+TEMPLATE = os.path.join(HERE, "minimax_templates", "MiniMaxH3Ref2VA.api.json")
+REF = "ref.png"
+
+
+def _build(**opts):
+    return minimax.maybe_build_minimax({"prompt": "a woman dancing", **opts}, REF)
+
+
+# --- detection -------------------------------------------------------------
+
+def test_no_options_is_not_a_minimax_job():
+    assert minimax.maybe_build_minimax(None, REF) is None
+    assert minimax.maybe_build_minimax({}, REF) is None
+
+
+def test_reference_image_is_required():
+    assert minimax.maybe_build_minimax({"prompt": "x"}, None) is None
+
+
+def test_builds_and_routes_to_video():
+    wf = _build()
+    assert wf is not None
+    # None of the router's Wan/LTX patterns match a MiniMax graph, so this
+    # asserts the MiniMaxH3/CreateVideo patterns were actually added.
+    assert classify_workflow(wf) == "video"
+
+
+def test_links_resolve_and_nothing_is_orphaned():
+    wf = _build()
+    for nid, node in wf.items():
+        for k, v in node["inputs"].items():
+            if isinstance(v, list) and len(v) == 2 and isinstance(v[0], str):
+                assert v[0] in wf, f"{nid}.{k} -> {v[0]}"
+    out = [i for i, x in wf.items() if x["class_type"] == "SaveVideo"]
+    assert len(out) == 1
+    seen = set()
+
+    def walk(i):
+        if i in seen:
+            return
+        seen.add(i)
+        for v in wf[i]["inputs"].values():
+            if isinstance(v, list) and len(v) == 2 and v[0] in wf:
+                walk(v[0])
+
+    walk(out[0])
+    assert seen == set(wf), f"unreachable: {sorted(set(wf) - seen)}"
+
+
+# --- invariant 1: 17k+5 frame grid at 24 fps -------------------------------
+
+def test_snap_frames_matches_the_models_grid():
+    # every snapped value must satisfy n % 17 == 5
+    for s in (1, 2, 5, 5.2, 7, 10, 12.5, 15):
+        n = minimax.snap_frames(s)
+        assert n % 17 == 5, (s, n)
+
+
+def test_five_seconds_is_the_documented_124_frames():
+    assert minimax.snap_frames(5) == 124
+
+
+def test_built_length_is_always_on_the_grid():
+    for s in (1, 5, 8, 12, 20, 60):
+        wf = _build(seconds=s)
+        assert wf[minimax._N_REF2V]["inputs"]["length"] % 17 == 5
+
+
+def test_frames_are_clamped_to_the_trained_band():
+    assert _build(seconds=0.1)[minimax._N_REF2V]["inputs"]["length"] == minimax._MIN_FRAMES
+    hi = _build(seconds=600)[minimax._N_REF2V]["inputs"]["length"]
+    assert hi <= minimax._MAX_FRAMES and hi % 17 == 5
+
+
+def test_clamp_does_not_overshoot_the_ceiling_when_walking_up():
+    # walking up to the next 17k+5 must not push past _MAX_FRAMES
+    for n in range(minimax._MAX_FRAMES - 20, minimax._MAX_FRAMES + 20):
+        c = minimax.clamp_frames(n)
+        assert c % 17 == 5 and c <= minimax._MAX_FRAMES, (n, c)
+
+
+# --- invariant 2: area-capped canvas ---------------------------------------
+
+def test_canvas_axes_are_multiples_of_32():
+    for w, h in ((1344, 768), (1000, 700), (833, 481), (37, 37)):
+        rw, rh = minimax.snap_canvas(w, h)
+        assert rw % 32 == 0 and rh % 32 == 0, (w, h, rw, rh)
+
+
+def test_canvas_respects_the_pixel_cap_not_just_rounding():
+    # 1920x1080 is legal per-axis but far over the area cap — must be scaled.
+    rw, rh = minimax.snap_canvas(1920, 1080)
+    assert rw * rh <= minimax._MAX_PIXELS, (rw, rh)
+    assert rw % 32 == 0 and rh % 32 == 0
+
+
+def test_canvas_cap_holds_for_a_range_of_requests():
+    for w, h in ((4000, 4000), (3000, 800), (800, 3000), (1344, 768), (1345, 769)):
+        rw, rh = minimax.snap_canvas(w, h)
+        assert rw * rh <= minimax._MAX_PIXELS, (w, h, rw, rh)
+
+
+def test_default_canvas_survives_unchanged():
+    # the node's own default is exactly at the cap and must not be shrunk
+    assert minimax.snap_canvas(1344, 768) == (1344, 768)
+
+
+# --- invariant 3: reference slot indexing ----------------------------------
+
+def test_picture_1_is_reference_slot_zero():
+    # ref_image_0 is what the prompt calls <Picture 1>; inverting this
+    # misattributes every reference in a multi-shot script.
+    wf = _build()
+    ins = wf[minimax._N_REF2V]["inputs"]
+    # Autogrow serialises FLAT ("ref_image_0"), not nested under "ref_images" —
+    # nesting looks correct in the editor and silently drops every reference.
+    assert "ref_images" not in ins
+    assert ins[minimax._REF_SLOT_PREFIX + "0"] == [minimax._N_REF_LOAD, 0]
+    assert wf[minimax._N_REF_LOAD]["inputs"]["image"] == REF
+
+
+# --- parameters ------------------------------------------------------------
+
+def test_prompt_carries_the_whole_multishot_document():
+    doc = ("For the target video, at 0.00 seconds, <Picture 1> (from [Shot 1]) "
+           "is fully referenced.\n\nintegrated_multimodal_description: [Shot 1] ...")
+    assert _build(prompt=doc)[minimax._N_REF2V]["inputs"]["prompt"] == doc
+
+
+def test_seed_and_steps_overrides():
+    wf = _build(seed=7, steps=12)
+    assert wf[minimax._N_NOISE]["inputs"]["noise_seed"] == 7
+    assert wf[minimax._N_SCHED]["inputs"]["steps"] == 12
+
+
+def test_container_fps_is_pinned_to_24():
+    # muxing at any other rate changes playback speed, not frame count
+    assert _build()[minimax._N_VIDEO]["inputs"]["fps"] == 24.0
+
+
+def test_uses_ada_compatible_weights_not_nvfp4():
+    wf = _build()
+    assert "nvfp4" not in wf[minimax._N_CLIP]["inputs"]["clip_name"]
+    assert wf[minimax._N_CLIP]["inputs"]["type"] == "minimax"
+
+
+def test_build_never_raises_on_bad_input():
+    assert minimax.maybe_build_minimax({"width": "wide"}, REF) is None
+
+
+def test_template_is_not_mutated():
+    original = json.load(open(TEMPLATE))
+    _build(seconds=12, width=900, seed=3)
+    assert json.load(open(TEMPLATE)) == original
+
+
+# --- handler routing -------------------------------------------------------
+
+def _handler():
+    import importlib.util
+    import sys
+    import types
+
+    class _Inert:
+        def __getattr__(self, _):
+            return lambda **kw: None
+
+    sys.modules.setdefault("boto3", types.SimpleNamespace(client=lambda *a, **k: _Inert()))
+    _bc = types.ModuleType("botocore")
+    _exc = types.ModuleType("botocore.exceptions")
+    _exc.ClientError = type("ClientError", (Exception,), {})
+    _bc.exceptions = _exc
+    sys.modules.setdefault("botocore", _bc)
+    sys.modules.setdefault("botocore.exceptions", _exc)
+    for k in ("JOBS_TABLE", "MODELS_TABLE", "OBJECT_INFO_TABLE",
+              "IMAGE_QUEUE_URL", "VIDEO_QUEUE_URL"):
+        os.environ.setdefault(k, "x")
+    sys.path.insert(0, HERE)
+    spec = importlib.util.spec_from_file_location(
+        "dispatcher_handler_minimax", os.path.join(HERE, "handler.py")
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_minimax_without_a_reference_is_rejected_not_queued():
+    h = _handler()
+    resp = h._post_prompt({"body": json.dumps({
+        "prompt": {},
+        "minimax_options": {"prompt": "a woman dancing"},
+    })})
+    assert resp["statusCode"] == 400
+    assert "reference image" in json.loads(resp["body"])["error"]
+
+
+def test_empty_prompt_is_still_rejected_without_either_video_family():
+    h = _handler()
+    resp = h._post_prompt({"body": json.dumps({"prompt": {}})})
+    assert resp["statusCode"] == 400
+    assert "workflow JSON" in json.loads(resp["body"])["error"]
