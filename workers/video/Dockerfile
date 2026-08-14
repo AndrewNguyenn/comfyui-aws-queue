@@ -48,10 +48,41 @@ RUN curl -fsSL -o /tmp/mount-s3.deb \
 
 # ---------- ComfyUI ----------
 WORKDIR /opt/comfy
-ARG COMFYUI_TAG=v0.27.0
+ARG COMFYUI_TAG=v0.33.0
 RUN git clone --depth 1 --branch ${COMFYUI_TAG} \
         https://github.com/comfyanonymous/ComfyUI.git . \
     && pip install -r requirements.txt
+
+# ---------- Pin torchaudio to the NGC torch ----------
+# MiniMax H3 is native from ComfyUI v0.30.0 and comfy_extras/nodes_minimax_h3.py
+# does `import torchaudio` at module load — with a stub the import fails and
+# EVERY MiniMax node silently disappears from the graph.
+#
+# We cannot just take what ComfyUI's requirements.txt resolves to: that is
+# torchaudio 2.11, built for torch 2.11 / CUDA 13, while this NGC base is
+# 2.5.0a0+...nv24.10 on CUDA 12.6 — the libcudart.so.13 mismatch that
+# crash-loops ComfyUI (the reason the image fleet stubs it at all).
+#
+# Install the matching 2.5.x instead, --no-deps so it cannot drag its own torch
+# over NGC's custom build. Only torchaudio.functional.resample is actually used
+# (in _encode_ref_audio) and that is pure PyTorch — a sinc kernel plus conv1d —
+# so it works even if the compiled extension declines to load.
+# Guard the version bump's whole purpose: if COMFYUI_TAG is ever moved back
+# below v0.30.0 this file disappears and every MiniMax node goes with it, which
+# would otherwise only surface as "the nodes aren't in the editor".
+RUN test -f /opt/comfy/comfy_extras/nodes_minimax_h3.py \
+    || (echo "ERROR: comfy_extras/nodes_minimax_h3.py missing — COMFYUI_TAG=${COMFYUI_TAG} predates native MiniMax H3 (needs >= v0.30.0)" && exit 1)
+
+ARG TORCHAUDIO_VERSION=2.5.1
+RUN pip install --no-deps --force-reinstall \
+        --index-url https://download.pytorch.org/whl/cu124 \
+        torchaudio==${TORCHAUDIO_VERSION} \
+    && python -c "import torch, torchaudio; \
+print('torch', torch.__version__, '| torchaudio', torchaudio.__version__); \
+w = torch.zeros(1, 2, 16000); \
+r = torchaudio.functional.resample(w, 16000, 32000); \
+assert r.shape[-1] == 32000, r.shape; \
+print('torchaudio.functional.resample OK ->', tuple(r.shape))"
 
 # ---------- SageAttention 2.x ----------
 # PyPI only publishes the 1.x series (latest 1.0.6). The 2.x line lives on
@@ -123,26 +154,25 @@ RUN chmod +x /entrypoint.sh
 # pose packs each pull an opencv variant, and mixed variants clobber one cv2/
 # dir and crash ComfyUI outright on startup. _force_clean_opencv() runs last
 # and collapses them to a single pinned headless build.
+# Read by manifest_installer at bake time AND on every worker boot. Without it
+# the foundation repair re-stubs the torchaudio we just pinned — which is
+# exactly what happened on the first build of this image, because the ENV was
+# declared after the bake step instead of before it.
+ENV COMFY_KEEP_TORCHAUDIO=1
+
 COPY workers/video/baked_nodes.txt /tmp/baked_nodes.txt
 RUN cd /opt/worker && python3 bake_nodes.py /tmp/baked_nodes.txt
 
-# ---------- Re-assert the torchaudio stub ----------
-# ComfyUI v0.27.0 lists torchaudio in its own requirements.txt, so the core
-# install pulls a REAL torchaudio 2.11.0 — built against torch 2.11/CUDA 13,
-# while this NGC base is torch 2.5/CUDA 12.6. That mismatched pairing needs
-# libcudart.so.13 and crash-loops ComfyUI on every boot. bake_nodes.py already
-# re-stubs as its last step; assert it here too (hardcoded site-packages path)
-# and verify the import, so a broken stub fails the BUILD instead of the fleet.
-# Same treatment as the image worker — see workers/image/Dockerfile.
-RUN pip uninstall -y torchaudio 2>/dev/null || true \
-    && rm -rf /usr/local/lib/python3.10/dist-packages/torchaudio \
-              /usr/local/lib/python3.10/dist-packages/torchaudio-*.dist-info \
-    && mkdir -p /usr/local/lib/python3.10/dist-packages/torchaudio \
-    && printf '%s\n' \
-         '"""torchaudio stub — a real wheel needs a CUDA this base lacks."""' \
-         '__version__ = "0.0.0-stub"' \
-         > /usr/local/lib/python3.10/dist-packages/torchaudio/__init__.py \
-    && python -c "import torchaudio; print('torchaudio OK:', torchaudio.__version__)"
+# ---------- Verify torchaudio survived the bake ----------
+# Belt and braces: COMFY_KEEP_TORCHAUDIO should stop the foundation repair from
+# touching it, but a custom node's requirements could still pull a different
+# wheel. Fail the BUILD here rather than lose every MiniMax node in production.
+RUN python -c "import torch, torchaudio; \
+print('post-bake torch', torch.__version__, '| torchaudio', torchaudio.__version__); \
+assert torchaudio.__version__.startswith('2.5'), 'torchaudio clobbered: ' + torchaudio.__version__; \
+w = torch.zeros(1, 2, 16000); \
+assert torchaudio.functional.resample(w, 16000, 32000).shape[-1] == 32000; \
+print('torchaudio OK after bake')"
 
 RUN mkdir -p /opt/comfy/output
 

@@ -87,6 +87,19 @@ def load_manifest() -> dict:
 # sync() below and the build-time bake_nodes.py gate the re-stub on this.
 IS_METADATA = os.environ.get("COMFY_METADATA") == "1"
 
+# The video container (workers/video/Dockerfile) sets COMFY_KEEP_TORCHAUDIO=1.
+# It deliberately pins a REAL torchaudio 2.5.x matching the NGC torch, because
+# ComfyUI's native MiniMax H3 nodes do `import torchaudio` at module load and a
+# stub makes every one of them vanish. That pin is the correct state for this
+# image, so the repair below must leave it alone.
+#
+# This is NOT the image fleet's situation: there the only torchaudio available
+# is a 2.11 wheel needing a CUDA the base lacks, so stubbing is the fix. The
+# distinction is "is there a compatible real wheel installed", not "is a real
+# wheel present" — an earlier version of this guard assumed the latter and had
+# to be reverted.
+KEEP_TORCHAUDIO = IS_METADATA or os.environ.get("COMFY_KEEP_TORCHAUDIO") == "1"
+
 
 def sync() -> dict[str, str]:
     """Sync /opt/comfy/custom_nodes against the manifest.
@@ -126,10 +139,10 @@ def sync() -> dict[str, str]:
     if installed_any:
         _force_clean_opencv()
         _force_transformers()
-        # GPU-image-only — the metadata image ships real CPU torchaudio and
-        # re-stubbing it here (on every boot a net-new pack is installed)
-        # would destroy it. See IS_METADATA above.
-        if not IS_METADATA:
+        # Image-fleet-only — the metadata and video images both carry a real
+        # torchaudio that re-stubbing here (on every boot a net-new pack is
+        # installed) would destroy. See KEEP_TORCHAUDIO above.
+        if not KEEP_TORCHAUDIO:
             _restore_torchaudio_stub()
         _patch_image_metadata_extension()
     return results
