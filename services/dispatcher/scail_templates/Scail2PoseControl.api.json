@@ -61,8 +61,7 @@
   "10": {
     "class_type": "LoadImage",
     "inputs": {
-      "image": "scail_ref.png",
-      "upload": "image"
+      "image": "scail_ref.png"
     }
   },
   "11": {
