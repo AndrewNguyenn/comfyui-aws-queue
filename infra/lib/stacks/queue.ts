@@ -21,8 +21,10 @@ export interface QueueStackProps extends StackProps {
 export class QueueStack extends Stack {
   public readonly imageJobsQueue: sqs.Queue;
   public readonly videoJobsQueue: sqs.Queue;
+  public readonly minimaxJobsQueue: sqs.Queue;
   public readonly imageJobsDlq: sqs.Queue;
   public readonly videoJobsDlq: sqs.Queue;
+  public readonly minimaxJobsDlq: sqs.Queue;
   // Self-ticking wake queue for the reaper Lambda. Not on a fixed cron — the
   // dispatcher seeds a tick when a job is submitted, and each reaper run
   // re-arms a delayed tick only while jobs are queued/running; at idle the
@@ -66,6 +68,29 @@ export class QueueStack extends Stack {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       deadLetterQueue: {
         queue: this.videoJobsDlq,
+        maxReceiveCount: config.queues.maxReceiveCount,
+      },
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
+    this.minimaxJobsDlq = new sqs.Queue(this, 'MinimaxJobsDlq', {
+      queueName: 'comfy-minimax-jobs-dlq',
+      retentionPeriod: config.queues.messageRetention,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
+    // MiniMax H3 runs on its own fleet (g6e/L40S), so it needs its own queue —
+    // the scaler sizes each fleet from its own queue depth, and a shared queue
+    // would let a MiniMax job be picked up by a video worker that cannot hold
+    // its 45 GiB of weights.
+    this.minimaxJobsQueue = new sqs.Queue(this, 'MinimaxJobsQueue', {
+      queueName: 'comfy-minimax-jobs',
+      visibilityTimeout: config.queues.minimaxVisibilityTimeout,
+      retentionPeriod: config.queues.messageRetention,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      deadLetterQueue: {
+        queue: this.minimaxJobsDlq,
         maxReceiveCount: config.queues.maxReceiveCount,
       },
       removalPolicy: RemovalPolicy.DESTROY,

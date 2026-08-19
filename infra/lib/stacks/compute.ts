@@ -9,7 +9,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as path from 'path';
-import { AppConfig, FleetConfig, GOLDEN_AMI_PARAM } from '../config';
+import { AppConfig, FleetConfig, GOLDEN_AMI_PARAM, FleetName } from '../config';
 import { NetworkStack } from './network';
 import { StorageStack } from './storage';
 import { QueueStack } from './queue';
@@ -39,6 +39,7 @@ export class ComputeStack extends Stack {
   public readonly cluster: ecs.Cluster;
   public readonly imageAsg: autoscaling.AutoScalingGroup;
   public readonly videoAsg: autoscaling.AutoScalingGroup;
+  public readonly minimaxAsg: autoscaling.AutoScalingGroup;
 
   constructor(scope: Construct, id: string, props: ComputeStackProps) {
     super(scope, id, props);
@@ -136,14 +137,61 @@ export class ComputeStack extends Stack {
       'DesiredCount',
     );
 
-    // ONE Lambda drives both fleets' desired counts — see makeFleetScaler.
+    // ----- MINIMAX fleet -----
+    // Same worker image as video (MiniMax H3 is native to the ComfyUI in it),
+    // but its own ASG so the g6e/L40S premium is confined to jobs that need
+    // it, and its own queue so the scaler sizes it independently.
+    this.minimaxAsg = this.makeFleetAsg('minimax', config.fleets.minimax, {
+      network,
+      config,
+      ecrRepoArn: ci.videoWorkerRepo.repositoryArn,
+    });
+    const minimaxCapacityProvider = this.makeCapacityProvider('minimax', this.minimaxAsg);
+    this.cluster.addAsgCapacityProvider(minimaxCapacityProvider);
+
+    const minimaxTaskDef = this.makeTaskDefinition('minimax', {
+      ecrRepository: ci.videoWorkerRepo,
+      queueUrl: queue.minimaxJobsQueue.queueUrl,
+      storage,
+      config,
+    });
+    this.grantWorkerPermissions(minimaxTaskDef.taskRole, queue.minimaxJobsQueue, storage);
+
+    const minimaxService = new ecs.Ec2Service(this, 'MinimaxService', {
+      serviceName: 'comfy-minimax',
+      cluster: this.cluster,
+      taskDefinition: minimaxTaskDef,
+      desiredCount: 0, // Owned by the comfy-fleet-scaler Lambda (see below)
+      capacityProviderStrategies: [
+        {
+          capacityProvider: minimaxCapacityProvider.capacityProviderName,
+          weight: 1,
+        },
+      ],
+      minHealthyPercent: 0,
+      maxHealthyPercent: 100,
+      placementConstraints: [
+        ecs.PlacementConstraint.memberOf(`attribute:fleet == minimax`),
+      ],
+    });
+    (minimaxService.node.defaultChild as ecs.CfnService).addPropertyDeletionOverride(
+      'DesiredCount',
+    );
+
+    // ONE Lambda drives all fleets' desired counts — see makeFleetScaler.
     // Replaces video's former ECS Application Auto Scaling target-tracking
     // policy (removed 2026-08-10): target-tracking's scale-in alarm needs
     // ~15 consecutive minutes below target to fire, so every video burst
     // paid ~15-30 min of idle GPU at burst end. The graduated/sticky Lambda
     // releases one worker per tick (~1-2 min) once a fleet's queue drains,
     // same as image already did.
-    this.makeFleetScaler(imageService, queue.imageJobsQueue, videoService, queue.videoJobsQueue, config);
+    this.makeFleetScaler(
+      [
+        { name: 'image', service: imageService, queue: queue.imageJobsQueue, max: config.scaling.imageMax },
+        { name: 'video', service: videoService, queue: queue.videoJobsQueue, max: config.scaling.videoMax },
+        { name: 'minimax', service: minimaxService, queue: queue.minimaxJobsQueue, max: config.scaling.minimaxMax },
+      ],
+    );
   }
 
   /**
@@ -158,11 +206,12 @@ export class ComputeStack extends Stack {
    * MaxSize bounds its own fleet.
    */
   private makeFleetScaler(
-    imageService: ecs.Ec2Service,
-    imageQueue: import('aws-cdk-lib/aws-sqs').IQueue,
-    videoService: ecs.Ec2Service,
-    videoQueue: import('aws-cdk-lib/aws-sqs').IQueue,
-    config: AppConfig,
+    fleets: {
+      name: FleetName;
+      service: ecs.Ec2Service;
+      queue: import('aws-cdk-lib/aws-sqs').IQueue;
+      max: number;
+    }[],
   ): void {
     const fn = new lambda.Function(this, 'FleetScalerFn', {
       functionName: 'comfy-fleet-scaler',
@@ -178,20 +227,28 @@ export class ComputeStack extends Stack {
       logRetention: logs.RetentionDays.ONE_WEEK,
       environment: {
         CLUSTER: this.cluster.clusterName,
-        IMAGE_QUEUE_URL: imageQueue.queueUrl,
-        IMAGE_SERVICE: imageService.serviceName,
-        IMAGE_MAX_WORKERS: String(config.scaling.imageMax),
-        VIDEO_QUEUE_URL: videoQueue.queueUrl,
-        VIDEO_SERVICE: videoService.serviceName,
-        VIDEO_MAX_WORKERS: String(config.scaling.videoMax),
+        // <FLEET>_QUEUE_URL / _SERVICE / _MAX_WORKERS per fleet; the handler
+        // discovers fleets from these rather than a hardcoded list, so adding
+        // one here is the only change needed on the Lambda side.
+        ...Object.fromEntries(
+          fleets.flatMap((f) => {
+            const k = f.name.toUpperCase();
+            return [
+              [`${k}_QUEUE_URL`, f.queue.queueUrl],
+              [`${k}_SERVICE`, f.service.serviceName],
+              [`${k}_MAX_WORKERS`, String(f.max)],
+            ];
+          })
+        ),
       },
     });
-    imageQueue.grant(fn, 'sqs:GetQueueAttributes');
-    videoQueue.grant(fn, 'sqs:GetQueueAttributes');
+    for (const f of fleets) {
+      f.queue.grant(fn, 'sqs:GetQueueAttributes');
+    }
     fn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['ecs:DescribeServices', 'ecs:UpdateService'],
-        resources: [imageService.serviceArn, videoService.serviceArn],
+        resources: fleets.map((f) => f.service.serviceArn),
       })
     );
     new events.Rule(this, 'FleetScalerSchedule', {
@@ -206,7 +263,7 @@ export class ComputeStack extends Stack {
    * Uses AL2023 GPU AMI (AL2 EOL is 2026-06-30).
    */
   private makeFleetAsg(
-    fleetName: 'image' | 'video',
+    fleetName: FleetName,
     fleet: FleetConfig,
     deps: { network: NetworkStack; config: AppConfig; ecrRepoArn: string }
   ): autoscaling.AutoScalingGroup {
@@ -387,7 +444,7 @@ export class ComputeStack extends Stack {
    * Capacity provider with managed scaling so ASG follows ECS task count.
    */
   private makeCapacityProvider(
-    fleetName: 'image' | 'video',
+    fleetName: FleetName,
     asg: autoscaling.AutoScalingGroup
   ): ecs.AsgCapacityProvider {
     return new ecs.AsgCapacityProvider(this, `${fleetName}CapacityProvider`, {
@@ -416,7 +473,7 @@ export class ComputeStack extends Stack {
    * time (resolves circular Compute ↔ Api dependency from review C3).
    */
   private makeTaskDefinition(
-    fleetName: 'image' | 'video',
+    fleetName: FleetName,
     deps: { ecrRepository: import('aws-cdk-lib/aws-ecr').IRepository; queueUrl: string; storage: StorageStack; config: AppConfig }
   ): ecs.Ec2TaskDefinition {
     const { ecrRepository, queueUrl, storage, config } = deps;

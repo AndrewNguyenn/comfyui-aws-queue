@@ -32,6 +32,9 @@ s3 = boto3.client("s3")
 JOBS_TABLE = os.environ["JOBS_TABLE"]
 IMAGE_QUEUE_URL = os.environ["IMAGE_QUEUE_URL"]
 VIDEO_QUEUE_URL = os.environ["VIDEO_QUEUE_URL"]
+# Optional so an older stack still reaps image/video jobs rather than failing
+# on import.
+MINIMAX_QUEUE_URL = os.environ.get("MINIMAX_QUEUE_URL", "")
 REAPER_QUEUE_URL = os.environ["REAPER_QUEUE_URL"]
 FAILED_WORKFLOWS_BUCKET = os.environ["FAILED_WORKFLOWS_BUCKET"]
 
@@ -104,6 +107,11 @@ def _requeue(item: dict, attempts: int) -> bool:
     a fresh job message so a live worker picks it up."""
     job_id = item["job_id"]["S"]
     job_type = item.get("type", {}).get("S", "image")
+    # A MiniMax job's type is "video" (that is what classify_workflow returns),
+    # but it must go back to the MiniMax fleet — a video worker cannot hold its
+    # ~45 GiB of weights, so re-queueing by type alone would send a zombie to a
+    # box guaranteed to OOM it.
+    is_minimax = bool(item.get("minimax_built", {}).get("BOOL", False))
     prev_hb = item.get("last_heartbeat", {}).get("S")
 
     names, values, cond = _zombie_condition(prev_hb)
@@ -134,7 +142,11 @@ def _requeue(item: dict, attempts: int) -> bool:
     # conditional claim is the load-bearing guard.) The reaper owns retry
     # counting via attempt_count rather than leaning on SQS redelivery.
     sqs.send_message(
-        QueueUrl=IMAGE_QUEUE_URL if job_type == "image" else VIDEO_QUEUE_URL,
+        QueueUrl=(
+            MINIMAX_QUEUE_URL
+            if is_minimax and MINIMAX_QUEUE_URL
+            else IMAGE_QUEUE_URL if job_type == "image" else VIDEO_QUEUE_URL
+        ),
         MessageBody=json.dumps({"job_id": job_id, "type": job_type}),
         MessageAttributes={
             "job_id": {"DataType": "String", "StringValue": job_id},

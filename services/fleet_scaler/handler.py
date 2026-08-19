@@ -1,4 +1,4 @@
-"""Graduated, sticky autoscaler for BOTH GPU worker fleets (image + video).
+"""Graduated, sticky autoscaler for ALL GPU worker fleets (image, video, minimax).
 
 Runs every minute (EventBridge). For each fleet, sets its ECS service's
 desired count from that fleet's own SQS queue depth.
@@ -58,23 +58,38 @@ CLUSTER = os.environ["CLUSTER"]  # both fleets share one ECS cluster
 # bound, the fleet's max_workers applies. See module docstring for the table.
 IMAGE_BANDS = [(1, 0), (12, 1), (40, 2)]
 VIDEO_BANDS = [(1, 0), (2, 1), (6, 2)]
+# MiniMax H3 is a single-worker fleet by config (minimaxMax=1): g6e spot is
+# ~3.2x g5 and each worker stages ~45 GiB of weights, so the only decision is
+# on/off. One queued job wakes it; anything more waits rather than doubling the
+# burn on a model this slow.
+MINIMAX_BANDS = [(1, 0)]
 
-FLEETS = [
-    {
-        "name": "image",
-        "queue_url": os.environ["IMAGE_QUEUE_URL"],
-        "service": os.environ["IMAGE_SERVICE"],
-        "max_workers": int(os.environ.get("IMAGE_MAX_WORKERS", "3")),
-        "bands": IMAGE_BANDS,
-    },
-    {
-        "name": "video",
-        "queue_url": os.environ["VIDEO_QUEUE_URL"],
-        "service": os.environ["VIDEO_SERVICE"],
-        "max_workers": int(os.environ.get("VIDEO_MAX_WORKERS", "3")),
-        "bands": VIDEO_BANDS,
-    },
-]
+_BANDS = {"image": IMAGE_BANDS, "video": VIDEO_BANDS, "minimax": MINIMAX_BANDS}
+
+# Fleets are discovered from the environment (<NAME>_QUEUE_URL / _SERVICE /
+# _MAX_WORKERS), not hardcoded — compute.ts emits one triple per fleet, so
+# adding a fleet there needs no change here. A fleet whose vars are absent is
+# skipped rather than raising, so a partially-deployed stack still scales the
+# fleets it does have instead of the Lambda failing outright on import.
+def _discover_fleets() -> list:
+    found = []
+    for name, bands in _BANDS.items():
+        key = name.upper()
+        queue_url = os.environ.get(f"{key}_QUEUE_URL")
+        service = os.environ.get(f"{key}_SERVICE")
+        if not queue_url or not service:
+            continue
+        found.append({
+            "name": name,
+            "queue_url": queue_url,
+            "service": service,
+            "max_workers": int(os.environ.get(f"{key}_MAX_WORKERS", "3")),
+            "bands": bands,
+        })
+    return found
+
+
+FLEETS = _discover_fleets()
 
 sqs = boto3.client("sqs")
 ecs = boto3.client("ecs")

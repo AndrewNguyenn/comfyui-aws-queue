@@ -85,6 +85,7 @@ export class ApiStack extends Stack {
         OBJECT_INFO_TABLE: storage.objectInfoTable.tableName,
         IMAGE_QUEUE_URL: queue.imageJobsQueue.queueUrl,
         VIDEO_QUEUE_URL: queue.videoJobsQueue.queueUrl,
+        MINIMAX_QUEUE_URL: queue.minimaxJobsQueue.queueUrl,
       },
     };
 
@@ -98,6 +99,7 @@ export class ApiStack extends Stack {
     });
     queue.imageJobsQueue.grantSendMessages(this.dispatcherFn);
     queue.videoJobsQueue.grantSendMessages(this.dispatcherFn);
+    queue.minimaxJobsQueue.grantSendMessages(this.dispatcherFn);
     storage.jobsTable.grantReadWriteData(this.dispatcherFn);
     storage.modelsTable.grantReadData(this.dispatcherFn);
     storage.objectInfoTable.grantReadWriteData(this.dispatcherFn);
@@ -154,6 +156,7 @@ export class ApiStack extends Stack {
     // (commonLambdaProps); this adds the read permission.
     queue.imageJobsQueue.grant(this.statusFn, 'sqs:GetQueueAttributes');
     queue.videoJobsQueue.grant(this.statusFn, 'sqs:GetQueueAttributes');
+    queue.minimaxJobsQueue.grant(this.statusFn, 'sqs:GetQueueAttributes');
 
     // ----- Lambda: Catalog -----
     this.catalogFn = new lambda.Function(this, 'CatalogFn', {
@@ -260,6 +263,7 @@ export class ApiStack extends Stack {
     storage.jobsTable.grantReadWriteData(this.reaperFn);          // query GSI + flip status
     queue.imageJobsQueue.grantSendMessages(this.reaperFn);        // re-queue image jobs
     queue.videoJobsQueue.grantSendMessages(this.reaperFn);        // re-queue video jobs
+    queue.minimaxJobsQueue.grantSendMessages(this.reaperFn);      // re-queue minimax jobs
     queue.reaperTicksQueue.grantSendMessages(this.reaperFn);      // self-arm next tick
     storage.failedWorkflowsBucket.grantPut(this.reaperFn);        // archive give-ups
     this.reaperFn.addEventSource(

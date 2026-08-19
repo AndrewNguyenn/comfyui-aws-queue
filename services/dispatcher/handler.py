@@ -49,6 +49,10 @@ MODELS_TABLE = os.environ["MODELS_TABLE"]
 OBJECT_INFO_TABLE = os.environ["OBJECT_INFO_TABLE"]
 IMAGE_QUEUE_URL = os.environ["IMAGE_QUEUE_URL"]
 VIDEO_QUEUE_URL = os.environ["VIDEO_QUEUE_URL"]
+# Optional so an older stack (or a partial deploy) still dispatches image and
+# video work instead of failing on import; MiniMax falls back to the video
+# queue in that case, which is wrong-but-visible rather than a hard outage.
+MINIMAX_QUEUE_URL = os.environ.get("MINIMAX_QUEUE_URL", "")
 REAPER_QUEUE_URL = os.environ.get("REAPER_QUEUE_URL", "")  # zombie-sweeper wake queue
 OUTPUTS_BUCKET = os.environ.get("OUTPUTS_BUCKET", "")  # Storage for userdata + settings
 WS_TICKET_SECRET_ARN = os.environ.get("WS_TICKET_SECRET_ARN", "")
@@ -415,7 +419,15 @@ def _post_prompt(event: dict) -> dict:
     now = datetime.now(timezone.utc)
     expire_at = int((now + JOB_TTL).timestamp())
 
-    queue_url = IMAGE_QUEUE_URL if job_type == "image" else VIDEO_QUEUE_URL
+    # MiniMax H3 has its own fleet (g6e/L40S — ~45 GiB of weights that a video
+    # worker cannot hold), so it needs its own queue: a video worker picking up
+    # a MiniMax job would OOM after a long cold start.
+    if minimax_built and MINIMAX_QUEUE_URL:
+        queue_url = MINIMAX_QUEUE_URL
+    elif job_type == "image":
+        queue_url = IMAGE_QUEUE_URL
+    else:
+        queue_url = VIDEO_QUEUE_URL
 
     # Write job record FIRST so even if SQS send fails the job is recoverable.
     item = {

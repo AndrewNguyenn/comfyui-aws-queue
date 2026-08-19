@@ -34,6 +34,7 @@ export interface AppConfig {
   readonly fleets: {
     readonly image: FleetConfig;
     readonly video: FleetConfig;
+    readonly minimax: FleetConfig;
   };
 
   readonly storage: {
@@ -49,6 +50,7 @@ export interface AppConfig {
   readonly queues: {
     readonly imageVisibilityTimeout: Duration;
     readonly videoVisibilityTimeout: Duration;
+    readonly minimaxVisibilityTimeout: Duration;
     readonly messageRetention: Duration;
     readonly maxReceiveCount: number;
   };
@@ -58,6 +60,8 @@ export interface AppConfig {
     readonly imageMax: number;
     readonly videoMin: number;
     readonly videoMax: number;
+    readonly minimaxMin: number;
+    readonly minimaxMax: number;
     readonly targetBacklogPerTask: number;
   };
 
@@ -78,8 +82,10 @@ export interface AppConfig {
   };
 }
 
+export type FleetName = 'image' | 'video' | 'minimax';
+
 export interface FleetConfig {
-  readonly fleetName: 'image' | 'video';
+  readonly fleetName: FleetName;
   readonly primaryInstanceType: string;
   readonly fallbackInstanceTypes: readonly string[];
   readonly rootVolumeGb: number;
@@ -216,12 +222,43 @@ export const APP_CONFIG: AppConfig = {
     },
     video: {
       fleetName: 'video',
-      primaryInstanceType: 'g5.xlarge',
-      fallbackInstanceTypes: ['g5.2xlarge', 'g6e.xlarge'],
+      // 2026-08-19: primary moved g5.xlarge -> g5.2xlarge. Same A10G (22 GB
+      // VRAM, sm_86) but 32 GB system RAM instead of 16 GB, and RAM is what
+      // binds here. SCAIL-2 loads a 15.3 GiB transformer plus a 10.6 GiB umt5
+      // encoder, and WanVideoBlockSwap deliberately parks swapped blocks in
+      // SYSTEM memory — on a 16 GB host that is an OOM waiting to happen, and
+      // the failure lands after a ~10 min cold start. ~1.9x hourly on spot
+      // ($0.93 vs $0.50) buys a fleet that can actually hold its own models.
+      // Every remaining type is >= 32 GB RAM, so no pool can OOM a video job.
+      primaryInstanceType: 'g5.2xlarge',
+      fallbackInstanceTypes: ['g6e.xlarge', 'g6e.2xlarge'],
       rootVolumeGb: 250,
       // Left at the gp3 floor for now (the image-fleet bump above is the
       // measured win; flip these to 6000/250 the same way if video cold-start
       // proves to be a problem).
+      rootVolumeIops: 3000,
+      rootVolumeThroughputMbps: 125,
+    },
+
+    // ----- MINIMAX fleet -----
+    // Its own fleet rather than a mode on video, because its floor is far
+    // higher and video jobs should not pay for it. MiniMax H3 needs ~45 GB
+    // VRAM (19.5 GiB transformer + 4.9 GiB video VAE + activations at
+    // 768x1344x124) and >= 32 GB RAM to stage a 25.3 GiB text encoder that
+    // ComfyUI offloads to CPU (text_encoder_initial_device wants
+    // size * 1.2 < free VRAM, which 27 GB never satisfies). Only g6e (L40S,
+    // 45 GB) clears that, at ~3.2x g5.xlarge on spot — which is exactly why
+    // SCAIL and Wan keep the cheaper A10G pool above.
+    //
+    // Shares the comfy-video-worker image: MiniMax H3 is native to ComfyUI
+    // from v0.30.0, and that image is now v0.33.0.
+    minimax: {
+      fleetName: 'minimax',
+      primaryInstanceType: 'g6e.xlarge',
+      fallbackInstanceTypes: ['g6e.2xlarge'],
+      // 45 GiB of weights land on the NVMe instance store, not this volume,
+      // but the ~26 GB container image is extracted here on every cold boot.
+      rootVolumeGb: 250,
       rootVolumeIops: 3000,
       rootVolumeThroughputMbps: 125,
     },
@@ -240,6 +277,10 @@ export const APP_CONFIG: AppConfig = {
   queues: {
     imageVisibilityTimeout: Duration.minutes(15),
     videoVisibilityTimeout: Duration.minutes(45), // v3: raised from 30 (resolves N9)
+    // MiniMax H3 is slower than Wan per clip AND has a much heavier cold start
+    // (19.5 GiB transformer + 25.3 GiB text encoder to stream from S3), so a
+    // redelivery mid-job would duplicate work that has already cost 10+ min.
+    minimaxVisibilityTimeout: Duration.minutes(60),
     messageRetention: Duration.days(7),
     maxReceiveCount: 3,
   },
@@ -253,6 +294,11 @@ export const APP_CONFIG: AppConfig = {
     imageMax: 3,
     videoMin: 0,
     videoMax: 3, // v3: lowered from 5 (resolves N2)
+    minimaxMin: 0,
+    // Deliberately 1. g6e.xlarge is ~3.2x g5.xlarge on spot and each worker
+    // holds ~45 GiB of weights; a second concurrent worker doubles the burn
+    // for a model this slow. Raise once there is a real queue for it.
+    minimaxMax: 1,
     // NOTE: targetBacklogPerTask is a leftover from a BacklogPerTask design
     // that was never wired up (both fleets used a flat targetValue=1 message
     // instead — see attachSqsTargetTracking's history) and is unread anywhere

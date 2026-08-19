@@ -207,3 +207,47 @@ def test_empty_prompt_is_still_rejected_without_either_video_family():
     resp = h._post_prompt({"body": json.dumps({"prompt": {}})})
     assert resp["statusCode"] == 400
     assert "workflow JSON" in json.loads(resp["body"])["error"]
+
+
+def test_minimax_jobs_go_to_the_minimax_queue():
+    # A MiniMax job's type is "video" (classify_workflow says so), but it must
+    # be queued to the MiniMax fleet — a video worker cannot hold its weights.
+    os.environ["MINIMAX_QUEUE_URL"] = "https://sqs/minimax"
+    os.environ["VIDEO_QUEUE_URL"] = "https://sqs/video"
+    os.environ["IMAGE_QUEUE_URL"] = "https://sqs/image"
+    import importlib.util
+    import sys
+    import types
+
+    sent = {}
+
+    class _Rec:
+        def put_item(self, **kw): pass
+        def update_item(self, **kw): pass
+        def send_message(self, **kw): sent.update(kw)
+        def __getattr__(self, _): return lambda **kw: {}
+
+    rec = _Rec()
+    sys.modules["boto3"] = types.SimpleNamespace(client=lambda *a, **k: rec)
+    _bc = types.ModuleType("botocore")
+    _exc = types.ModuleType("botocore.exceptions")
+    _exc.ClientError = type("ClientError", (Exception,), {})
+    _bc.exceptions = _exc
+    sys.modules["botocore"] = _bc
+    sys.modules["botocore.exceptions"] = _exc
+    for k in ("JOBS_TABLE", "MODELS_TABLE", "OBJECT_INFO_TABLE"):
+        os.environ.setdefault(k, "x")
+    sys.path.insert(0, HERE)
+    spec = importlib.util.spec_from_file_location(
+        "dispatcher_handler_route", os.path.join(HERE, "handler.py")
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    resp = mod._post_prompt({"body": json.dumps({
+        "prompt": {},
+        "minimax_options": {"prompt": "a woman dancing", "seconds": 5},
+        "input_image": {"key": "uploads/2026/01/01/abc", "name": "ref.png"},
+    })})
+    assert resp["statusCode"] == 200, resp
+    assert sent.get("QueueUrl") == "https://sqs/minimax", sent.get("QueueUrl")
