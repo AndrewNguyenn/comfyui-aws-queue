@@ -17,7 +17,8 @@ and (b) their positive/negative prompt text.
 
 We substitute the **Krea2Simple** template (``krea_templates/``): UNETLoader ->
 three BAKED LoraLoaderModelOnly passes (turbo lora @0.6, filter-bypass lora
-@1.0, amateur slider @1.5) -> two ClownsharKSampler_Beta passes (a 6-step base
+@1.0, amateur slider @1.5, re-balanced to 0.6 when the turbo pass is dropped —
+see ``KREA_PREBAKED_TURBO``) -> two ClownsharKSampler_Beta passes (a 6-step base
 pass + a 2-step low-denoise refiner pass; the base pass's step/cfg settings are
 overridable per model via ``_KREA_MODEL_SAMPLER``) -> VAEDecode -> SaveImage. The turbo
 + filter-bypass loras are REQUIRED for these fast 6+2-step settings to produce
@@ -32,7 +33,9 @@ negative at a modest speed cost — 2026-07-17 anti-plastic pass).
 The turbo lora is the one baked node that is NOT universal: a turbo/lightning
 *checkpoint* already has that distillation merged in, so applying it again
 overcooks the image. Those models are listed in ``KREA_PREBAKED_TURBO`` and
-have the turbo node spliced out of the chain at build time.
+have the turbo node spliced out of the chain at build time — which in turn
+drops the amateur slider to 0.6, since at 1.5 it is correcting for a plasticity
+that is no longer being introduced and shows up as grain instead.
 
 Detection is an **explicit allowlist** (``KREA_MODELS``) — deliberately NOT a
 name heuristic, same rationale as Anima/Z-Image. DUPLICATED in
@@ -90,10 +93,18 @@ KREA_MODELS: frozenset[str] = frozenset(
 # filter-bypass lora, amateur slider, the two sampler passes — is unchanged;
 # per-model step/cfg differences go in ``_KREA_MODEL_SAMPLER`` below, not here.
 #
+# Dropping turbo has one knock-on effect, applied in the same breath (see
+# _PREBAKED_SLIDER_STRENGTH): the amateur slider works by ADDING amateur-photo
+# noise/texture, and its baked 1.5 is calibrated to cancel the waxy "plastic
+# skin" turbo introduces. With no plasticity left to cancel it lands as visible
+# grain and blotchy mottling on skin — worst on oiled/glistening prompts, where
+# it compounds with genuine specular streaking. The two changes are one fact, so
+# they live together rather than in a second parallel allowlist that could drift.
+#
 # Membership is a property of the WEIGHTS, not of the filename, so this is an
 # explicit allowlist for the same reason KREA_MODELS is. A model listed here
 # must also be in KREA_MODELS; a KREA_MODELS entry absent here keeps the baked
-# turbo lora (correct for the raw base models).
+# turbo lora AND its 1.5 slider (correct for the raw base models).
 KREA_PREBAKED_TURBO: frozenset[str] = frozenset(
     {
         "krea2turbofp8_krea2turbo",
@@ -150,6 +161,9 @@ _BASE_SAMPLER_NODE = "8"    # ClownsharKSampler_Beta (base pass, denoise 1.0)
 _POSITIVE_NODE = "5"        # CLIPTextEncode (Positive)
 _NEGATIVE_NODE = "6"        # CLIPTextEncode (Negative)
 _BAKED_TAIL_NODE = "13"     # LoraLoaderModelOnly (Amateur Slider) — baked chain tail
+# Amateur-slider strength once the turbo lora is gone (template value is 1.5,
+# tuned to counteract turbo's plasticity). See KREA_PREBAKED_TURBO.
+_PREBAKED_SLIDER_STRENGTH = 0.6
 
 
 def _load_template() -> dict:
@@ -324,10 +338,11 @@ def build_krea_workflow(
     model -> every ``UNETLoader.unet_name``; positive/negative -> the two
     CLIPTextEncode nodes; plus a fresh valid seed on both sampler passes.
 
-    Two per-model adjustments ride along: the baked turbo lora is spliced out
-    for ``KREA_PREBAKED_TURBO`` checkpoints, and ``_KREA_MODEL_SAMPLER`` may
-    override the base pass's sampler settings. Both are no-ops for unlisted
-    models, leaving the output identical to the plain template.
+    Two per-model adjustments ride along: ``KREA_PREBAKED_TURBO`` checkpoints get
+    the baked turbo lora spliced out and their amateur slider re-balanced to
+    ``_PREBAKED_SLIDER_STRENGTH``, and ``_KREA_MODEL_SAMPLER`` may override the
+    base pass's sampler settings. Both are no-ops for unlisted models, leaving
+    the output identical to the plain template.
 
     ``options["loras"]`` (see ``_inject_loras``) chains optional core
     LoraLoader nodes onto the baked chain tail / CLIPLoader; absent/empty
@@ -348,6 +363,12 @@ def build_krea_workflow(
     # BEFORE _inject_loras so user loras still splice onto the same tail.
     if _normalize_model(model) in KREA_PREBAKED_TURBO:
         _bypass_model_node(workflow, _TURBO_LORA_NODE)
+        # Same fact, second half: with turbo gone the amateur slider has nothing
+        # to counteract and its 1.5 reads as grain. Never a no-op — a missing
+        # tail node would mean the template lost its slider entirely.
+        tail = workflow.get(_BAKED_TAIL_NODE)
+        if isinstance(tail, dict):
+            tail.setdefault("inputs", {})["strength_model"] = _PREBAKED_SLIDER_STRENGTH
 
     # Per-model base-pass sampler settings (steps/cfg/sampler/scheduler).
     _apply_model_sampler(workflow, model)

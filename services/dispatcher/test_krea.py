@@ -388,16 +388,26 @@ def test_prebaked_turbo_rewires_chain_to_the_unet_loader():
                     assert str(val[0]) != krea._TURBO_LORA_NODE, model
 
 
-def test_prebaked_build_differs_from_raw_by_exactly_the_turbo_node():
-    """The strongest guard on the splice: PREBAKED takes no sampler override,
-    so its graph must equal the raw build minus node 2 and nothing else."""
+def test_prebaked_build_differs_from_raw_by_exactly_the_documented_overrides():
+    """The strongest guard on the per-model path: PREBAKED takes no sampler
+    override, so its graph must equal the raw build minus the turbo node, with
+    the re-balanced amateur slider, and NOTHING else. Undoing each documented
+    override by hand must reproduce the raw graph exactly — anything else the
+    per-model code touches shows up here as a diff."""
     raw = _seed_normalized(krea.build_krea_workflow("krea2_raw_fp8_scaled.safetensors", "p", "n"))
     pre = _seed_normalized(krea.build_krea_workflow(PREBAKED, "p", "n"))
     assert set(raw) - set(pre) == {krea._TURBO_LORA_NODE}
     assert set(pre) - set(raw) == set()
+    # 1. the model itself
     raw["1"]["inputs"]["unet_name"] = PREBAKED
+    # 2. turbo node spliced out, filterbypass repointed at the UNETLoader
     raw["3"]["inputs"]["model"] = ["1", 0]
     del raw[krea._TURBO_LORA_NODE]
+    # 3. amateur slider re-balanced now that turbo is gone. Assert the raw
+    #    baseline first — an unconditional write would also "pass" if the raw
+    #    build had wrongly been re-balanced too.
+    assert raw[krea._BAKED_TAIL_NODE]["inputs"]["strength_model"] == 1.5
+    raw[krea._BAKED_TAIL_NODE]["inputs"]["strength_model"] = krea._PREBAKED_SLIDER_STRENGTH
     assert raw == pre
 
 
@@ -499,3 +509,78 @@ def test_unlisted_models_keep_the_template_sampler_settings():
         base = krea.build_krea_workflow(model, "p", "n")[krea._BASE_SAMPLER_NODE]["inputs"]
         assert base["steps"] == 6, model
         assert base["cfg"] == 1.4, model
+
+
+# --- amateur slider re-balance (welded to the turbo splice) -----------------
+#
+# Dropping the turbo lora leaves the amateur slider with no plasticity to
+# cancel, so at its template 1.5 it lands as grain/blotchy skin. Every model
+# whose turbo node is spliced out must also get the lower strength — the two
+# are one change, so there is no way to configure one without the other.
+
+def test_prebaked_models_get_the_rebalanced_amateur_slider():
+    for model in BOTH_PREBAKED:
+        out = krea.build_krea_workflow(model, "p", "n")
+        slider = next(
+            n for n in out.values()
+            if n.get("class_type") == "LoraLoaderModelOnly"
+            and "amateurslider" in n["inputs"]["lora_name"].lower()
+        )
+        assert slider["inputs"]["strength_model"] == krea._PREBAKED_SLIDER_STRENGTH, model
+
+
+def test_rebalance_leaves_the_other_baked_loras_alone():
+    for model in BOTH_PREBAKED:
+        out = krea.build_krea_workflow(model, "p", "n")
+        strengths = {
+            n["inputs"]["lora_name"].lower(): n["inputs"]["strength_model"]
+            for n in out.values()
+            if n.get("class_type") == "LoraLoaderModelOnly"
+        }
+        assert strengths == {
+            "krea2filterbypass.safetensors": 1.0,
+            "amateurslider-krea2_v1.safetensors": krea._PREBAKED_SLIDER_STRENGTH,
+        }, model
+
+
+def test_raw_base_model_keeps_the_full_template_chain():
+    """The raw model still has turbo to fight, so all three baked strengths
+    stay at their template values."""
+    out = krea.build_krea_workflow("krea2_raw_fp8_scaled.safetensors", "p", "n")
+    strengths = {
+        n["inputs"]["lora_name"].lower(): n["inputs"]["strength_model"]
+        for n in out.values()
+        if n.get("class_type") == "LoraLoaderModelOnly"
+    }
+    assert strengths == {
+        "krea2_turbo_lora_rank_64_bf16.safetensors": 0.6,
+        "krea2filterbypass.safetensors": 1.0,
+        "amateurslider-krea2_v1.safetensors": 1.5,
+    }
+
+
+def test_rebalance_survives_a_path_prefixed_model_name():
+    out = krea.build_krea_workflow("diffusion_models/" + REDMIX, "p", "n")
+    assert out[krea._BAKED_TAIL_NODE]["inputs"]["strength_model"] == krea._PREBAKED_SLIDER_STRENGTH
+
+
+def test_the_tail_node_is_actually_the_amateur_slider():
+    """_PREBAKED_SLIDER_STRENGTH is written to _BAKED_TAIL_NODE by id, so a
+    template re-order that moved another lora into the tail slot would silently
+    re-target the strength. Pin the identity."""
+    import json as _json
+    tmpl = _json.load(open(TEMPLATE))
+    assert "amateurslider" in tmpl[krea._BAKED_TAIL_NODE]["inputs"]["lora_name"].lower()
+
+
+def test_user_loras_are_not_touched_by_the_rebalance():
+    """User loras are core LoraLoader nodes, not the baked LoraLoaderModelOnly
+    tail — a user-supplied slider at 1.5 must survive at 1.5."""
+    out = krea.build_krea_workflow(
+        REDMIX, "p", "n",
+        options={"loras": [{"name": "AmateurSlider-KREA2_v1.safetensors", "strength": 1.5}]},
+    )
+    user = [n for n in out.values() if n.get("class_type") == "LoraLoader"]
+    assert len(user) == 1
+    assert user[0]["inputs"]["strength_model"] == 1.5
+    assert out[krea._BAKED_TAIL_NODE]["inputs"]["strength_model"] == krea._PREBAKED_SLIDER_STRENGTH
