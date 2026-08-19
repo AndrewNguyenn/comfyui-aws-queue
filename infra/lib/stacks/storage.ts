@@ -184,7 +184,13 @@ export class StorageStack extends Stack {
       partitionKey: { name: 'job_id', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      timeToLiveAttribute: 'expire_at',
+      // NO TTL. This table is the viewer gallery's index — it previously carried
+      // `timeToLiveAttribute: 'expire_at'` with a 30-day expiry set by the
+      // dispatcher, which meant the user's visible history was capped at 30 days
+      // even though every image is retained in the outputs bucket forever. That
+      // reaped ~18.5k jobs before it was caught (2026-08-19). Job history is
+      // user data: keep it. Growth is cheap — see the GSI note below, the big
+      // workflow_json blob is excluded from the index.
       removalPolicy: RemovalPolicy.RETAIN,
     });
     // jobs-by-status: the status GSI backing the /jobs list, cancel-group, and
