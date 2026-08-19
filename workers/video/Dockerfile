@@ -173,6 +173,25 @@ ENV COMFY_KEEP_TORCHAUDIO=1
 COPY workers/video/baked_nodes.txt /tmp/baked_nodes.txt
 RUN cd /opt/worker && python3 bake_nodes.py /tmp/baked_nodes.txt
 
+# ---------- Patch comfy_kitchen for torch 2.5 ----------
+# ComfyUI >= v0.30 imports comfy_kitchen from comfy/quant_ops.py, and its na3d
+# custom op is declared with PEP 585 generics (list[int]) that torch 2.5 refuses
+# to parse — the error propagates out of `import comfy.utils` and crash-loops
+# ComfyUI before it can serve a single job. Rewrites that one signature to the
+# typing.* forms torch 2.5 accepts; na3d keeps working.
+COPY workers/video/patch_comfy_kitchen.py /tmp/patch_comfy_kitchen.py
+RUN python3 /tmp/patch_comfy_kitchen.py
+
+# ---------- Prove ComfyUI can actually import ----------
+# The single most valuable check in this file. Everything above can succeed
+# while ComfyUI still fails to start, which then surfaces only as a production
+# crash-loop — exactly how the comfy_kitchen break was found. comfy.utils pulls
+# in torch, quant_ops and comfy_kitchen, so importing it here turns that class
+# of failure into a failed BUILD. nodes.py init_extra_nodes() then proves the
+# MiniMax node pack actually registers rather than merely existing on disk.
+RUN cd /opt/comfy && python -c "import comfy.utils; print('comfy.utils import OK')"
+RUN cd /opt/comfy && python -c "import asyncio, nodes; asyncio.run(nodes.init_extra_nodes()); ns=[n for n in nodes.NODE_CLASS_MAPPINGS if 'MiniMaxH3' in n]; print('MiniMax nodes registered:', sorted(ns)); assert 'MiniMaxH3ReferenceToVideo' in ns, sorted(nodes.NODE_CLASS_MAPPINGS)[:20]"
+
 # ---------- Verify torchaudio survived the bake ----------
 # Belt and braces: COMFY_KEEP_TORCHAUDIO should stop the foundation repair from
 # touching it, but a custom node's requirements could still pull a different
