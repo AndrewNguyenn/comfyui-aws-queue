@@ -67,6 +67,33 @@ RUN git clone --depth 1 --branch ${COMFYUI_TAG} \
 # over NGC's custom build. Only torchaudio.functional.resample is actually used
 # (in _encode_ref_audio) and that is pure PyTorch — a sinc kernel plus conv1d —
 # so it works even if the compiled extension declines to load.
+# ---------- Pin NumPy back under 2.0 ----------
+# ComfyUI v0.33's dependency set pulls numpy 2.2.6, but this NGC base's torch
+# 2.5 and its opencv are compiled against NumPy 1.x. Under numpy 2 the C
+# bridge silently dies:
+#
+#   cv2 ... AttributeError: _ARRAY_API not found
+#   torch.from_numpy(...) -> RuntimeError: Numpy is not available
+#
+# and the failure does not surface until a node actually converts an array —
+# LoadImage failed this way AFTER a successful 84-second prompt execution, so
+# the worker looked healthy right up to the point it produced nothing.
+#
+# 1.26.4 is what NGC 24.10 ships and what the image fleet still runs (its
+# ComfyUI v0.27 asks for numpy>=1.25.0, which 1.26.4 already satisfies, so pip
+# never upgraded it there — that is the only reason that fleet is unaffected).
+# Downgrading is safe for opencv: wheels built against numpy 2 stay compatible
+# with 1.x, while the reverse is not true.
+#
+# This runs BEFORE the bake so bake_nodes' generated constraint file pins
+# numpy==1.26.4 and no custom node can drag it forward again.
+ARG NUMPY_VERSION=1.26.4
+RUN pip install --no-deps --force-reinstall "numpy==${NUMPY_VERSION}" \
+    && python -c "import numpy, torch; \
+t = torch.from_numpy(numpy.zeros(3, dtype='float32')); \
+assert t.shape[0] == 3; \
+print('numpy', numpy.__version__, '| torch.from_numpy OK ->', tuple(t.shape))"
+
 # Guard the version bump's whole purpose: if COMFYUI_TAG is ever moved back
 # below v0.30.0 this file disappears and every MiniMax node goes with it, which
 # would otherwise only surface as "the nodes aren't in the editor".
@@ -206,6 +233,10 @@ RUN cd /opt/comfy && python -c "import ast; src=open('comfy_extras/nodes_minimax
 # Re-apply the patch first: a node pack that reinstalled torchaudio would have
 # restored the unpatched (fatal) extension load.
 RUN python3 /tmp/patch_torchaudio_ext.py \
+    && python -c "import numpy, torch, cv2; \
+assert numpy.__version__.startswith('1.'), 'numpy dragged forward: ' + numpy.__version__; \
+torch.from_numpy(numpy.zeros(3, dtype='float32')); \
+print('post-bake numpy', numpy.__version__, '| cv2', cv2.__version__, '| from_numpy OK')" \
     && python -c "import torch, torchaudio, torchaudio.transforms as T; \
 print('post-bake torch', torch.__version__, '| torchaudio', torchaudio.__version__); \
 assert torchaudio.__version__.startswith('2.5'), 'torchaudio clobbered: ' + torchaudio.__version__; \
