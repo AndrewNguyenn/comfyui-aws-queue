@@ -417,20 +417,59 @@ def test_autoframe_shares_the_clips_seed():
     assert wf["30"]["inputs"]["noise_seed"] == 4242
 
 
-def test_autoframe_uses_only_core_comfyui_nodes():
-    # This runs on the VIDEO worker image, whose baked custom-node set is three
-    # packs wide. The image fleet's Krea graph samples with RES4LYF's
-    # ClownsharKSampler_Beta, which is NOT among them — leaking it in here would
-    # fail graph validation on every autoframed clip.
-    core = {"UNETLoader", "CLIPLoader", "CLIPSetLastLayer", "VAELoader",
-            "CLIPTextEncode", "EmptySD3LatentImage", "KSampler", "VAEDecode",
-            "LoraLoader", "LoraLoaderModelOnly"}
+def test_autoframe_uses_only_nodes_the_video_image_bakes():
+    # Every node here has to exist on the VIDEO worker, whose custom-node set is
+    # deliberately small. ClownsharKSampler_Beta is allowed because RES4LYF is
+    # baked for exactly this (workers/video/baked_nodes.txt) — anything else
+    # from a pack the image does not carry fails graph validation on every clip.
+    allowed = {"UNETLoader", "CLIPLoader", "CLIPSetLastLayer", "VAELoader",
+               "CLIPTextEncode", "EmptySD3LatentImage", "KSampler", "VAEDecode",
+               "LoraLoader", "LoraLoaderModelOnly", "ClownsharKSampler_Beta"}
     for model in ("zit_v12.safetensors", "krea2_raw_fp8_scaled.safetensors"):
         wf = _autoframed("fl2v", model=model,
                          loras=[{"name": "x.safetensors", "strength": 0.6}])
         for nid, node in wf.items():
             if int(nid) >= 9100:
-                assert node["class_type"] in core, f"{model} {nid} {node['class_type']}"
+                assert node["class_type"] in allowed, f"{model} {nid} {node['class_type']}"
+
+
+def test_res4lyf_is_actually_baked_into_the_video_worker():
+    # The dispatcher and the image have to agree. Shipping the sampler switch
+    # ahead of the rebuild fails every autoframed job at graph validation.
+    here = os.path.dirname(os.path.abspath(__file__))
+    baked = os.path.join(here, "..", "..", "workers", "video", "baked_nodes.txt")
+    with open(baked, encoding="utf-8") as fh:
+        packs = [l.split()[0] for l in fh if l.strip() and not l.startswith("#")]
+    assert "RES4LYF" in packs, packs
+
+
+def test_krea_frame_zero_samples_exactly_like_the_image_fleet():
+    # The whole point of baking RES4LYF: frame 0 must not be an approximation of
+    # the gallery look. Compare against the template rather than restating it,
+    # so a change on the image side surfaces here instead of drifting silently.
+    tpl = json.load(open(os.path.join(
+        HERE, "krea_templates", "Krea2Simple.api.json")))
+    wf = _autoframed("fl2v")
+    for ours, theirs, denoise in ((minimax._AF_KSAMPLER, "8", 1.0),
+                                  (minimax._AF_REFINE, "9", 0.2)):
+        a, b = wf[ours]["inputs"], tpl[theirs]["inputs"]
+        assert wf[ours]["class_type"] == tpl[theirs]["class_type"]
+        for k in ("sampler_name", "scheduler", "eta", "cfg", "bongmath"):
+            assert a[k] == b[k], f"{ours}.{k}: {a[k]!r} != {b[k]!r}"
+        assert a["denoise"] == denoise
+    # Steps differ from the raw template on purpose: _KREA_MODEL_SAMPLER
+    # overrides the base pass to 8 for this checkpoint.
+    import krea
+    assert wf[minimax._AF_KSAMPLER]["inputs"]["steps"] == \
+        krea._KREA_MODEL_SAMPLER["redcraftminimaxh3redmix_30krea2"]["steps"]
+    assert wf[minimax._AF_REFINE]["inputs"]["steps"] == tpl["9"]["inputs"]["steps"]
+
+
+def test_zimage_frame_zero_stays_on_the_core_sampler():
+    # Z-Image's graph never used RES4LYF; baking it must not drag Z-Image along.
+    wf = _autoframed("fl2v", model="zit_v12.safetensors")
+    assert wf[minimax._AF_KSAMPLER]["class_type"] == "KSampler"
+    assert "eta" not in wf[minimax._AF_KSAMPLER]["inputs"]
 
 
 def test_autoframe_trigger_token_is_owned_by_the_family():

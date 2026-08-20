@@ -266,13 +266,17 @@ def maybe_build_minimax(
 # derived from the model rather than passed in, so the caller cannot pair a
 # Krea checkpoint with Z-Image's text encoder.
 #
-# One deliberate divergence from the image fleet: its Krea graph samples with
-# RES4LYF's ClownsharKSampler_Beta, and RES4LYF is NOT baked into the video
-# worker image (three packs: KJNodes, WanAnimatePreprocess, SCAIL-pose). Every
-# node here is therefore core ComfyUI, with res_multistep/deis standing in for
-# res_2s/deis_3m — same exponential-integrator family, not bit-identical. If
-# frame 0 needs to match a gallery image exactly, RES4LYF has to be baked into
-# workers/video and this recipe switched over.
+# Krea samples with RES4LYF's ClownsharKSampler_Beta, the same node the image
+# fleet uses, so frame 0 matches the gallery by construction. This started out
+# on core res_multistep/deis instead, because RES4LYF was not baked into the
+# video worker image — and standing in for res_2s/deis_3m silently dropped
+# `eta 0.5` (ancestral noise re-injected each step) and `bongmath`. The missing
+# stochasticity read directly as waxy, overbaked skin, which is the failure
+# this whole recipe exists to avoid. RES4LYF is now baked (workers/video/
+# baked_nodes.txt) and the settings below are lifted from
+# krea_templates/Krea2Simple.api.json verbatim rather than approximated.
+#
+# Z-Image stays on core nodes: its graph never used RES4LYF.
 _AUTOFRAME_FAMILIES = {
     # Krea 2 — Qwen-Image-like. Note the VAE: Krea 2 decodes through the Wan 2.1
     # VAE, which this fleet already holds for SCAIL, so it costs no new weights.
@@ -281,13 +285,16 @@ _AUTOFRAME_FAMILIES = {
         "clip_type": "krea2",
         "clip_layer": None,
         "vae": "wan21_vae_fp32.safetensors",
-        "steps": 8,
+        "steps": 8,          # _KREA_MODEL_SAMPLER's redcraft override
         "cfg": 1.4,          # not the published 1.0: at 1.0 the negative is inert
-        "sampler": "res_multistep",
+        "sampler": "exponential/res_2s",
         "scheduler": "beta",
+        "sampler_class": "ClownsharKSampler_Beta",
+        "eta": 0.5,
         # The image fleet's second pass: 2 steps at 0.2 denoise, a polish rather
         # than a generation. Cheap, and the look is calibrated with it present.
-        "refine": {"steps": 2, "denoise": 0.2, "sampler": "deis", "scheduler": "beta"},
+        "refine": {"steps": 2, "denoise": 0.2,
+                   "sampler": "multistep/deis_3m", "scheduler": "bong_tangent"},
         "lora_class": "LoraLoaderModelOnly",
         # Chain order matters and mirrors krea_templates/Krea2Simple.api.json.
         # `role` is what makes an entry conditional; see KREA_PREBAKED_TURBO.
@@ -309,6 +316,7 @@ _AUTOFRAME_FAMILIES = {
         "cfg": 1.5,
         "sampler": "euler",
         "scheduler": "simple",
+        "sampler_class": "KSampler",
         "refine": None,
         "lora_class": "LoraLoader",
         "baked": ({"name": "zimage-igbaddie_pruned.safetensors", "strength": 0.6, "role": None},),
@@ -482,23 +490,31 @@ def splice_autoframe(wf: dict, mode: str, options: dict,
                    "inputs": {"text": negative, "clip": clip_src}}
     wf[_AF_LATENT] = {"class_type": "EmptySD3LatentImage",
                       "inputs": {"width": width, "height": height, "batch_size": 1}}
-    wf[_AF_KSAMPLER] = {"class_type": "KSampler", "inputs": {
-        "seed": seed, "steps": steps, "cfg": cfg,
-        "sampler_name": fam["sampler"], "scheduler": fam["scheduler"], "denoise": 1.0,
-        "model": model_src, "positive": [_AF_POS, 0], "negative": [_AF_NEG, 0],
-        "latent_image": [_AF_LATENT, 0],
-    }}
-    sampled = [_AF_KSAMPLER, 0]
+    def _sampler(nid, sampler_name, scheduler, n_steps, denoise, latent):
+        """One node, whichever class the family samples with.
+
+        ClownsharKSampler_Beta's extra widgets are not decoration: `eta` is the
+        ancestral noise that keeps skin from going waxy, and `bongmath` is its
+        numerical correction. Dropping either is what made frame 0 look baked.
+        """
+        inputs = {
+            "seed": seed, "steps": n_steps, "cfg": cfg,
+            "sampler_name": sampler_name, "scheduler": scheduler, "denoise": denoise,
+            "model": model_src, "positive": [_AF_POS, 0], "negative": [_AF_NEG, 0],
+            "latent_image": latent,
+        }
+        if fam["sampler_class"] == "ClownsharKSampler_Beta":
+            inputs.update({"eta": fam["eta"], "steps_to_run": -1,
+                           "sampler_mode": "standard", "bongmath": True})
+        wf[nid] = {"class_type": fam["sampler_class"], "inputs": inputs}
+        return [nid, 0]
+
+    sampled = _sampler(_AF_KSAMPLER, fam["sampler"], fam["scheduler"],
+                       steps, 1.0, [_AF_LATENT, 0])
     refine = fam["refine"]
     if refine:
-        wf[_AF_REFINE] = {"class_type": "KSampler", "inputs": {
-            "seed": seed, "steps": refine["steps"], "cfg": cfg,
-            "sampler_name": refine["sampler"], "scheduler": refine["scheduler"],
-            "denoise": refine["denoise"],
-            "model": model_src, "positive": [_AF_POS, 0], "negative": [_AF_NEG, 0],
-            "latent_image": sampled,
-        }}
-        sampled = [_AF_REFINE, 0]
+        sampled = _sampler(_AF_REFINE, refine["sampler"], refine["scheduler"],
+                           refine["steps"], refine["denoise"], sampled)
     wf[_AF_DECODE] = {"class_type": "VAEDecode",
                       "inputs": {"samples": sampled, "vae": [_AF_VAE, 0]}}
 

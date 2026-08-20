@@ -12,3 +12,15 @@
 comfyui-kjnodes https://github.com/kijai/ComfyUI-KJNodes 6ab7e8130e449ed2c0037589bcf84146ceb7fc9c
 comfyui-wananimatepreprocess https://github.com/kijai/ComfyUI-WanAnimatePreprocess 0e0b6a2a555625acf4d4aefb780e27d06937132f
 comfyui-scail-pose https://github.com/kijai/ComfyUI-SCAIL-pose 1db9ac3b44b93c336402512c118d35a89a0bee58
+
+# RES4LYF — needed so the auto first frame can sample with the SAME nodes the
+# image fleet's Krea 2 graph uses (ClownsharKSampler_Beta). Standing in with
+# core res_multistep/deis dropped eta 0.5 and bongmath, and the missing
+# stochasticity showed up directly as waxy, overbaked skin.
+#
+# Pinned, unlike the image worker's floating entry, for the usual reason the
+# other three here are pinned: an unpinned rebuild silently changing sampler
+# semantics is very hard to attribute later. Worth pinning the IMAGE side to
+# this same SHA too — otherwise the two fleets drift apart on their next
+# rebuild and frame 0 stops matching the gallery again.
+RES4LYF https://github.com/ClownsharkBatwing/RES4LYF 26036f647ca15d3048a193daf99a40cecfc3820d
