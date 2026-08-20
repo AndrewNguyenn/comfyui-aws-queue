@@ -137,7 +137,14 @@ def _handle_wildcards(file_meta: dict, token: str, total_bytes: int, download_id
             for member in zf.namelist():
                 if member.endswith("/") or not member.lower().endswith(_WILDCARD_EXTS):
                     continue
-                rel = member.lstrip("/")
+                # Zips built on Windows store backslash separators. On Linux a
+                # backslash is an ordinary filename character, so leaving them
+                # produces one flat object literally named
+                # "characters\slug\file.yaml" — the nested layout Impact-Pack
+                # walks is gone, and the traversal check below (which splits on
+                # "/") cannot see the components either. Normalise first, then
+                # validate.
+                rel = member.replace("\\", "/").lstrip("/")
                 if not rel or ".." in rel.split("/"):
                     continue  # never let an archive path escape wildcards/
                 s3.put_object(

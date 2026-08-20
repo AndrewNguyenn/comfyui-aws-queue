@@ -287,3 +287,41 @@ def test_zip_with_no_wildcards_reports_what_it_held(monkeypatch):
         assert "py" in str(e), str(e)   # names the extensions actually present
     else:
         raise AssertionError("expected RuntimeError")
+
+
+def test_windows_backslash_paths_are_normalised(monkeypatch):
+    # Zips built on Windows carry backslash separators; on Linux those are
+    # ordinary filename characters, so without normalising you get one flat
+    # object named "characters\slug\file.yaml" instead of a nested tree.
+    import io, zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("characters\\ivy\\character.yaml", "a: 1\n")
+    data = buf.getvalue()
+    put = []
+    monkeypatch.setattr(worker, "s3", type("S", (), {
+        "put_object": lambda self, **kw: put.append(kw["Key"]),
+    })())
+    monkeypatch.setattr(worker, "_set_status", lambda *a, **k: None)
+    monkeypatch.setattr(worker.http, "request",
+                        lambda *a, **k: type("R", (), {"status": 200, "data": data})())
+    worker._handle_wildcards({"name": "p.zip", "downloadUrl": "u"}, "", len(data), "d")
+    assert put == ["wildcards/characters/ivy/character.yaml"], put
+
+
+def test_backslash_traversal_is_still_blocked(monkeypatch):
+    import io, zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("..\\..\\evil.yaml", "x: 1\n")
+        zf.writestr("ok.yaml", "y: 1\n")
+    data = buf.getvalue()
+    put = []
+    monkeypatch.setattr(worker, "s3", type("S", (), {
+        "put_object": lambda self, **kw: put.append(kw["Key"]),
+    })())
+    monkeypatch.setattr(worker, "_set_status", lambda *a, **k: None)
+    monkeypatch.setattr(worker.http, "request",
+                        lambda *a, **k: type("R", (), {"status": 200, "data": data})())
+    worker._handle_wildcards({"name": "p.zip", "downloadUrl": "u"}, "", len(data), "d")
+    assert put == ["wildcards/ok.yaml"], put
