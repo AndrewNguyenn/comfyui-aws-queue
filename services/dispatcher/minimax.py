@@ -48,6 +48,8 @@ import os
 import random
 from typing import Optional
 
+from zimage import ZIMAGE_MODELS, _normalize_model
+
 _TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "minimax_templates")
 
 # MiniMax H3 ships as two separately-trained checkpoints, and the difference is
@@ -259,7 +261,13 @@ def maybe_build_minimax(
 # Every node here is core ComfyUI (no custom pack), which matters because this
 # runs on the VIDEO worker image, whose baked node set is deliberately small.
 _AUTOFRAME_DEFAULTS = {
-    "model": "Z Image.safetensors",
+    # Diving Z-Image Turbo v7.0 — the newest checkpoint in the allowlist. fp16
+    # rather than the fleet's usual fp8 default: that default exists because the
+    # image path's fp16 stack plus a 3x SD-upscale overran the worker cap, and
+    # this is one 768x1152 sample with no upscale at all. Frame 0 is the
+    # identity anchor for every shot that follows, so it is the one place worth
+    # the extra weights.
+    "model": "divingZImageTurbo_v70Fp16.safetensors",
     "clip": "qwen_3_4b_fp8_mixed.safetensors",
     "clip_type": "lumina2",
     "clip_layer": -2,
@@ -322,10 +330,18 @@ def splice_autoframe(wf: dict, mode: str, options: dict,
     nothing left to crop.
     """
     o = dict(_AUTOFRAME_DEFAULTS)
-    for k in ("model", "clip", "clip_type", "vae", "sampler", "scheduler"):
+    for k in ("clip", "clip_type", "vae", "sampler", "scheduler"):
         v = options.get(k)
         if isinstance(v, str) and v.strip():
             o[k] = v.strip()
+    # The model override is allowlisted, not free-form: this value goes straight
+    # into a UNETLoader, and the whole catalog is mounted on this fleet.
+    model = options.get("model")
+    if isinstance(model, str) and _normalize_model(model) in ZIMAGE_MODELS:
+        o["model"] = model.strip()
+    elif model:
+        print(f"minimax: autoframe model {model!r} is not a Z-Image checkpoint; "
+              f"using {o['model']}")
     if options.get("steps") is not None:
         o["steps"] = max(1, min(50, int(options["steps"])))
     if options.get("cfg") is not None:

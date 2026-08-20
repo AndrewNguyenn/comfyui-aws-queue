@@ -511,3 +511,21 @@ def test_handler_accepts_autoframe_without_an_upload():
                             "autoframe": {"prompt": "a photo of a woman"}},
     })})
     assert resp["statusCode"] != 400, resp["body"]
+
+
+def test_autoframe_default_model_is_a_real_zimage_checkpoint():
+    # A UNETLoader pointed at a name the catalog does not have fails the job at
+    # load time, after MiniMax's weights are already resident.
+    import zimage
+    assert zimage._normalize_model(
+        minimax._AUTOFRAME_DEFAULTS["model"]) in zimage.ZIMAGE_MODELS
+
+
+def test_autoframe_model_override_is_allowlisted():
+    # The whole model catalog is mounted on this fleet, so a free-form model
+    # name here would let a caller load anything into the UNETLoader.
+    wf = _autoframed("fl2v", model="krea2_raw_fp8_scaled.safetensors")
+    assert wf[minimax._AF_UNET]["inputs"]["unet_name"] == \
+        minimax._AUTOFRAME_DEFAULTS["model"]
+    wf = _autoframed("fl2v", model="zit_v12.safetensors")
+    assert wf[minimax._AF_UNET]["inputs"]["unet_name"] == "zit_v12.safetensors"
