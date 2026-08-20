@@ -159,9 +159,12 @@ def maybe_build_minimax(
 ) -> Optional[dict]:
     """Build a MiniMax H3 ref2va workflow, or None if this isn't one.
 
-    ``options`` is the request's ``minimax_options``. A reference image is
-    required: this is the reference-to-video graph, and the prompt's
-    ``<Picture 1>`` has to resolve to something.
+    ``options`` is the request's ``minimax_options``. An image is normally
+    required — it is either the reference or frame 0, and the prompt's
+    ``<Picture 1>`` has to resolve to something. The one exception is
+    ``options["autoframe"]``: a request that carries no upload but does ask for
+    an auto first frame gets a Z-Image still generated inside the same graph
+    (see ``splice_autoframe``), so ``<Picture 1>`` still resolves.
     """
     if not isinstance(options, dict) or not options:
         return None
@@ -170,8 +173,13 @@ def maybe_build_minimax(
     if mode not in _TEMPLATES:
         print(f"minimax: unknown mode {mode!r}; not building")
         return None
-    # Both modes need the image — it is either the reference or frame 0.
-    if not ref_image_name:
+    # Both modes need an image — it is either the reference or frame 0. Without
+    # an upload we can still build, but only if the caller opted into having one
+    # generated; silently falling through to text-to-video would quietly discard
+    # the character the prompt was composed around.
+    autoframe = options.get("autoframe")
+    autoframe = autoframe if isinstance(autoframe, dict) else None
+    if not ref_image_name and not autoframe:
         print("minimax: missing reference image; not building")
         return None
 
@@ -191,7 +199,8 @@ def maybe_build_minimax(
             options.get("width", 1344), options.get("height", 768)
         )
 
-        wf[_N_REF_LOAD]["inputs"]["image"] = ref_image_name
+        if ref_image_name:
+            wf[_N_REF_LOAD]["inputs"]["image"] = ref_image_name
 
         r2v = wf[_N_REF2V]["inputs"]
         r2v["prompt"] = str(options.get("prompt", "") or "")
@@ -200,7 +209,7 @@ def maybe_build_minimax(
         r2v["length"] = frames
         # FL2VA cover-crops the first frame to the canvas before the node's own
         # plain stretch; that resize must track the canvas or frame 0 distorts.
-        if mode == "fl2v":
+        if mode == "fl2v" and ref_image_name:
             wf[_N_REF_RESIZE]["inputs"]["width"] = width
             wf[_N_REF_RESIZE]["inputs"]["height"] = height
         # ref_image_size exists only on the Ref2VA node — FL2VA cover-crops to
@@ -209,12 +218,17 @@ def maybe_build_minimax(
             r2v["ref_image_size"] = options["ref_image_size"]
 
         seed = options.get("seed")
-        wf[_N_NOISE]["inputs"]["noise_seed"] = (
-            int(seed) % _SEED_MAX if seed is not None else random.randint(0, _SEED_MAX - 1)
-        )
+        seed = int(seed) % _SEED_MAX if seed is not None else random.randint(0, _SEED_MAX - 1)
+        wf[_N_NOISE]["inputs"]["noise_seed"] = seed
 
         if options.get("steps") is not None:
             wf[_N_SCHED]["inputs"]["steps"] = max(1, min(60, int(options["steps"])))
+
+        # No upload: render the opening frame in-graph. Done here, after the
+        # canvas is snapped, so the still is generated at exactly the video's
+        # dimensions and nothing has to be cropped into place afterwards.
+        if not ref_image_name:
+            splice_autoframe(wf, mode, autoframe, width, height, seed)
 
         # Keep the container's frame rate tied to the model's: MiniMax H3 is a
         # 24 fps model, and muxing its frames at any other rate changes the
@@ -225,3 +239,145 @@ def maybe_build_minimax(
     except Exception as e:  # noqa: BLE001
         print(f"minimax: build failed, leaving workflow untouched: {e!r}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# Auto first frame
+# ---------------------------------------------------------------------------
+# Both MiniMax nodes take their image as an OPTIONAL input, so a clip with no
+# upload is legal — it just becomes text-to-video, and the model invents a face
+# from scratch. That is worse than it sounds here: this app already has a
+# curated character pool, a natural-prompt library and an always-on house LoRA,
+# and none of it reaches a T2V clip.
+#
+# So instead of dropping the image, we GENERATE it: a small Z-Image text-to-
+# image graph is spliced into the same workflow, and its decode feeds
+# ``first_frame``. One job, one queue, one GPU — ComfyUI unloads Z-Image before
+# MiniMax's 20 GiB transformer loads, so the peak is unchanged and the cost is
+# a handful of seconds against a multi-minute sample.
+#
+# Every node here is core ComfyUI (no custom pack), which matters because this
+# runs on the VIDEO worker image, whose baked node set is deliberately small.
+_AUTOFRAME_DEFAULTS = {
+    "model": "Z Image.safetensors",
+    "clip": "qwen_3_4b_fp8_mixed.safetensors",
+    "clip_type": "lumina2",
+    "clip_layer": -2,
+    "vae": "ae_zimgturbo.safetensors",
+    "steps": 11,
+    "cfg": 1.5,
+    "sampler": "euler",
+    "scheduler": "simple",
+}
+# Mirrors the image fleet's Z-Image negative. Short on purpose: Z-Image runs at
+# cfg 1.5, where a long negative costs more than it corrects.
+_AUTOFRAME_NEGATIVE = (
+    "blurry, low quality, worst quality, watermark, text, signature, "
+    "deformed hands, extra fingers, extra limbs, mutated"
+)
+
+# 9100+ so these never collide with the templates' 1..51.
+_AF_UNET = "9101"
+_AF_CLIP = "9102"
+_AF_CLIPSET = "9103"
+_AF_VAE = "9104"
+_AF_POS = "9105"
+_AF_NEG = "9106"
+_AF_LATENT = "9107"
+_AF_KSAMPLER = "9108"
+_AF_DECODE = "9109"
+_AF_LORA_BASE = 9120
+_AF_MAX_LORAS = 8
+
+
+def _autoframe_loras(options: dict) -> list:
+    """Validated ``[{name, strength}]``, capped like every other family's."""
+    out = []
+    for entry in options.get("loras") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        # Same containment rule as the reference-image name: a LoRA filename is
+        # a leaf under models/loras, never a path.
+        if not name or "/" in name or "\\" in name or ".." in name:
+            continue
+        try:
+            strength = float(entry.get("strength", 1.0))
+        except (TypeError, ValueError):
+            continue
+        if not -4.0 <= strength <= 4.0:
+            continue
+        out.append({"name": name, "strength": strength})
+        if len(out) >= _AF_MAX_LORAS:
+            break
+    return out
+
+
+def splice_autoframe(wf: dict, mode: str, options: dict,
+                     width: int, height: int, seed: int) -> None:
+    """Add a Z-Image T2I subgraph and hand its image to the MiniMax node.
+
+    Replaces the template's LoadImage (and, in fl2v, the ImageScale that
+    cover-crops for it): the still is rendered AT the video canvas, so there is
+    nothing left to crop.
+    """
+    o = dict(_AUTOFRAME_DEFAULTS)
+    for k in ("model", "clip", "clip_type", "vae", "sampler", "scheduler"):
+        v = options.get(k)
+        if isinstance(v, str) and v.strip():
+            o[k] = v.strip()
+    if options.get("steps") is not None:
+        o["steps"] = max(1, min(50, int(options["steps"])))
+    if options.get("cfg") is not None:
+        o["cfg"] = max(0.0, min(20.0, float(options["cfg"])))
+
+    positive = str(options.get("prompt", "") or "").strip()
+    negative = str(options.get("negative", "") or "").strip() or _AUTOFRAME_NEGATIVE
+
+    wf[_AF_UNET] = {"class_type": "UNETLoader",
+                    "inputs": {"unet_name": o["model"], "weight_dtype": "default"}}
+    wf[_AF_CLIP] = {"class_type": "CLIPLoader",
+                    "inputs": {"clip_name": o["clip"], "type": o["clip_type"],
+                               "device": "default"}}
+    wf[_AF_CLIPSET] = {"class_type": "CLIPSetLastLayer",
+                       "inputs": {"stop_at_clip_layer": int(o["clip_layer"]),
+                                  "clip": [_AF_CLIP, 0]}}
+    wf[_AF_VAE] = {"class_type": "VAELoader", "inputs": {"vae_name": o["vae"]}}
+
+    # LoRAs ride between the loaders and every consumer, so the text encoders
+    # see the trained tokens too — a model-only chain silently drops the half
+    # of a character LoRA that lives in the CLIP.
+    model_src, clip_src = [_AF_UNET, 0], [_AF_CLIPSET, 0]
+    for i, lora in enumerate(_autoframe_loras(options)):
+        nid = str(_AF_LORA_BASE + i)
+        wf[nid] = {"class_type": "LoraLoader", "inputs": {
+            "lora_name": lora["name"],
+            "strength_model": lora["strength"],
+            "strength_clip": lora["strength"],
+            "model": model_src, "clip": clip_src,
+        }}
+        model_src, clip_src = [nid, 0], [nid, 1]
+
+    wf[_AF_POS] = {"class_type": "CLIPTextEncode",
+                   "inputs": {"text": positive, "clip": clip_src}}
+    wf[_AF_NEG] = {"class_type": "CLIPTextEncode",
+                   "inputs": {"text": negative, "clip": clip_src}}
+    wf[_AF_LATENT] = {"class_type": "EmptySD3LatentImage",
+                      "inputs": {"width": width, "height": height, "batch_size": 1}}
+    wf[_AF_KSAMPLER] = {"class_type": "KSampler", "inputs": {
+        "seed": seed, "steps": o["steps"], "cfg": o["cfg"],
+        "sampler_name": o["sampler"], "scheduler": o["scheduler"], "denoise": 1.0,
+        "model": model_src, "positive": [_AF_POS, 0], "negative": [_AF_NEG, 0],
+        "latent_image": [_AF_LATENT, 0],
+    }}
+    wf[_AF_DECODE] = {"class_type": "VAEDecode",
+                      "inputs": {"samples": [_AF_KSAMPLER, 0], "vae": [_AF_VAE, 0]}}
+
+    # Hand the generated still to the MiniMax node the same way an upload
+    # would arrive, then drop the now-unreachable loader nodes.
+    if mode == "fl2v":
+        wf[_N_REF2V]["inputs"]["first_frame"] = [_AF_DECODE, 0]
+        wf.pop(_N_REF_RESIZE, None)
+    else:
+        wf[_N_REF2V]["inputs"][_REF_GROUP] = {"ref_image_0": [_AF_DECODE, 0]}
+    wf.pop(_N_REF_LOAD, None)

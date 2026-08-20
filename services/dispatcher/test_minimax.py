@@ -33,8 +33,8 @@ def test_builds_and_routes_to_video():
     assert classify_workflow(wf) == "video"
 
 
-def test_links_resolve_and_nothing_is_orphaned():
-    wf = _build()
+def _assert_fully_reachable(wf):
+    """Every link resolves, and every node is reachable from the SaveVideo."""
     for nid, node in wf.items():
         for k, v in node["inputs"].items():
             if isinstance(v, list) and len(v) == 2 and isinstance(v[0], str):
@@ -64,6 +64,10 @@ def test_links_resolve_and_nothing_is_orphaned():
 
     walk(out[0])
     assert seen == set(wf), f"unreachable: {sorted(set(wf) - seen)}"
+
+
+def test_links_resolve_and_nothing_is_orphaned():
+    _assert_fully_reachable(_build())
 
 
 # --- invariant 1: 17k+5 frame grid at 24 fps -------------------------------
@@ -335,3 +339,175 @@ def test_both_modes_carry_the_prompt_and_seed():
         wf = build(prompt="a specific document", seed=5)
         assert wf[minimax._N_REF2V]["inputs"]["prompt"] == "a specific document"
         assert wf[minimax._N_NOISE]["inputs"]["noise_seed"] == 5
+
+
+# --- auto first frame ------------------------------------------------------
+# No upload used to be a hard 400. It can now mean "generate the opening frame
+# for me": a Z-Image T2I subgraph is spliced into the same workflow and its
+# decode feeds the MiniMax node, so the character comes from this app's own
+# image stack instead of MiniMax's idea of the words.
+
+AF = {"prompt": "a photo of a woman kneeling on a bed"}
+
+
+def _autoframed(mode="fl2v", **af):
+    return minimax.maybe_build_minimax(
+        {"prompt": "a woman dancing", "mode": mode, "autoframe": {**AF, **af}}, None
+    )
+
+
+def test_autoframe_builds_without_any_upload():
+    for mode in ("ref", "fl2v"):
+        wf = _autoframed(mode)
+        assert wf is not None, mode
+        assert classify_workflow(wf) == "video", mode
+
+
+def test_autoframe_graph_is_fully_connected():
+    for mode in ("ref", "fl2v"):
+        _assert_fully_reachable(_autoframed(mode))
+
+
+def test_autoframe_drops_the_loader_nodes_it_replaces():
+    # A LoadImage left behind would fail the job outright: its widget still
+    # names a file that was never staged into ComfyUI's input/ dir.
+    for mode in ("ref", "fl2v"):
+        wf = _autoframed(mode)
+        assert not [n for n in wf.values() if n["class_type"] == "LoadImage"], mode
+    # fl2v's ImageScale exists only to cover-crop an upload to the canvas; the
+    # still is rendered AT the canvas, so there is nothing to crop.
+    assert not [n for n in _autoframed("fl2v").values()
+                if n["class_type"] == "ImageScale"]
+
+
+def test_autoframe_feeds_frame_zero_in_fl2v():
+    wf = _autoframed("fl2v")
+    src = wf["20"]["inputs"]["first_frame"]
+    assert wf[src[0]]["class_type"] == "VAEDecode"
+
+
+def test_autoframe_feeds_picture_one_in_ref_mode():
+    wf = _autoframed("ref")
+    src = wf["20"]["inputs"]["ref_images"]["ref_image_0"]
+    assert wf[src[0]]["class_type"] == "VAEDecode"
+
+
+def test_autoframe_renders_at_the_video_canvas():
+    # Any mismatch here re-introduces the crop this splice exists to avoid.
+    wf = _autoframed("fl2v")
+    r2v = wf["20"]["inputs"]
+    latent = wf[minimax._AF_LATENT]["inputs"]
+    assert (latent["width"], latent["height"]) == (r2v["width"], r2v["height"])
+
+
+def test_autoframe_canvas_follows_the_snapped_size_not_the_request():
+    wf = minimax.maybe_build_minimax(
+        {"prompt": "x", "mode": "fl2v", "width": 1920, "height": 1080,
+         "autoframe": AF}, None)
+    latent = wf[minimax._AF_LATENT]["inputs"]
+    assert (latent["width"], latent["height"]) == minimax.snap_canvas(1920, 1080)
+
+
+def test_autoframe_shares_the_clips_seed():
+    # One seed for the pair, so re-queueing a job reproduces both the opening
+    # frame and the motion rather than only half of it.
+    wf = minimax.maybe_build_minimax(
+        {"prompt": "x", "mode": "fl2v", "seed": 4242, "autoframe": AF}, None)
+    assert wf[minimax._AF_KSAMPLER]["inputs"]["seed"] == 4242
+    assert wf["30"]["inputs"]["noise_seed"] == 4242
+
+
+def test_autoframe_uses_only_core_comfyui_nodes():
+    # This runs on the VIDEO worker image, whose baked custom-node set is three
+    # packs wide. A rgthree/Impact node here would fail at graph validation.
+    core = {"UNETLoader", "CLIPLoader", "CLIPSetLastLayer", "VAELoader",
+            "CLIPTextEncode", "EmptySD3LatentImage", "KSampler", "VAEDecode",
+            "LoraLoader"}
+    wf = _autoframed("fl2v", loras=[{"name": "x.safetensors", "strength": 0.6}])
+    for nid, node in wf.items():
+        if int(nid) >= 9100:
+            assert node["class_type"] in core, f"{nid} {node['class_type']}"
+
+
+def test_autoframe_loras_ride_the_clip_as_well_as_the_model():
+    # A model-only chain silently drops the half of a character LoRA that lives
+    # in the text encoder — the trained token then means nothing.
+    wf = _autoframed("fl2v", loras=[{"name": "igbaddie.safetensors", "strength": 0.6}])
+    lora = str(minimax._AF_LORA_BASE)
+    assert wf[lora]["inputs"]["lora_name"] == "igbaddie.safetensors"
+    assert wf[minimax._AF_KSAMPLER]["inputs"]["model"] == [lora, 0]
+    assert wf[minimax._AF_POS]["inputs"]["clip"] == [lora, 1]
+    assert wf[minimax._AF_NEG]["inputs"]["clip"] == [lora, 1]
+
+
+def test_autoframe_lora_chain_stays_in_order():
+    wf = _autoframed("fl2v", loras=[
+        {"name": "a.safetensors", "strength": 1.0},
+        {"name": "b.safetensors", "strength": 0.5},
+    ])
+    a, b = str(minimax._AF_LORA_BASE), str(minimax._AF_LORA_BASE + 1)
+    assert wf[b]["inputs"]["model"] == [a, 0]
+    assert wf[b]["inputs"]["clip"] == [a, 1]
+    assert wf[minimax._AF_KSAMPLER]["inputs"]["model"] == [b, 0]
+
+
+def test_autoframe_rejects_lora_paths_and_absurd_strengths():
+    wf = _autoframed("fl2v", loras=[
+        {"name": "../../etc/passwd", "strength": 1.0},
+        {"name": "sub/dir.safetensors", "strength": 1.0},
+        {"name": "loud.safetensors", "strength": 99},
+        {"name": "", "strength": 1.0},
+    ])
+    assert not [n for n in wf.values() if n["class_type"] == "LoraLoader"]
+
+
+def test_autoframe_caps_the_lora_chain():
+    wf = _autoframed("fl2v", loras=[
+        {"name": f"l{i}.safetensors", "strength": 0.5} for i in range(20)])
+    assert len([n for n in wf.values() if n["class_type"] == "LoraLoader"]) == 8
+
+
+def test_an_upload_still_wins_over_autoframe():
+    # Explicit beats implicit: if the user actually uploaded a frame, use it.
+    wf = minimax.maybe_build_minimax(
+        {"prompt": "x", "mode": "fl2v", "autoframe": AF}, REF)
+    assert wf["10"]["inputs"]["image"] == REF
+    assert minimax._AF_KSAMPLER not in wf
+
+
+def test_autoframe_carries_its_own_prompt_not_the_clips():
+    wf = _autoframed("fl2v")
+    assert wf[minimax._AF_POS]["inputs"]["text"] == AF["prompt"]
+    assert wf[minimax._AF_POS]["inputs"]["text"] != wf["20"]["inputs"]["prompt"]
+
+
+def test_autoframe_has_a_negative_by_default_and_accepts_an_override():
+    assert wf_neg(_autoframed("fl2v")) == minimax._AUTOFRAME_NEGATIVE
+    assert wf_neg(_autoframed("fl2v", negative="hands")) == "hands"
+
+
+def wf_neg(wf):
+    return wf[minimax._AF_NEG]["inputs"]["text"]
+
+
+def test_autoframe_must_be_a_dict_not_a_truthy_flag():
+    # `autoframe: true` from a sloppy client must not build a graph whose
+    # subject prompt is empty — that is a blank-faced clip, not an error.
+    assert minimax.maybe_build_minimax(
+        {"prompt": "x", "mode": "fl2v", "autoframe": True}, None) is None
+
+
+def test_template_is_not_mutated_by_autoframe():
+    before = json.load(open(TEMPLATE))
+    _autoframed("ref")
+    assert json.load(open(TEMPLATE)) == before
+
+
+def test_handler_accepts_autoframe_without_an_upload():
+    h = _handler()
+    resp = h._post_prompt({"body": json.dumps({
+        "prompt": {},
+        "minimax_options": {"prompt": "a woman dancing", "mode": "fl2v",
+                            "autoframe": {"prompt": "a photo of a woman"}},
+    })})
+    assert resp["statusCode"] != 400, resp["body"]

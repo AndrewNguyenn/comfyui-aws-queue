@@ -402,7 +402,8 @@ def _post_prompt(event: dict) -> dict:
 
     if minimax_requested and not minimax_built and not workflow:
         return _resp(400, {
-            "error": "minimax_options requires an uploaded reference image"
+            "error": "minimax_options requires an uploaded reference image, "
+                     "or an 'autoframe' block to generate one"
         })
 
     # A SCAIL request we could not build (missing upload, unreadable template)
