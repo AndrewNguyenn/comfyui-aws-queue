@@ -116,6 +116,20 @@ _PROMPT_MAX = 2000  # cap each prompt — keeps the /jobs list response bounded
 # (`text`), an SDXL encoder (`text_g`/`text_l`), a String Literal (`string`),
 # a wildcard processor (`wildcard`/`populated_text`).
 _TEXT_KEYS = ("text", "text_g", "text_l", "string", "wildcard", "populated_text")
+# Video families carry the prompt as a DIRECT string on a conditioning node
+# rather than through a CLIPTextEncode:
+#   MiniMax H3  -> MiniMaxH3ReferenceToVideo.prompt
+#   Wan / SCAIL -> WanVideoTextEncodeCached.positive_prompt / .negative_prompt
+# `prompt` also lives in _PROVIDER_KEYS, but that tuple is only trusted when a
+# node was reached by following a text link — these are reached through
+# conditioning, so without listing them here the viewer showed "Not recorded
+# for this generation" for every video job.
+_DIRECT_PROMPT_KEYS = ("prompt",)
+_POLARITY_PROMPT_KEYS = {"positive": "positive_prompt", "negative": "negative_prompt"}
+# Conditioning-ish inputs that carry text embeds rather than a CONDITIONING
+# type. The upstream walk only follows inputs whose name contains "cond", which
+# skipped Wan's `text_embeds` entirely.
+_EMBED_KEYS = ("text_embeds",)
 # Generic value keys (a primitive's `value`, a passthrough `prompt`). Only
 # trusted on a node reached by *following a text link* — i.e. a confirmed
 # string-provider — never on an arbitrary conditioning node, where a stray
@@ -146,8 +160,11 @@ def _generators(wf: dict) -> tuple[list, list]:
         if not (is_detailer or "sampler" in ct or "guider" in ct):
             continue
         inp = node.get("inputs", {}) or {}
+        # `text_embeds` qualifies too: Wan/SCAIL samplers take their prompt that
+        # way and have no positive/negative/conditioning input at all, so
+        # requiring those three made every Wan job look prompt-less.
         if not any(isinstance(inp.get(k), list)
-                   for k in ("positive", "negative", "conditioning")):
+                   for k in ("positive", "negative", "conditioning") + _EMBED_KEYS):
             continue
         (detailers if is_detailer else samplers).append((nid, node))
     return samplers, detailers
@@ -192,7 +209,18 @@ def _extract_prompts(wf: dict) -> list[dict]:
         # only when this node was reached by following a text link (via_link)
         # — i.e. it is a confirmed string provider — so a stray string-typed
         # `value` on an unrelated node isn't mistaken for a prompt.
-        for key in (_TEXT_KEYS + _PROVIDER_KEYS if via_link else _TEXT_KEYS):
+        # Polarity-specific direct prompts first, so a node carrying BOTH
+        # positive_prompt and negative_prompt returns the half we asked for
+        # instead of whichever key happens to come first.
+        pol_key = _POLARITY_PROMPT_KEYS.get(polarity)
+        if pol_key:
+            val = inp.get(pol_key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        keys = _TEXT_KEYS + _DIRECT_PROMPT_KEYS
+        if via_link:
+            keys = keys + _PROVIDER_KEYS
+        for key in keys:
             val = inp.get(key)
             if isinstance(val, str) and val.strip():
                 return val.strip()
@@ -217,7 +245,8 @@ def _extract_prompts(wf: dict) -> list[dict]:
         # path cycles without letting one branch starve a sibling that shares
         # an upstream node (diamond-shaped conditioning graphs).
         for key, val in inp.items():
-            if "cond" not in key.lower() and key != polarity:
+            if ("cond" not in key.lower() and key != polarity
+                    and key not in _EMBED_KEYS):
                 continue
             got = _resolve(val, polarity, set(seen), depth + 1)
             if got:
@@ -245,8 +274,11 @@ def _extract_prompts(wf: dict) -> list[dict]:
     primary_id = samplers[0][0] if samplers else None
     for nid, node in samplers + detailers:
         inp = node.get("inputs", {}) or {}
-        pos = _cap(_resolve(inp.get("positive") or inp.get("conditioning"), "positive", set()))
-        neg = _cap(_resolve(inp.get("negative"), "negative", set()))
+        pos = _cap(_resolve(
+            inp.get("positive") or inp.get("conditioning") or inp.get("text_embeds"),
+            "positive", set()))
+        neg = _cap(_resolve(inp.get("negative") or inp.get("text_embeds"),
+                            "negative", set()))
         if (not pos and not neg) or (pos, neg) in seen_pairs:
             continue
         seen_pairs.add((pos, neg))
