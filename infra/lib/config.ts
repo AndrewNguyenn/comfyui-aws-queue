@@ -272,8 +272,14 @@ export const APP_CONFIG: AppConfig = {
       // alongside CUDA context and the mount-s3 page cache. 4xlarge doubles RAM
       // to 128 GB for ~20% more on spot ($2.33 vs $1.94) and carries the same
       // L40S, so this buys headroom rather than GPU.
+      // NOTE: this fleet uses price-capacity-optimized like the others, and that
+      // strategy IGNORES the order below — it picks the cheapest pool with
+      // capacity. Leaving g6e.2xlarge in the list therefore does not make it a
+      // "fallback", it makes it the default, which is how the first attempt
+      // landed on 64 GB and OOMed. Every entry here must be a size that can
+      // actually run the job, so the only fallback is a LARGER one.
       primaryInstanceType: 'g6e.4xlarge',
-      fallbackInstanceTypes: ['g6e.2xlarge'],
+      fallbackInstanceTypes: ['g6e.8xlarge'],
       // 45 GiB of weights land on the NVMe instance store, not this volume,
       // but the ~26 GB container image is extracted here on every cold boot.
       rootVolumeGb: 250,
