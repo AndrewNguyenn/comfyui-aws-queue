@@ -521,8 +521,18 @@ export class ComputeStack extends Stack {
       //     box (accepted — see config.ts fallbackInstanceTypes).
       //   - video: keep the 28672 hard cap — always runs on instances with
       //     enough RAM; bounds it against mount-s3's host-side RSS.
-      memoryReservationMiB: fleetName === 'image' ? 11264 : 24576,
-      memoryLimitMiB: fleetName === 'image' ? undefined : 28672,
+      //   - minimax: NO hard cap, like image. This branch used to be a
+      //     two-way image/other split, so minimax silently inherited video's
+      //     28 GiB cap — and MiniMax H3 loads ~50 GiB of weights (25.3 text
+      //     encoder + 19.5 transformer + 4.9 video VAE). The cgroup OOM-killer
+      //     therefore SIGKILLed ComfyUI (rc=-9) at 28 GiB no matter how large
+      //     the host was; a 64 GB box and a 256 GB box failed identically,
+      //     which is the tell that the limit was the container's, not the
+      //     machine's. Every instance type in this fleet is >= 128 GB, so the
+      //     cap has nothing useful to protect.
+      memoryReservationMiB:
+        fleetName === 'image' ? 11264 : fleetName === 'minimax' ? 49152 : 24576,
+      memoryLimitMiB: fleetName === 'video' ? 28672 : undefined,
       essential: true,
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: fleetName,
