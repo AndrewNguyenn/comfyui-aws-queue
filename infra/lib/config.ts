@@ -264,8 +264,16 @@ export const APP_CONFIG: AppConfig = {
       // buys headroom rather than GPU. xlarge stays as a fallback for a
       // 2xlarge capacity drought — it may work, it is just not worth betting a
       // 15-minute cold start on.
-      primaryInstanceType: 'g6e.2xlarge',
-      fallbackInstanceTypes: ['g6e.xlarge'],
+      // 2026-08-20: g6e.2xlarge (64 GB) was still not enough — the first real
+      // job died with rc=-9 (SIGKILL, the kernel OOM killer) while loading the
+      // transformer on top of an already-resident 25.9 GB text encoder. The
+      // stack streams ~49.7 GiB of weights (25.3 encoder + 19.5 transformer +
+      // 4.9 video VAE) through system RAM, which does not fit in 64 GB
+      // alongside CUDA context and the mount-s3 page cache. 4xlarge doubles RAM
+      // to 128 GB for ~20% more on spot ($2.33 vs $1.94) and carries the same
+      // L40S, so this buys headroom rather than GPU.
+      primaryInstanceType: 'g6e.4xlarge',
+      fallbackInstanceTypes: ['g6e.2xlarge'],
       // 45 GiB of weights land on the NVMe instance store, not this volume,
       // but the ~26 GB container image is extracted here on every cold boot.
       rootVolumeGb: 250,
