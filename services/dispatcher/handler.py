@@ -53,6 +53,13 @@ VIDEO_QUEUE_URL = os.environ["VIDEO_QUEUE_URL"]
 # video work instead of failing on import; MiniMax falls back to the video
 # queue in that case, which is wrong-but-visible rather than a hard outage.
 MINIMAX_QUEUE_URL = os.environ.get("MINIMAX_QUEUE_URL", "")
+
+# Fleets that publish /object_info and /extensions, and whose per-fleet caches
+# the editor reads. "minimax" was missing, so its workers logged
+# "fleet must be image|video" on every boot and their node list never reached
+# the editor — harmless to a running job, but it means the MiniMax nodes are
+# invisible in the editor's node picker.
+KNOWN_FLEETS = ("image", "video", "minimax")
 REAPER_QUEUE_URL = os.environ.get("REAPER_QUEUE_URL", "")  # zombie-sweeper wake queue
 OUTPUTS_BUCKET = os.environ.get("OUTPUTS_BUCKET", "")  # Storage for userdata + settings
 WS_TICKET_SECRET_ARN = os.environ.get("WS_TICKET_SECRET_ARN", "")
@@ -409,6 +416,9 @@ def _post_prompt(event: dict) -> dict:
         })
 
     explicit_type = body.get("type")
+    # job_type is the QUEUE class (image|video), not a fleet name — MiniMax jobs
+    # are type "video" and are steered to their own queue by minimax_built
+    # below. Do not widen this to KNOWN_FLEETS.
     if explicit_type in ("image", "video"):
         job_type = explicit_type
     else:
@@ -641,7 +651,7 @@ def _build_object_info() -> dict:
     a typical install).
     """
     merged: dict[str, Any] = {}
-    for fleet in ("image", "video"):
+    for fleet in KNOWN_FLEETS:
         try:
             r = ddb.get_item(TableName=OBJECT_INFO_TABLE, Key={"fleet": {"S": fleet}})
             item = r.get("Item")
@@ -1284,7 +1294,7 @@ def _get_extensions() -> dict:
     """Return merged extension list from both fleets."""
     merged: list[str] = []
     seen: set[str] = set()
-    for fleet in ("image", "video"):
+    for fleet in KNOWN_FLEETS:
         try:
             r = ddb.get_item(TableName=OBJECT_INFO_TABLE, Key={"fleet": {"S": fleet}})
             item = r.get("Item")
@@ -1304,7 +1314,7 @@ def _post_internal_extensions(event: dict) -> dict:
     body = json.loads(event.get("body") or "{}")
     fleet = body.get("fleet")
     extensions = body.get("extensions")
-    if fleet not in ("image", "video") or not isinstance(extensions, list):
+    if fleet not in KNOWN_FLEETS or not isinstance(extensions, list):
         return _resp(400, {"error": "fleet must be image|video, extensions must be list"})
     # Update the fleet's row in the object_info table with the extensions list.
     # We use UpdateItem rather than PutItem so we don't clobber the
@@ -1329,7 +1339,7 @@ def _post_internal_object_info(event: dict) -> dict:
     body = json.loads(event.get("body") or "{}")
     fleet = body.get("fleet")
     object_info = body.get("object_info")
-    if fleet not in ("image", "video") or not isinstance(object_info, dict):
+    if fleet not in KNOWN_FLEETS or not isinstance(object_info, dict):
         return _resp(400, {"error": "fleet must be image|video, object_info must be dict"})
     if not OUTPUTS_BUCKET:
         return _resp(500, {"error": "OUTPUTS_BUCKET unset"})

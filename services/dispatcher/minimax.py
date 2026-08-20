@@ -25,10 +25,16 @@ because each one silently produces garbage rather than an error:
      ``ref_image_0`` is what the prompt calls ``<Picture 1>``. Getting this
      backwards misattributes every reference in a multi-shot script.
 
-Note on the reference inputs: ``ref_images`` is an Autogrow input, which the
-frontend displays as ``ref_images.ref_image_0`` but which serialises FLAT on the
-node as ``ref_image_0`` (prefix ``ref_image_``, slots 0-8). Nesting them under a
-``ref_images`` dict looks right and silently drops every reference.
+Note on the reference inputs: ``ref_images`` is an Autogrow input. Its slot
+names (``ref_image_0`` .. ``ref_image_8``) are what the SCHEMA declares, for the
+editor and for validation — but ``execute()`` takes the group as a single
+``ref_images`` dict, so that is what an API-format prompt must send:
+
+    "ref_images": {"ref_image_0": ["10", 0]}
+
+Sending the slots flat on the node instead produces
+``execute() got an unexpected keyword argument 'ref_image_0'`` — ComfyUI does
+not regroup them.
 
 The build never raises: any failure returns None and leaves the caller's
 workflow intact.
@@ -65,7 +71,7 @@ _N_UNET = "1"
 _N_CLIP = "2"
 _N_REF_LOAD = "10"
 _N_REF2V = "20"
-_REF_SLOT_PREFIX = "ref_image_"   # Autogrow slots 0..8
+_REF_GROUP = "ref_images"        # Autogrow group; slots ref_image_0..8 live inside it
 _N_NOISE = "30"
 _N_SCHED = "32"
 _N_VIDEO = "50"

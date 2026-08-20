@@ -52,10 +52,12 @@
       "height": 768,
       "length": 124,
       "ref_image_size": "match",
-      "ref_image_0": [
-        "10",
-        0
-      ]
+      "ref_images": {
+        "ref_image_0": [
+          "10",
+          0
+        ]
+      }
     }
   },
   "30": {

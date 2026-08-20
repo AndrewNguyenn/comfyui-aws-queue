@@ -47,9 +47,20 @@ def test_links_resolve_and_nothing_is_orphaned():
         if i in seen:
             return
         seen.add(i)
+        def links(val):
+            # links can be nested inside an Autogrow group dict, not only at
+            # the top level of inputs — missing that made this test report a
+            # false orphan and sent me "fixing" a correct template.
+            if isinstance(val, list) and len(val) == 2 and isinstance(val[0], str):
+                yield val[0]
+            elif isinstance(val, dict):
+                for sub in val.values():
+                    yield from links(sub)
+
         for v in wf[i]["inputs"].values():
-            if isinstance(v, list) and len(v) == 2 and v[0] in wf:
-                walk(v[0])
+            for dep in links(v):
+                if dep in wf:
+                    walk(dep)
 
     walk(out[0])
     assert seen == set(wf), f"unreachable: {sorted(set(wf) - seen)}"
@@ -120,10 +131,10 @@ def test_picture_1_is_reference_slot_zero():
     # misattributes every reference in a multi-shot script.
     wf = _build()
     ins = wf[minimax._N_REF2V]["inputs"]
-    # Autogrow serialises FLAT ("ref_image_0"), not nested under "ref_images" —
-    # nesting looks correct in the editor and silently drops every reference.
-    assert "ref_images" not in ins
-    assert ins[minimax._REF_SLOT_PREFIX + "0"] == [minimax._N_REF_LOAD, 0]
+    # execute() takes the Autogrow group as one ref_images dict; sending the
+    # slots flat on the node raises "unexpected keyword argument 'ref_image_0'".
+    assert "ref_image_0" not in ins
+    assert ins[minimax._REF_GROUP] == {"ref_image_0": [minimax._N_REF_LOAD, 0]}
     assert wf[minimax._N_REF_LOAD]["inputs"]["image"] == REF
 
 
