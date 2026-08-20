@@ -102,6 +102,20 @@ def _handle_zombie(item: dict) -> bool:
     return _give_up(item, attempts)
 
 
+def _is_minimax_job(job_id: str) -> bool:
+    """Read minimax_built from the BASE table (not the GSI, which omits it)."""
+    try:
+        r = ddb.get_item(
+            TableName=JOBS_TABLE,
+            Key={"job_id": {"S": job_id}},
+            ProjectionExpression="minimax_built",
+        )
+        return bool(r.get("Item", {}).get("minimax_built", {}).get("BOOL", False))
+    except Exception as e:  # noqa: BLE001 — fall back to type-based routing
+        print(f"reaper: could not read minimax_built for {job_id}: {e!r}")
+        return False
+
+
 def _requeue(item: dict, attempts: int) -> bool:
     """Zombie with retries left → running → queued (attempt_count++), then send
     a fresh job message so a live worker picks it up."""
@@ -109,9 +123,15 @@ def _requeue(item: dict, attempts: int) -> bool:
     job_type = item.get("type", {}).get("S", "image")
     # A MiniMax job's type is "video" (that is what classify_workflow returns),
     # but it must go back to the MiniMax fleet — a video worker cannot hold its
-    # ~45 GiB of weights, so re-queueing by type alone would send a zombie to a
-    # box guaranteed to OOM it.
-    is_minimax = bool(item.get("minimax_built", {}).get("BOOL", False))
+    # ~45 GiB of weights, so re-queueing by type alone sends a zombie to a box
+    # guaranteed to OOM it.
+    #
+    # `item` comes from the jobs-by-status GSI, whose INCLUDE projection carries
+    # only last_heartbeat + attempt_count — minimax_built is NOT in it, so
+    # reading the flag off `item` always saw False and quietly routed every
+    # MiniMax zombie to the video queue. Read the base table instead. This costs
+    # one extra GetItem, and only on the rare zombie path.
+    is_minimax = _is_minimax_job(job_id)
     prev_hb = item.get("last_heartbeat", {}).get("S")
 
     names, values, cond = _zombie_condition(prev_hb)
