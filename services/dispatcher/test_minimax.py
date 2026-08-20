@@ -529,3 +529,23 @@ def test_autoframe_model_override_is_allowlisted():
         minimax._AUTOFRAME_DEFAULTS["model"]
     wf = _autoframed("fl2v", model="zit_v12.safetensors")
     assert wf[minimax._AF_UNET]["inputs"]["unet_name"] == "zit_v12.safetensors"
+
+
+def test_autoframe_does_not_hijack_the_viewers_prompt():
+    # The extractor reads samplers in workflow order and shows the first one's
+    # prompt as "Positive". The spliced KSampler must therefore land AFTER
+    # MiniMax's guider, or the viewer captions every clip with the still's
+    # prompt instead of the shot script — the exact "no prompt recorded" class
+    # of bug the video-prompt extraction work fixed.
+    import extract
+    wf = minimax.maybe_build_minimax(
+        {"prompt": "SHOT SCRIPT", "mode": "fl2v",
+         "autoframe": {"prompt": "STILL PROMPT"}}, None)
+    parsed = extract._parse_workflow(json.dumps(wf))
+    prompts = extract._extract_prompts(parsed)
+    assert prompts[0]["text"] == "SHOT SCRIPT", prompts
+    # The still is still recorded, just second — it is genuinely useful to see
+    # what painted frame 0.
+    assert any(p["text"] == "STILL PROMPT" for p in prompts[1:]), prompts
+    # And the job is still attributed to the video model, not Z-Image.
+    assert "minimax" in extract._extract_model(parsed)
