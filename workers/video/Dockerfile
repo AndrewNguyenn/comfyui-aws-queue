@@ -226,13 +226,18 @@ RUN cd /opt/comfy && python -c "import comfy.utils; print('comfy.utils import OK
 # guards against a rename.
 RUN cd /opt/comfy && python -c "import ast; src=open('comfy_extras/nodes_minimax_h3.py').read(); ast.parse(src); assert 'MiniMaxH3ReferenceToVideo' in src, 'node id renamed'; print('nodes_minimax_h3 parses and declares MiniMaxH3ReferenceToVideo')"
 
-# ---------- Verify torchaudio survived the bake ----------
+# ---------- Restore the foundation after the bake ----------
+# The bake's last step re-installs opencv and transformers to repair whatever a
+# node did; those repairs now run under the constraint file, but re-pin numpy
+# here anyway — this is the check that caught numpy 2.2.6 coming back, and it
+# costs nothing to make the guarantee unconditional.
 # Belt and braces: COMFY_KEEP_TORCHAUDIO should stop the foundation repair from
 # touching it, but a custom node's requirements could still pull a different
 # wheel. Fail the BUILD here rather than lose every MiniMax node in production.
 # Re-apply the patch first: a node pack that reinstalled torchaudio would have
 # restored the unpatched (fatal) extension load.
-RUN python3 /tmp/patch_torchaudio_ext.py \
+RUN pip install --no-deps --force-reinstall "numpy==${NUMPY_VERSION}" \
+    && python3 /tmp/patch_torchaudio_ext.py \
     && python -c "import numpy, torch, cv2; \
 assert numpy.__version__.startswith('1.'), 'numpy dragged forward: ' + numpy.__version__; \
 torch.from_numpy(numpy.zeros(3, dtype='float32')); \

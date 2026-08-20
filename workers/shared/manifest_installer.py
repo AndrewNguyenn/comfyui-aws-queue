@@ -170,8 +170,18 @@ def _force_clean_opencv() -> None:
         _run(["pip", "uninstall", "-y", *_OPENCV_PKGS])
     except subprocess.CalledProcessError:
         pass
+    # Under the constraint file, same as a node install. Without it pip is free
+    # to satisfy opencv's own numpy requirement by pulling numpy 2.x, which
+    # breaks the C bridge of everything compiled against NumPy 1.x — torch's
+    # included ("RuntimeError: Numpy is not available"). This repair runs LAST,
+    # so an unconstrained upgrade here silently undoes the pin every other
+    # install respected.
+    cf = _constraints_file()
+    cmd = ["pip", "install", "--no-input", _OPENCV_PIN]
+    if cf:
+        cmd += ["--constraint", cf]
     try:
-        _run(["pip", "install", "--no-input", _OPENCV_PIN])
+        _run(cmd)
     except subprocess.CalledProcessError as e:
         log.error("opencv reinstall failed (rc=%d)", e.returncode)
     _patch_cv2_typing()
@@ -216,8 +226,12 @@ def _force_transformers() -> None:
     FAILS. Node installs keep upgrading transformers; force it back to a
     torch-2.5-era release as the last step, after everything else."""
     log.info("forcing transformers → %s", _TRANSFORMERS_PIN)
+    cf = _constraints_file()
+    cmd = ["pip", "install", "--no-input", _TRANSFORMERS_PIN]
+    if cf:
+        cmd += ["--constraint", cf]  # see _force_clean_opencv: unconstrained, this can pull numpy 2.x
     try:
-        _run(["pip", "install", "--no-input", _TRANSFORMERS_PIN])
+        _run(cmd)
     except subprocess.CalledProcessError as e:
         log.error("transformers pin failed (rc=%d)", e.returncode)
 
