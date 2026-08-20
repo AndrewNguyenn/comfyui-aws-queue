@@ -254,8 +254,18 @@ export const APP_CONFIG: AppConfig = {
     // from v0.30.0, and that image is now v0.33.0.
     minimax: {
       fleetName: 'minimax',
-      primaryInstanceType: 'g6e.xlarge',
-      fallbackInstanceTypes: ['g6e.2xlarge'],
+      // g6e.2xlarge (64 GB RAM) is primary, not g6e.xlarge (32 GB), for the
+      // same reason the video fleet left g5.xlarge: the binding constraint is
+      // SYSTEM memory, not VRAM. ComfyUI parks the 25.3 GiB int8_convrot text
+      // encoder on the CPU (text_encoder_initial_device keeps an encoder on the
+      // GPU only when size * 1.2 < free VRAM, which 27 GB never satisfies), and
+      // 25.3 GiB inside 32 GB leaves ~6 GB for the OS, ComfyUI and the mount-s3
+      // cache. Both sizes carry the same L40S, so the extra ~$0.35/hr on spot
+      // buys headroom rather than GPU. xlarge stays as a fallback for a
+      // 2xlarge capacity drought — it may work, it is just not worth betting a
+      // 15-minute cold start on.
+      primaryInstanceType: 'g6e.2xlarge',
+      fallbackInstanceTypes: ['g6e.xlarge'],
       // 45 GiB of weights land on the NVMe instance store, not this volume,
       // but the ~26 GB container image is extracted here on every cold boot.
       rootVolumeGb: 250,
