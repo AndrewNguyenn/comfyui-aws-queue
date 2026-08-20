@@ -97,12 +97,20 @@ def lambda_handler(event: dict, _context: Any) -> dict:
 # far past this isn't wildcards, and refusing beats OOM-ing the Lambda.
 _WILDCARDS_MAX_BYTES = 100 * 1024 * 1024
 
+# Impact-Pack reads BOTH .txt and .yaml/.yml wildcards — a YAML pack expresses
+# nested categories one file instead of a directory tree. Restricting the
+# unzip to .txt silently rejected whole packs: the UW wildcard sets are
+# YAML-based and failed with "zip contained no .txt wildcard files" despite
+# being valid. The error now also reports what the archive actually held, so
+# the next mismatch is diagnosable from the message alone.
+_WILDCARD_EXTS = (".txt", ".yaml", ".yml")
+
 
 def _handle_wildcards(file_meta: dict, token: str, total_bytes: int, download_id: str) -> int:
     """Download a CivitAI wildcards file into wildcards/ on the models bucket.
-    A .zip pack is unzipped — each .txt member uploaded under its in-pack path
-    (Impact-Pack supports nested __folder/name__); a bare file goes up as-is.
-    Returns the number of .txt files written."""
+    A .zip pack is unzipped — each wildcard member uploaded under its in-pack
+    path (Impact-Pack supports nested __folder/name__); a bare file goes up
+    as-is. Returns the number of wildcard files written."""
     if total_bytes and total_bytes > _WILDCARDS_MAX_BYTES:
         raise RuntimeError(
             f"wildcards file is {total_bytes // 1024 // 1024} MB — too large; "
@@ -127,7 +135,7 @@ def _handle_wildcards(file_meta: dict, token: str, total_bytes: int, download_id
         count = 0
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             for member in zf.namelist():
-                if member.endswith("/") or not member.lower().endswith(".txt"):
+                if member.endswith("/") or not member.lower().endswith(_WILDCARD_EXTS):
                     continue
                 rel = member.lstrip("/")
                 if not rel or ".." in rel.split("/"):
@@ -140,7 +148,12 @@ def _handle_wildcards(file_meta: dict, token: str, total_bytes: int, download_id
                 )
                 count += 1
         if not count:
-            raise RuntimeError("zip contained no .txt wildcard files")
+            listing = ", ".join(sorted({m.rsplit(".", 1)[-1].lower()
+                                        for m in zf.namelist() if "." in m})) or "none"
+            raise RuntimeError(
+                f"zip contained no wildcard files (accepted: {', '.join(_WILDCARD_EXTS)}; "
+                f"archive holds: {listing})"
+            )
         return count
 
     # A bare file (a single .txt, usually).

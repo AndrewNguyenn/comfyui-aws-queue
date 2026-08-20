@@ -239,3 +239,51 @@ def test_unknown_length_is_refused(monkeypatch):
         assert "content length" in str(e)
     else:
         raise AssertionError("expected RuntimeError")
+
+
+# --- wildcard archive extensions -------------------------------------------
+
+def test_wildcard_exts_cover_yaml_not_just_txt():
+    # Impact-Pack reads .txt and .yaml/.yml; restricting to .txt silently
+    # rejected entire packs (the UW sets are YAML-based).
+    assert ".txt" in worker._WILDCARD_EXTS
+    assert ".yaml" in worker._WILDCARD_EXTS and ".yml" in worker._WILDCARD_EXTS
+
+
+def test_zip_with_yaml_members_is_accepted(monkeypatch):
+    import io, zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("routers/scene.yaml", "a: [b, c]\n")
+        zf.writestr("chars/list.txt", "one\ntwo\n")
+        zf.writestr("readme.md", "ignored")
+    data = buf.getvalue()
+
+    put = []
+    monkeypatch.setattr(worker, "s3", type("S", (), {
+        "put_object": lambda self, **kw: put.append(kw["Key"]),
+    })())
+    monkeypatch.setattr(worker, "_set_status", lambda *a, **k: None)
+    monkeypatch.setattr(worker.http, "request",
+                        lambda *a, **k: type("R", (), {"status": 200, "data": data})())
+    n = worker._handle_wildcards({"name": "pack.zip", "downloadUrl": "u"}, "", len(data), "d")
+    assert n == 2, put
+    assert any(k.endswith("routers/scene.yaml") for k in put), put
+    assert not any(k.endswith("readme.md") for k in put), put
+
+
+def test_zip_with_no_wildcards_reports_what_it_held(monkeypatch):
+    import io, zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("node.py", "x = 1")
+    data = buf.getvalue()
+    monkeypatch.setattr(worker, "_set_status", lambda *a, **k: None)
+    monkeypatch.setattr(worker.http, "request",
+                        lambda *a, **k: type("R", (), {"status": 200, "data": data})())
+    try:
+        worker._handle_wildcards({"name": "p.zip", "downloadUrl": "u"}, "", len(data), "d")
+    except RuntimeError as e:
+        assert "py" in str(e), str(e)   # names the extensions actually present
+    else:
+        raise AssertionError("expected RuntimeError")
