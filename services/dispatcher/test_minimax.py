@@ -419,14 +419,31 @@ def test_autoframe_shares_the_clips_seed():
 
 def test_autoframe_uses_only_core_comfyui_nodes():
     # This runs on the VIDEO worker image, whose baked custom-node set is three
-    # packs wide. A rgthree/Impact node here would fail at graph validation.
+    # packs wide. The image fleet's Krea graph samples with RES4LYF's
+    # ClownsharKSampler_Beta, which is NOT among them — leaking it in here would
+    # fail graph validation on every autoframed clip.
     core = {"UNETLoader", "CLIPLoader", "CLIPSetLastLayer", "VAELoader",
             "CLIPTextEncode", "EmptySD3LatentImage", "KSampler", "VAEDecode",
-            "LoraLoader"}
-    wf = _autoframed("fl2v", loras=[{"name": "x.safetensors", "strength": 0.6}])
-    for nid, node in wf.items():
-        if int(nid) >= 9100:
-            assert node["class_type"] in core, f"{nid} {node['class_type']}"
+            "LoraLoader", "LoraLoaderModelOnly"}
+    for model in ("zit_v12.safetensors", "krea2_raw_fp8_scaled.safetensors"):
+        wf = _autoframed("fl2v", model=model,
+                         loras=[{"name": "x.safetensors", "strength": 0.6}])
+        for nid, node in wf.items():
+            if int(nid) >= 9100:
+                assert node["class_type"] in core, f"{model} {nid} {node['class_type']}"
+
+
+def test_autoframe_trigger_token_is_owned_by_the_family():
+    # A prompt written for one family must never arrive carrying the other's
+    # token, so the dispatcher prepends it rather than the caller.
+    z = _autoframed("fl2v", model="zit_v12.safetensors")
+    assert z[minimax._AF_POS]["inputs"]["text"].startswith("igbaddie,")
+    # Krea's house stack has no trigger — one would be a junk token.
+    assert "igbaddie" not in _autoframed("fl2v")[minimax._AF_POS]["inputs"]["text"]
+    # And it is not doubled when the prompt already has it.
+    once = _autoframed("fl2v", model="zit_v12.safetensors",
+                       prompt="igbaddie, a photo")[minimax._AF_POS]["inputs"]["text"]
+    assert once.count("igbaddie") == 1, once
 
 
 def test_autoframe_loras_ride_the_clip_as_well_as_the_model():
@@ -513,22 +530,73 @@ def test_handler_accepts_autoframe_without_an_upload():
     assert resp["statusCode"] != 400, resp["body"]
 
 
-def test_autoframe_default_model_is_a_real_zimage_checkpoint():
+def test_autoframe_default_model_is_a_real_catalogued_checkpoint():
     # A UNETLoader pointed at a name the catalog does not have fails the job at
     # load time, after MiniMax's weights are already resident.
-    import zimage
-    assert zimage._normalize_model(
-        minimax._AUTOFRAME_DEFAULTS["model"]) in zimage.ZIMAGE_MODELS
+    assert minimax.autoframe_family(minimax._AUTOFRAME_DEFAULT_MODEL) is not None
 
 
 def test_autoframe_model_override_is_allowlisted():
     # The whole model catalog is mounted on this fleet, so a free-form model
     # name here would let a caller load anything into the UNETLoader.
-    wf = _autoframed("fl2v", model="krea2_raw_fp8_scaled.safetensors")
+    wf = _autoframed("fl2v", model="../../etc/passwd")
     assert wf[minimax._AF_UNET]["inputs"]["unet_name"] == \
-        minimax._AUTOFRAME_DEFAULTS["model"]
-    wf = _autoframed("fl2v", model="zit_v12.safetensors")
-    assert wf[minimax._AF_UNET]["inputs"]["unet_name"] == "zit_v12.safetensors"
+        minimax._AUTOFRAME_DEFAULT_MODEL
+    wf = _autoframed("fl2v", model="minimax_h3_fl2va_pruned_fp8_scaled.safetensors")
+    assert wf[minimax._AF_UNET]["inputs"]["unet_name"] == \
+        minimax._AUTOFRAME_DEFAULT_MODEL
+    for ok in ("zit_v12.safetensors", "krea2_raw_fp8_scaled.safetensors"):
+        wf = _autoframed("fl2v", model=ok)
+        assert wf[minimax._AF_UNET]["inputs"]["unet_name"] == ok
+
+
+def test_autoframe_family_follows_the_model_not_the_caller():
+    # Pairing a Krea checkpoint with Z-Image's text encoder produces a graph
+    # that loads and then generates noise, so the family is derived, never given.
+    krea = _autoframed("fl2v", model="krea2_raw_fp8_scaled.safetensors")
+    zimg = _autoframed("fl2v", model="zit_v12.safetensors")
+    assert krea[minimax._AF_CLIP]["inputs"]["type"] == "krea2"
+    assert zimg[minimax._AF_CLIP]["inputs"]["type"] == "lumina2"
+    assert krea[minimax._AF_VAE]["inputs"]["vae_name"] != \
+        zimg[minimax._AF_VAE]["inputs"]["vae_name"]
+    # Z-Image clamps the CLIP layer; Krea does not have that node at all.
+    assert minimax._AF_CLIPSET in zimg and minimax._AF_CLIPSET not in krea
+
+
+def test_krea_autoframe_drops_turbo_for_a_prebaked_checkpoint():
+    # RedCraft RedMix already has the distillation merged in; applying the turbo
+    # LoRA again overcooks it, and the amateur slider's 1.5 then reads as grain.
+    import krea
+    assert krea._normalize_model(minimax._AUTOFRAME_DEFAULT_MODEL) \
+        in krea.KREA_PREBAKED_TURBO
+    wf = _autoframed("fl2v")
+    baked = [n["inputs"] for i, n in sorted(wf.items())
+             if n["class_type"] == "LoraLoaderModelOnly"]
+    names = [b["lora_name"] for b in baked]
+    assert not any("turbo" in n.lower() for n in names), names
+    slider = [b for b in baked if "AmateurSlider" in b["lora_name"]][0]
+    assert slider["strength_model"] == krea._PREBAKED_SLIDER_STRENGTH
+
+
+def test_krea_autoframe_keeps_the_full_stack_on_a_raw_checkpoint():
+    wf = _autoframed("fl2v", model="krea2_raw_fp8_scaled.safetensors")
+    baked = [n["inputs"] for i, n in sorted(wf.items())
+             if n["class_type"] == "LoraLoaderModelOnly"]
+    names = [b["lora_name"] for b in baked]
+    assert any("turbo" in n.lower() for n in names), names
+    slider = [b for b in baked if "AmateurSlider" in b["lora_name"]][0]
+    assert slider["strength_model"] == 1.5
+
+
+def test_krea_autoframe_polishes_with_the_second_pass():
+    # The image fleet's look is calibrated with a 2-step 0.2-denoise refiner.
+    wf = _autoframed("fl2v")
+    refine = wf[minimax._AF_REFINE]["inputs"]
+    assert refine["denoise"] == 0.2
+    assert refine["latent_image"] == [minimax._AF_KSAMPLER, 0]
+    assert wf[minimax._AF_DECODE]["inputs"]["samples"] == [minimax._AF_REFINE, 0]
+    # Z-Image is a single pass — no stray refiner node.
+    assert minimax._AF_REFINE not in _autoframed("fl2v", model="zit_v12.safetensors")
 
 
 def test_autoframe_does_not_hijack_the_viewers_prompt():

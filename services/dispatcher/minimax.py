@@ -46,8 +46,10 @@ import json
 import math
 import os
 import random
+import re
 from typing import Optional
 
+from krea import KREA_MODELS, KREA_PREBAKED_TURBO, _PREBAKED_SLIDER_STRENGTH
 from zimage import ZIMAGE_MODELS, _normalize_model
 
 _TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "minimax_templates")
@@ -249,36 +251,76 @@ def maybe_build_minimax(
 # Both MiniMax nodes take their image as an OPTIONAL input, so a clip with no
 # upload is legal — it just becomes text-to-video, and the model invents a face
 # from scratch. That is worse than it sounds here: this app already has a
-# curated character pool, a natural-prompt library and an always-on house LoRA,
-# and none of it reaches a T2V clip.
+# curated character pool, a natural-prompt library and per-family house LoRA
+# stacks, and none of it reaches a T2V clip.
 #
-# So instead of dropping the image, we GENERATE it: a small Z-Image text-to-
-# image graph is spliced into the same workflow, and its decode feeds
-# ``first_frame``. One job, one queue, one GPU — ComfyUI unloads Z-Image before
-# MiniMax's 20 GiB transformer loads, so the peak is unchanged and the cost is
-# a handful of seconds against a multi-minute sample.
+# So instead of dropping the image, we GENERATE it: a small text-to-image graph
+# is spliced into the same workflow, and its decode feeds ``first_frame``. One
+# job, one queue, one GPU — ComfyUI unloads the still model before MiniMax's
+# 20 GiB transformer loads, so the peak is unchanged and the cost is a handful
+# of seconds against a multi-minute sample.
 #
-# Every node here is core ComfyUI (no custom pack), which matters because this
-# runs on the VIDEO worker image, whose baked node set is deliberately small.
-_AUTOFRAME_DEFAULTS = {
-    # Diving Z-Image Turbo v7.0 — the newest checkpoint in the allowlist. fp16
-    # rather than the fleet's usual fp8 default: that default exists because the
-    # image path's fp16 stack plus a 3x SD-upscale overran the worker cap, and
-    # this is one 768x1152 sample with no upscale at all. Frame 0 is the
-    # identity anchor for every shot that follows, so it is the one place worth
-    # the extra weights.
-    "model": "divingZImageTurbo_v70Fp16.safetensors",
-    "clip": "qwen_3_4b_fp8_mixed.safetensors",
-    "clip_type": "lumina2",
-    "clip_layer": -2,
-    "vae": "ae_zimgturbo.safetensors",
-    "steps": 11,
-    "cfg": 1.5,
-    "sampler": "euler",
-    "scheduler": "simple",
+# Two families are supported, because the image fleet runs two architectures
+# and they share nothing: different text encoder, different CLIP type, different
+# VAE, different sampler settings, different baked LoRA stack. The family is
+# derived from the model rather than passed in, so the caller cannot pair a
+# Krea checkpoint with Z-Image's text encoder.
+#
+# One deliberate divergence from the image fleet: its Krea graph samples with
+# RES4LYF's ClownsharKSampler_Beta, and RES4LYF is NOT baked into the video
+# worker image (three packs: KJNodes, WanAnimatePreprocess, SCAIL-pose). Every
+# node here is therefore core ComfyUI, with res_multistep/deis standing in for
+# res_2s/deis_3m — same exponential-integrator family, not bit-identical. If
+# frame 0 needs to match a gallery image exactly, RES4LYF has to be baked into
+# workers/video and this recipe switched over.
+_AUTOFRAME_FAMILIES = {
+    # Krea 2 — Qwen-Image-like. Note the VAE: Krea 2 decodes through the Wan 2.1
+    # VAE, which this fleet already holds for SCAIL, so it costs no new weights.
+    "krea": {
+        "clip": "qwen3vl_4b_bf16.safetensors",
+        "clip_type": "krea2",
+        "clip_layer": None,
+        "vae": "wan21_vae_fp32.safetensors",
+        "steps": 8,
+        "cfg": 1.4,          # not the published 1.0: at 1.0 the negative is inert
+        "sampler": "res_multistep",
+        "scheduler": "beta",
+        # The image fleet's second pass: 2 steps at 0.2 denoise, a polish rather
+        # than a generation. Cheap, and the look is calibrated with it present.
+        "refine": {"steps": 2, "denoise": 0.2, "sampler": "deis", "scheduler": "beta"},
+        "lora_class": "LoraLoaderModelOnly",
+        # Chain order matters and mirrors krea_templates/Krea2Simple.api.json.
+        # `role` is what makes an entry conditional; see KREA_PREBAKED_TURBO.
+        "baked": (
+            {"name": "krea2_turbo_lora_rank_64_bf16.safetensors", "strength": 0.6, "role": "turbo"},
+            {"name": "krea2filterbypass.safetensors", "strength": 1.0, "role": None},
+            {"name": "AmateurSlider-KREA2_v1.safetensors", "strength": 1.5, "role": "slider"},
+        ),
+        "trigger": "",
+    },
+    # Z-Image — Lumina2-like, and the only family whose house LoRA has a CLIP
+    # half, hence the full LoraLoader rather than the model-only variant.
+    "zimage": {
+        "clip": "qwen_3_4b_fp8_mixed.safetensors",
+        "clip_type": "lumina2",
+        "clip_layer": -2,
+        "vae": "ae_zimgturbo.safetensors",
+        "steps": 11,
+        "cfg": 1.5,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "refine": None,
+        "lora_class": "LoraLoader",
+        "baked": ({"name": "zimage-igbaddie_pruned.safetensors", "strength": 0.6, "role": None},),
+        "trigger": "igbaddie",
+    },
 }
-# Mirrors the image fleet's Z-Image negative. Short on purpose: Z-Image runs at
-# cfg 1.5, where a long negative costs more than it corrects.
+# RedCraft RedMix 3.0 (Krea 2), the checkpoint the image side is currently on.
+# It is in KREA_PREBAKED_TURBO, so its turbo pass is dropped and the amateur
+# slider drops with it — see krea.py for why those two are one fact.
+_AUTOFRAME_DEFAULT_MODEL = "redcraftMinimaxH3REDMIX_30Krea2.safetensors"
+# Short on purpose: both families sample at cfg <= 1.5, where a long negative
+# costs more than it corrects.
 _AUTOFRAME_NEGATIVE = (
     "blurry, low quality, worst quality, watermark, text, signature, "
     "deformed hands, extra fingers, extra limbs, mutated"
@@ -294,8 +336,25 @@ _AF_NEG = "9106"
 _AF_LATENT = "9107"
 _AF_KSAMPLER = "9108"
 _AF_DECODE = "9109"
+_AF_REFINE = "9110"
+_AF_BAKED_BASE = 9111
 _AF_LORA_BASE = 9120
 _AF_MAX_LORAS = 8
+
+
+def autoframe_family(model: str) -> Optional[str]:
+    """Which text-to-image recipe a checkpoint belongs to, or None if neither.
+
+    Doubles as the allowlist: this name goes straight into a UNETLoader and the
+    whole model catalog is mounted on this fleet, so anything not recognised as
+    one of our two image families is refused rather than loaded.
+    """
+    n = _normalize_model(model or "")
+    if n in KREA_MODELS:
+        return "krea"
+    if n in ZIMAGE_MODELS:
+        return "zimage"
+    return None
 
 
 def _autoframe_loras(options: dict) -> list:
@@ -321,49 +380,92 @@ def _autoframe_loras(options: dict) -> list:
     return out
 
 
+def _baked_stack(fam: dict, model: str) -> list:
+    """The family's house LoRAs for this checkpoint.
+
+    A turbo/lightning checkpoint already has that distillation merged in, so
+    applying the turbo LoRA again overcooks it — and the amateur slider's 1.5 is
+    calibrated to cancel plasticity that is then no longer being introduced,
+    landing as grain instead. Both adjustments come from the same fact, which is
+    why krea.py keeps them welded and this reads them from there.
+    """
+    prebaked = _normalize_model(model) in KREA_PREBAKED_TURBO
+    out = []
+    for entry in fam["baked"]:
+        if prebaked and entry["role"] == "turbo":
+            continue
+        strength = entry["strength"]
+        if prebaked and entry["role"] == "slider":
+            strength = _PREBAKED_SLIDER_STRENGTH
+        out.append({"name": entry["name"], "strength": strength})
+    return out
+
+
 def splice_autoframe(wf: dict, mode: str, options: dict,
                      width: int, height: int, seed: int) -> None:
-    """Add a Z-Image T2I subgraph and hand its image to the MiniMax node.
+    """Add a text-to-image subgraph and hand its image to the MiniMax node.
 
     Replaces the template's LoadImage (and, in fl2v, the ImageScale that
     cover-crops for it): the still is rendered AT the video canvas, so there is
     nothing left to crop.
     """
-    o = dict(_AUTOFRAME_DEFAULTS)
-    for k in ("clip", "clip_type", "vae", "sampler", "scheduler"):
-        v = options.get(k)
-        if isinstance(v, str) and v.strip():
-            o[k] = v.strip()
-    # The model override is allowlisted, not free-form: this value goes straight
-    # into a UNETLoader, and the whole catalog is mounted on this fleet.
     model = options.get("model")
-    if isinstance(model, str) and _normalize_model(model) in ZIMAGE_MODELS:
-        o["model"] = model.strip()
-    elif model:
-        print(f"minimax: autoframe model {model!r} is not a Z-Image checkpoint; "
-              f"using {o['model']}")
+    family = autoframe_family(model) if isinstance(model, str) else None
+    if model and family is None:
+        print(f"minimax: autoframe model {model!r} is not a known image "
+              f"checkpoint; using {_AUTOFRAME_DEFAULT_MODEL}")
+    if family is None:
+        model = _AUTOFRAME_DEFAULT_MODEL
+        family = autoframe_family(model)
+    model = model.strip()
+    fam = _AUTOFRAME_FAMILIES[family]
+
+    steps = fam["steps"]
+    cfg = fam["cfg"]
     if options.get("steps") is not None:
-        o["steps"] = max(1, min(50, int(options["steps"])))
+        steps = max(1, min(50, int(options["steps"])))
     if options.get("cfg") is not None:
-        o["cfg"] = max(0.0, min(20.0, float(options["cfg"])))
+        cfg = max(0.0, min(20.0, float(options["cfg"])))
 
     positive = str(options.get("prompt", "") or "").strip()
+    # The trigger token has to appear in the prompt or the house LoRA is weights
+    # loaded for nothing. Owned here rather than by the caller, so a prompt
+    # written for one family never arrives carrying the other's token.
+    trigger = fam["trigger"]
+    if trigger and trigger.lower() not in re.split(r"[\s,]+", positive.lower()):
+        positive = f"{trigger}, {positive}" if positive else trigger
     negative = str(options.get("negative", "") or "").strip() or _AUTOFRAME_NEGATIVE
 
     wf[_AF_UNET] = {"class_type": "UNETLoader",
-                    "inputs": {"unet_name": o["model"], "weight_dtype": "default"}}
+                    "inputs": {"unet_name": model, "weight_dtype": "default"}}
     wf[_AF_CLIP] = {"class_type": "CLIPLoader",
-                    "inputs": {"clip_name": o["clip"], "type": o["clip_type"],
+                    "inputs": {"clip_name": fam["clip"], "type": fam["clip_type"],
                                "device": "default"}}
-    wf[_AF_CLIPSET] = {"class_type": "CLIPSetLastLayer",
-                       "inputs": {"stop_at_clip_layer": int(o["clip_layer"]),
-                                  "clip": [_AF_CLIP, 0]}}
-    wf[_AF_VAE] = {"class_type": "VAELoader", "inputs": {"vae_name": o["vae"]}}
+    clip_src = [_AF_CLIP, 0]
+    if fam["clip_layer"] is not None:
+        wf[_AF_CLIPSET] = {"class_type": "CLIPSetLastLayer",
+                           "inputs": {"stop_at_clip_layer": int(fam["clip_layer"]),
+                                      "clip": [_AF_CLIP, 0]}}
+        clip_src = [_AF_CLIPSET, 0]
+    wf[_AF_VAE] = {"class_type": "VAELoader", "inputs": {"vae_name": fam["vae"]}}
 
-    # LoRAs ride between the loaders and every consumer, so the text encoders
-    # see the trained tokens too — a model-only chain silently drops the half
-    # of a character LoRA that lives in the CLIP.
-    model_src, clip_src = [_AF_UNET, 0], [_AF_CLIPSET, 0]
+    model_src = [_AF_UNET, 0]
+    lora_class = fam["lora_class"]
+    for i, lora in enumerate(_baked_stack(fam, model)):
+        nid = str(_AF_BAKED_BASE + i)
+        inputs = {"lora_name": lora["name"], "strength_model": lora["strength"],
+                  "model": model_src}
+        if lora_class == "LoraLoader":
+            inputs["strength_clip"] = lora["strength"]
+            inputs["clip"] = clip_src
+        wf[nid] = {"class_type": lora_class, "inputs": inputs}
+        model_src = [nid, 0]
+        if lora_class == "LoraLoader":
+            clip_src = [nid, 1]
+
+    # Caller LoRAs layer ON TOP of the house stack, and always ride the CLIP too
+    # — a model-only chain silently drops the half of a character LoRA that
+    # lives in the text encoder, so the trained token then means nothing.
     for i, lora in enumerate(_autoframe_loras(options)):
         nid = str(_AF_LORA_BASE + i)
         wf[nid] = {"class_type": "LoraLoader", "inputs": {
@@ -381,13 +483,24 @@ def splice_autoframe(wf: dict, mode: str, options: dict,
     wf[_AF_LATENT] = {"class_type": "EmptySD3LatentImage",
                       "inputs": {"width": width, "height": height, "batch_size": 1}}
     wf[_AF_KSAMPLER] = {"class_type": "KSampler", "inputs": {
-        "seed": seed, "steps": o["steps"], "cfg": o["cfg"],
-        "sampler_name": o["sampler"], "scheduler": o["scheduler"], "denoise": 1.0,
+        "seed": seed, "steps": steps, "cfg": cfg,
+        "sampler_name": fam["sampler"], "scheduler": fam["scheduler"], "denoise": 1.0,
         "model": model_src, "positive": [_AF_POS, 0], "negative": [_AF_NEG, 0],
         "latent_image": [_AF_LATENT, 0],
     }}
+    sampled = [_AF_KSAMPLER, 0]
+    refine = fam["refine"]
+    if refine:
+        wf[_AF_REFINE] = {"class_type": "KSampler", "inputs": {
+            "seed": seed, "steps": refine["steps"], "cfg": cfg,
+            "sampler_name": refine["sampler"], "scheduler": refine["scheduler"],
+            "denoise": refine["denoise"],
+            "model": model_src, "positive": [_AF_POS, 0], "negative": [_AF_NEG, 0],
+            "latent_image": sampled,
+        }}
+        sampled = [_AF_REFINE, 0]
     wf[_AF_DECODE] = {"class_type": "VAEDecode",
-                      "inputs": {"samples": [_AF_KSAMPLER, 0], "vae": [_AF_VAE, 0]}}
+                      "inputs": {"samples": sampled, "vae": [_AF_VAE, 0]}}
 
     # Hand the generated still to the MiniMax node the same way an upload
     # would arrive, then drop the now-unreachable loader nodes.
