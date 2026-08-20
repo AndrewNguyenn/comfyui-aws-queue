@@ -187,10 +187,17 @@ RUN python3 /tmp/patch_comfy_kitchen.py
 # while ComfyUI still fails to start, which then surfaces only as a production
 # crash-loop — exactly how the comfy_kitchen break was found. comfy.utils pulls
 # in torch, quant_ops and comfy_kitchen, so importing it here turns that class
-# of failure into a failed BUILD. nodes.py init_extra_nodes() then proves the
-# MiniMax node pack actually registers rather than merely existing on disk.
+# of failure into a failed BUILD — it is what caught the comfy_kitchen break.
 RUN cd /opt/comfy && python -c "import comfy.utils; print('comfy.utils import OK')"
-RUN cd /opt/comfy && python -c "import asyncio, nodes; asyncio.run(nodes.init_extra_nodes()); ns=[n for n in nodes.NODE_CLASS_MAPPINGS if 'MiniMaxH3' in n]; print('MiniMax nodes registered:', sorted(ns)); assert 'MiniMaxH3ReferenceToVideo' in ns, sorted(nodes.NODE_CLASS_MAPPINGS)[:20]"
+
+# Node REGISTRATION cannot be verified here: nodes.py imports
+# comfy.diffusers_load -> comfy.sd -> model_management, which calls
+# torch.cuda.current_device() at import time, and CodeBuild has no GPU
+# ("RuntimeError: Found no NVIDIA driver"). So check what is checkable without
+# one — that the module parses and still declares the node id the dispatcher
+# template references. comfy.utils above is the load-bearing check; this only
+# guards against a rename.
+RUN cd /opt/comfy && python -c "import ast; src=open('comfy_extras/nodes_minimax_h3.py').read(); ast.parse(src); assert 'MiniMaxH3ReferenceToVideo' in src, 'node id renamed'; print('nodes_minimax_h3 parses and declares MiniMaxH3ReferenceToVideo')"
 
 # ---------- Verify torchaudio survived the bake ----------
 # Belt and braces: COMFY_KEEP_TORCHAUDIO should stop the foundation repair from
