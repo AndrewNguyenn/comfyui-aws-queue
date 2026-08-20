@@ -262,3 +262,76 @@ def test_minimax_jobs_go_to_the_minimax_queue():
     })})
     assert resp["statusCode"] == 200, resp
     assert sent.get("QueueUrl") == "https://sqs/minimax", sent.get("QueueUrl")
+
+
+# --- fl2v mode -------------------------------------------------------------
+# FL2VA makes the image frame 0 rather than a conditioning reference.
+
+def _fl2v(**opts):
+    return minimax.maybe_build_minimax({"prompt": "a woman turning", "mode": "fl2v", **opts}, REF)
+
+
+def test_fl2v_builds_and_routes_to_video():
+    wf = _fl2v()
+    assert wf is not None
+    assert classify_workflow(wf) == "video"
+
+
+def test_fl2v_uses_the_fl2va_checkpoint_not_ref2va():
+    # Different training, not just a different node — the UNet must switch too.
+    assert "fl2va" in _fl2v()[minimax._N_UNET]["inputs"]["unet_name"]
+    assert "ref2va" in _build()[minimax._N_UNET]["inputs"]["unet_name"]
+
+
+def test_fl2v_wires_the_image_as_frame_zero():
+    wf = _fl2v()
+    ins = wf[minimax._N_REF2V]["inputs"]
+    assert wf[minimax._N_REF2V]["class_type"] == "MiniMaxH3ImageToVideo"
+    assert ins["first_frame"] == [minimax._N_REF_RESIZE, 0]
+    # ref-mode inputs must not leak into fl2v
+    assert "ref_images" not in ins and "ref_image_size" not in ins
+    assert wf[minimax._N_REF_LOAD]["inputs"]["image"] == REF
+
+
+def test_fl2v_cover_crops_before_the_nodes_plain_stretch():
+    # MiniMaxH3ImageToVideo resizes first_frame with crop "disabled" (a plain
+    # stretch), so a mismatched aspect would distort frame 0 and propagate.
+    wf = _fl2v(width=640, height=640)
+    rs = wf[minimax._N_REF_RESIZE]["inputs"]
+    assert rs["crop"] == "center"
+    e = wf[minimax._N_REF2V]["inputs"]
+    assert (rs["width"], rs["height"]) == (e["width"], e["height"])
+
+
+def test_ref_mode_has_no_pre_crop_node():
+    # The pre-crop exists only to defuse FL2VA's stretch; ref mode scales
+    # references itself via ref_image_size.
+    assert minimax._N_REF_RESIZE not in _build()
+
+
+def test_fl2v_respects_frame_and_canvas_invariants():
+    wf = _fl2v(seconds=12, width=900, height=500)
+    e = wf[minimax._N_REF2V]["inputs"]
+    assert e["length"] % 17 == 5
+    assert e["width"] % 32 == 0 and e["height"] % 32 == 0
+    assert e["width"] * e["height"] <= minimax._MAX_PIXELS
+
+
+def test_fl2v_still_decodes_audio():
+    # MiniMaxH3ImageToVideo takes no audio_vae, but the latent it emits is still
+    # a NestedTensor (video, audio) — the audio VAE must still be loaded+decoded.
+    wf = _fl2v()
+    assert any(n["class_type"] == "VAEDecodeAudio" for n in wf.values())
+    assert any(n["class_type"] == "VAELoader" and "audio" in n["inputs"]["vae_name"]
+               for n in wf.values())
+
+
+def test_unknown_minimax_mode_is_refused():
+    assert minimax.maybe_build_minimax({"prompt": "x", "mode": "nope"}, REF) is None
+
+
+def test_both_modes_carry_the_prompt_and_seed():
+    for build in (_build, _fl2v):
+        wf = build(prompt="a specific document", seed=5)
+        assert wf[minimax._N_REF2V]["inputs"]["prompt"] == "a specific document"
+        assert wf[minimax._N_NOISE]["inputs"]["noise_seed"] == 5

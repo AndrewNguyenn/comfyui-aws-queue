@@ -48,9 +48,32 @@ import os
 import random
 from typing import Optional
 
-_TEMPLATE_PATH = os.path.join(
-    os.path.dirname(__file__), "minimax_templates", "MiniMaxH3Ref2VA.api.json"
-)
+_TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "minimax_templates")
+
+# MiniMax H3 ships as two separately-trained checkpoints, and the difference is
+# what the supplied image MEANS:
+#
+#   ref  (Ref2VA) — MiniMaxH3ReferenceToVideo. The image is a REFERENCE whose
+#                   latent rides alongside every sampling step. The clip does
+#                   not start from it; the model composes a fresh scene that the
+#                   reference only nudges. Free to re-frame and re-light across
+#                   shots, but weak at holding a specific face — measured: an
+#                   East Asian reference produced a Western-featured subject on
+#                   two runs, at both ref_image_size settings.
+#
+#   fl2v (FL2VA)  — MiniMaxH3ImageToVideo. The image becomes frame 0 outright
+#                   (the node files it as resolved_frame_index 0), so identity,
+#                   wardrobe and room start correct by construction and the clip
+#                   animates forward from there. The trade is that everything
+#                   downstream inherits that opening frame.
+#
+# Different checkpoints, so switching modes changes the UNet as well as the
+# conditioning node.
+_TEMPLATES = {
+    "ref": "MiniMaxH3Ref2VA.api.json",
+    "fl2v": "MiniMaxH3FL2VA.api.json",
+}
+_DEFAULT_MODE = "ref"
 
 _SEED_MAX = 2 ** 50
 
@@ -71,7 +94,8 @@ _N_UNET = "1"
 _N_CLIP = "2"
 _N_REF_LOAD = "10"
 _N_REF2V = "20"
-_REF_GROUP = "ref_images"        # Autogrow group; slots ref_image_0..8 live inside it
+_REF_GROUP = "ref_images"        # Autogrow group; slots ref_image_0..8 live inside it (ref mode)
+_N_REF_RESIZE = "11"             # ImageScale cover-crop ahead of first_frame (fl2v mode)
 _N_NOISE = "30"
 _N_SCHED = "32"
 _N_VIDEO = "50"
@@ -120,12 +144,12 @@ def snap_canvas(width: int, height: int) -> tuple[int, int]:
     return rw, rh
 
 
-def _load_template() -> Optional[dict]:
+def _load_template(mode: str) -> Optional[dict]:
     try:
-        with open(_TEMPLATE_PATH, encoding="utf-8") as fh:
+        with open(os.path.join(_TEMPLATE_DIR, _TEMPLATES[mode]), encoding="utf-8") as fh:
             return json.load(fh)
     except Exception as e:  # noqa: BLE001
-        print(f"minimax: template load failed: {e!r}")
+        print(f"minimax: template load failed for mode {mode!r}: {e!r}")
         return None
 
 
@@ -141,11 +165,17 @@ def maybe_build_minimax(
     """
     if not isinstance(options, dict) or not options:
         return None
+
+    mode = str(options.get("mode") or _DEFAULT_MODE).lower()
+    if mode not in _TEMPLATES:
+        print(f"minimax: unknown mode {mode!r}; not building")
+        return None
+    # Both modes need the image — it is either the reference or frame 0.
     if not ref_image_name:
         print("minimax: missing reference image; not building")
         return None
 
-    wf = _load_template()
+    wf = _load_template(mode)
     if wf is None:
         return None
 
@@ -168,7 +198,14 @@ def maybe_build_minimax(
         r2v["width"] = width
         r2v["height"] = height
         r2v["length"] = frames
-        if options.get("ref_image_size") in ("match", "max"):
+        # FL2VA cover-crops the first frame to the canvas before the node's own
+        # plain stretch; that resize must track the canvas or frame 0 distorts.
+        if mode == "fl2v":
+            wf[_N_REF_RESIZE]["inputs"]["width"] = width
+            wf[_N_REF_RESIZE]["inputs"]["height"] = height
+        # ref_image_size exists only on the Ref2VA node — FL2VA cover-crops to
+        # the canvas via the ImageScale ahead of it instead.
+        if mode == "ref" and options.get("ref_image_size") in ("match", "max"):
             r2v["ref_image_size"] = options["ref_image_size"]
 
         seed = options.get("seed")
