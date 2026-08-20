@@ -208,7 +208,7 @@ comfyui-aws-queue/
   - `comfy-frontend-{account}`: static website hosting for ComfyUI frontend.
 - DDB tables:
   - `comfy-models`: model catalog. PK=`name`, attrs={type, s3_key, size_gb, pinned, civitai_version_id, preview_url, added_at, last_used_at}. GSI on `type` for browse.
-  - `comfy-jobs`: job lifecycle. PK=`job_id`, attrs={type, status, workflow_json, input_keys, output_keys, attempt_count, created_at, started_at, completed_at, last_heartbeat, error}. TTL on `expire_at` (30 days).
+  - `comfy-jobs`: job lifecycle. PK=`job_id`, attrs={type, status, workflow_json, input_keys, output_keys, attempt_count, created_at, started_at, completed_at, last_heartbeat, error}. **No TTL** — job history is user data and backs the viewer's gallery; a 30-day `expire_at` used to reap it and was removed 2026-08-19.
   - `comfy-downloads`: download progress. PK=`download_id`, attrs={civitai_url, status, bytes_done, total_bytes, model_name, error}. TTL 24 hrs.
 
 ### 4.3 QueueStack

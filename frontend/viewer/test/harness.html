@@ -1,0 +1,115 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>viewer cache harness</title></head>
+<body>
+<!-- Minimal DOM the viewer's app.js expects -->
+<div id="pending"></div>
+<div id="tabs"></div>
+<input id="search">
+<span id="hdr-count"></span>
+<span id="ct-all"></span><span id="ct-images"></span><span id="ct-videos"></span>
+<div id="pager-top"></div>
+<div id="grid"></div>
+<div id="pager"></div>
+<div id="selbar"></div>
+<button id="select-toggle"></button>
+<div id="modal" style="display:none"><div id="modal-body"></div></div>
+<div id="toast"></div>
+<div id="backlog"></div>
+
+<script>
+// ---- fake config + auth ----
+window.COMFY_CONFIG = { apiUrl: "https://api.test" };
+// A JWT-shaped token so the cache's userKey() can read a `sub` claim.
+const _payload = btoa(JSON.stringify({ sub: "user-under-test" }));
+window.comfyAuth = {
+  getIdToken: () => "hdr." + _payload + ".sig",
+  isSignedIn: () => true,
+  refreshToken: async () => true,
+};
+
+// ---- instrumented fetch stub ----
+// TOTAL_JOBS complete jobs, newest first, served with keyset cursor semantics
+// matching the real /jobs endpoint (limit + next_cursor).
+const TOTAL_JOBS = 19000;
+window.__reqLog = [];
+const ALL = [];
+for (let i = 0; i < TOTAL_JOBS; i++) {
+  const n = String(TOTAL_JOBS - i).padStart(6, "0");
+  ALL.push({
+    job_id: "job-" + n,
+    type: "image",
+    status: "complete",
+    created_at: "2026-06-01T00:00:00." + n + "+00:00",
+    completed_at: "2026-06-01T00:00:01+00:00",
+    started_at: "",
+    output_keys: ["outputs/2026/06/01/job-" + n + "/img.png"],
+    error: "",
+    model: "testModel_v1",
+    progress: "",
+    instance_type: "",
+    cancel_requested: false,
+  });
+}
+// Persisted in sessionStorage so it survives page.reload() — the harness
+// rebuilds ALL on every load, so an in-memory unshift would vanish.
+const _extra = JSON.parse(sessionStorage.getItem("extraJobs") || "[]");
+for (const j of _extra) ALL.unshift(j);
+window.__injectNewJob = () => {
+  const n = "999999";
+  const j = {
+    job_id: "job-NEW-" + Math.random().toString(36).slice(2, 8),
+    type: "image", status: "complete",
+    created_at: "2026-09-01T00:00:00." + n + "+00:00",
+    completed_at: "2026-09-01T00:00:01+00:00", started_at: "",
+    output_keys: ["outputs/2026/09/01/new/img.png"],
+    error: "", model: "testModel_v1", progress: "",
+    instance_type: "", cancel_requested: false,
+  };
+  ALL.unshift(j);
+  const cur = JSON.parse(sessionStorage.getItem("extraJobs") || "[]");
+  cur.unshift(j);
+  sessionStorage.setItem("extraJobs", JSON.stringify(cur));
+};
+
+const _delay = () => parseInt(sessionStorage.getItem("fetchDelay") || "0", 10);
+window.__setFetchDelay = (ms) => sessionStorage.setItem("fetchDelay", String(ms));
+window.__injectTransient = () => {
+  ALL.unshift({
+    job_id: "job-TRANSIENT-" + ALL.length,
+    type: "image", status: "complete",
+    created_at: "2026-12-31T23:59:59.999999+00:00",
+    completed_at: "2026-12-31T23:59:59+00:00", started_at: "",
+    output_keys: ["outputs/2026/12/31/transient/img.png"],
+    error: "", model: "testModel_v1", progress: "",
+    instance_type: "", cancel_requested: false,
+  });
+};
+window.fetch = async (url, opts) => {
+  const u = String(url);
+  window.__reqLog.push(u);
+  const d = _delay();
+  if (d) await new Promise((r) => setTimeout(r, d));
+  const q = new URL(u, "https://api.test");
+  if (q.pathname.endsWith("/jobs")) {
+    const status = q.searchParams.get("status");
+    if (status !== "complete") return json({ jobs: [], next_cursor: null });
+    const limit = parseInt(q.searchParams.get("limit") || "64", 10);
+    const cur = q.searchParams.get("cursor");
+    const start = cur ? parseInt(atob(cur), 10) : 0;
+    const slice = ALL.slice(start, start + limit);
+    const next = start + limit < ALL.length ? btoa(String(start + limit)) : null;
+    return json({ jobs: slice, next_cursor: next, limit });
+  }
+  if (q.pathname.endsWith("/backlog")) return json({ queued: 0, running: 0 });
+  if (q.pathname.includes("/view")) return json({ url: "data:image/gif;base64,R0lGODlhAQABAAAAACw=" });
+  return json({});
+};
+function json(o) {
+  return { ok: true, status: 200, json: async () => o, text: async () => JSON.stringify(o) };
+}
+window.__countJobReqs = () =>
+  window.__reqLog.filter((u) => u.includes("/jobs?status=complete")).length;
+window.__resetLog = () => { window.__reqLog = []; };
+</script>
+<script src="./app.test.js"></script>
+</body></html>

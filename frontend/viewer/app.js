@@ -21,6 +21,13 @@
   const BG_FETCH = 1000;
   const URL_CACHE_KEY = "viewer.urlcache";
   const URL_CACHE_TTL = 3300 * 1000; // ~55 min (presign lives 1 h)
+  // Persistent history cache (see the _histCache block below). Bump SCHEMA
+  // whenever the cached job shape changes so stale entries are discarded
+  // rather than rendered against newer code.
+  const HIST_DB = "viewer.history";
+  const HIST_STORE = "jobs";
+  const HIST_SCHEMA = 1;
+  const HIST_MAX_AGE = 24 * 3600 * 1000; // re-paginate once a day to reconcile drift
 
   let allItems = []; // [{ key, job, isVideo }]
   let tab = "all";
@@ -233,6 +240,116 @@
     hdrCount.textContent = `${allItems.length} file${allItems.length !== 1 ? "s" : ""}`;
   }
 
+  /* ---------- persistent history cache ---------- */
+  // The gallery's job history is append-mostly and now large (~19k complete
+  // jobs after the 2026-08-19 backfill). Re-paginating all of it on every boot
+  // AND on every return-to-page-0 meant ~19 sequential round-trips of 1000 rows
+  // each — slow, and it re-read the whole jobs-by-status GSI each time.
+  //
+  // So: persist the fetched job list and hydrate from it on load. A warm start
+  // paints from cache and then fetches only the newest page (_refreshHead) to
+  // pick up whatever completed since; the full page-through happens only on a
+  // cold cache. Cached rows are the same lite job objects the list endpoint
+  // returns, so hydration is just _appendJobsAsItems over them.
+  //
+  // IndexedDB rather than localStorage: ~19k jobs is several MB, past the ~5 MB
+  // localStorage quota. Every operation is best-effort — any failure (private
+  // browsing, quota, no IDB) falls through to the network path. The cache must
+  // never be able to break the viewer.
+  const _histCache = (() => {
+    // Scope the cache to the signed-in user so a shared browser can't show one
+    // account's history to another. Falls back to a constant when the token
+    // can't be read — the entry is still discarded on schema/user mismatch.
+    function userKey() {
+      try {
+        const t = window.comfyAuth?.getIdToken();
+        if (!t) return "anon";
+        const payload = JSON.parse(atob(t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+        return payload.sub || payload["cognito:username"] || "anon";
+      } catch (_e) { return "anon"; }
+    }
+    function open() {
+      return new Promise((resolve, reject) => {
+        if (!window.indexedDB) return reject(new Error("no indexedDB"));
+        const req = indexedDB.open(HIST_DB, 1);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains(HIST_STORE)) db.createObjectStore(HIST_STORE);
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+    function tx(mode, fn) {
+      return open().then((db) => new Promise((resolve, reject) => {
+        const t = db.transaction(HIST_STORE, mode);
+        const req = fn(t.objectStore(HIST_STORE));
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+        t.oncomplete = () => db.close();
+      }));
+    }
+    return {
+      async read() {
+        try {
+          const rec = await tx("readonly", (s) => s.get("history"));
+          if (!rec || rec.schema !== HIST_SCHEMA || rec.user !== userKey()) return null;
+          // Age out daily. A warm start never re-paginates, so without this the
+          // only way to reconcile drift (a straggler that completed below the
+          // head window, a delete from another browser) is the manual reload.
+          // One cold load a day bounds how stale the gallery can get.
+          if (Date.now() - (rec.savedAt || 0) > HIST_MAX_AGE) return null;
+          return Array.isArray(rec.jobs) ? rec.jobs : null;
+        } catch (_e) { return null; }
+      },
+      async write(jobs) {
+        try {
+          await tx("readwrite", (s) => s.put(
+            { schema: HIST_SCHEMA, user: userKey(), savedAt: Date.now(), jobs },
+            "history"));
+        } catch (_e) { /* quota / private mode — cache is optional */ }
+      },
+      async clear() {
+        try { await tx("readwrite", (s) => s.delete("history")); } catch (_e) { /* ignore */ }
+      },
+    };
+  })();
+
+  // True while _bgLoadRest still owns allItems — i.e. the in-memory list is a
+  // PREFIX of the history, not the whole thing. Snapshotting during that window
+  // would persist a truncated history, and since a warm start never
+  // re-paginates, the next boot would hydrate the truncation and keep it
+  // forever. _refreshHead() (fired by the 15s pending poll) and doDelete() can
+  // both land mid-background-load, so the guard lives here rather than at any
+  // one call site.
+  let histLoading = false;
+
+  // Snapshot the current gallery back to the cache. allItems holds one entry
+  // per output KEY, so dedupe back down to one job per job_id (insertion order
+  // is already created_at-desc, which is the order hydration wants).
+  //
+  // Debounced: _refreshHead persists on every completion during an active run,
+  // and structured-cloning ~19k rows into IDB on the main thread that often is
+  // visible jank. The trailing edge is what matters — losing an intermediate
+  // snapshot costs nothing, the next one supersedes it.
+  let _persistTimer = null;
+  function _persistHistory({ immediate = false } = {}) {
+    if (histLoading) return; // partial list — never snapshot it
+    clearTimeout(_persistTimer);
+    const snapshot = () => {
+      const seen = new Set();
+      const jobs = [];
+      for (const it of allItems) {
+        if (seen.has(it.job.job_id)) continue;
+        seen.add(it.job.job_id);
+        jobs.push(it.job);
+      }
+      _histCache.write(jobs);
+    };
+    if (immediate) snapshot();
+    else _persistTimer = setTimeout(snapshot, 5000);
+  }
+
   // One keyset page of complete jobs (no client filtering). `cursor` resumes
   // after the previous page (null for the first). Returns the raw jobs plus
   // the cursor for the next page (null when the history is exhausted). Keyset
@@ -286,13 +403,42 @@
     return fresh.length;
   }
 
-  async function loadJobs() {
+  // `force` skips the cache and re-paginates the whole history from the API
+  // (the escape hatch for a cache that has drifted — wired to shift-reload).
+  async function loadJobs({ force = false } = {}) {
     const myGen = ++loadGen;
     if (!(await ensureAuth())) {
       if (myGen !== loadGen) return;
       grid.outerHTML = '<div class="empty"><div class="e-title">Not signed in</div>' +
         '<div class="e-body"><a href="/login.html">Log in</a> and reopen.</div></div>';
       return;
+    }
+    // Warm start: paint the cached history immediately, then pull only the
+    // newest page to catch up. Costs one request instead of ~19.
+    if (!force) {
+      const cached = await _histCache.read();
+      if (myGen !== loadGen) return;
+      // Hydrate into a scratch list first and only adopt it if it produced
+      // items, so a cache miss leaves the current grid untouched while the
+      // cold path fetches. Requiring ITEMS (not just rows) also matters
+      // because _refreshHead() falls back to loadJobs() on an empty allItems —
+      // a cache of only zero-output jobs would otherwise spin between them.
+      const restored = allItems;
+      allItems = [];
+      if (cached && cached.length) _appendJobsAsItems(cached);
+      if (allItems.length) {
+        lastSelIdx = -1;
+        if (selected.size) {
+          const live = new Set(allItems.map((it) => it.key));
+          for (const k of [...selected]) if (!live.has(k)) selected.delete(k);
+          renderSelbar();
+        }
+        refreshCounts();
+        renderGrid();
+        await _refreshHead();
+        return;
+      }
+      allItems = restored; // cache miss — put the grid back, cold path follows
     }
     try {
       const initial = await _fetchJobs({ limit: INITIAL_FETCH });
@@ -331,6 +477,8 @@
   // so the whole history loads in O(N) reads total — no offset re-scan.
   async function _bgLoadRest(myGen, startCursor) {
     let cursor = startCursor;
+    histLoading = true; // allItems is a prefix until we reach the tail
+    try {
     while (cursor) {
       let res;
       try { res = await _fetchJobs({ cursor, limit: BG_FETCH }); }
@@ -359,6 +507,16 @@
         renderPager(pager, afterPages, afterFiltered);
       }
     }
+    } finally {
+      // Cleared on EVERY exit — tail reached, superseded, or fetch failure —
+      // so a failed background load can't wedge the cache off permanently.
+      histLoading = false;
+    }
+    // Tail reached (cursor null) — the in-memory list is now the complete
+    // history, so snapshot it. Only here, not per batch: a partial write would
+    // let the next boot hydrate a truncated history and, because a warm start
+    // never re-paginates, quietly strand the missing tail.
+    if (myGen === loadGen) _persistHistory({ immediate: true });
   }
 
   // Incremental head refresh: re-fetch just the newest page and merge any
@@ -390,6 +548,7 @@
     lastSelIdx = -1; // a merge shifted filtered() indices — drop the anchor
     refreshCounts();
     renderGrid();
+    _persistHistory(); // keep the warm-start snapshot current
   }
 
   /* ---------- grid ---------- */
@@ -451,14 +610,18 @@
       const prev = page;
       page = Math.max(0, Math.min(pages - 1, p));
       renderGrid();
-      // Coming back to page 0 does a full reload — it reconciles EVERYTHING
-      // that completed while we were away, including stragglers whose
-      // created_at falls below the head-refresh window (the page === 0 guard
-      // in renderPending suppresses refreshes on other pages). It's O(N) now
-      // (keyset), not O(N²), and only fires on this navigation. renderGrid()
-      // above paints current data first so the user sees something immediately;
-      // loadJobs() re-renders when its response lands.
-      if (prev !== 0 && page === 0) loadJobs();
+      // Coming back to page 0 reconciles what completed while we were away.
+      // This used to be a full loadJobs() — a complete re-pagination of the
+      // history on every such navigation, which at ~19k jobs is ~19 sequential
+      // 1000-row requests. _refreshHead() is one request and merges newly
+      // completed jobs at their sorted position, which is what this navigation
+      // actually needs. renderGrid() above paints current data first.
+      //
+      // Same limitation _refreshHead() documents: a straggler whose created_at
+      // falls below the newest window isn't picked up here. It lands on the
+      // next cold load or a forced reload — the tradeoff that buys back the
+      // ~19 requests, and it self-corrects rather than losing data.
+      if (prev !== 0 && page === 0) _refreshHead();
       window.scrollTo(0, 0);
     };
     el.querySelector(".pg-prev").onclick = () => go(page - 1);
@@ -1250,6 +1413,9 @@
       refreshCounts();
       if (modalIdx >= 0) closeModal();
       renderGrid();
+      // Immediate: a debounced write could be lost to a navigation, and the
+      // deleted job would come back on the next warm start.
+      _persistHistory({ immediate: true });
       showToast("Deleted.");
     } catch (e) {
       showToast(`Delete failed: ${e.message}`);
@@ -1376,6 +1542,18 @@
     if (e.key === "Escape") closeModal();
     else if (e.key === "ArrowLeft" && modalIdx > 0) { modalIdx--; drawModal(); }
     else if (e.key === "ArrowRight") { const n = filtered().length; if (modalIdx < n - 1) { modalIdx++; drawModal(); } }
+  });
+
+  // Manual full reload — the escape hatch for a cache that drifted. On the
+  // header count because that's the element already reporting what the cache
+  // is showing. Deliberately NOT a keyboard chord: Cmd/Ctrl+Shift+R is the
+  // browser's own hard reload, and shadowing it on a page whose failure mode
+  // IS stale state is the wrong trade.
+  hdrCount.style.cursor = "pointer";
+  hdrCount.title = "Click to reload the full history from the server";
+  hdrCount.addEventListener("click", () => {
+    showToast("Reloading full history…");
+    _histCache.clear().then(() => loadJobs({ force: true }));
   });
 
   /* ---------- init ---------- */

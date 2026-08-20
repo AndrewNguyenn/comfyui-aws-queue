@@ -24,7 +24,7 @@ import os
 import re
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 import boto3
@@ -67,8 +67,20 @@ WS_API_ENDPOINT = os.environ.get("WS_API_ENDPOINT", "")  # wss://<id>.execute-ap
 
 _ws_ticket_secret_cache: bytes | None = None
 
-# Job records expire from DDB after 30 days (TTL attribute).
-JOB_TTL = timedelta(days=30)
+# Job records are KEPT INDEFINITELY. There was a 30-day TTL here (an `expire_at`
+# attribute + `timeToLiveAttribute` on the table); it silently shredded the
+# user's generation history — the viewer's gallery is driven by this table, so a
+# 30-day ledger meant a 30-day gallery while ~19k images sat untouched in S3.
+# Removed 2026-08-19 along with the table's TTL setting.
+#
+# Cost of keeping them: storage bills the BASE table, where a row is ~13 KB
+# (workflow_json is ~12.5 KB of that) — NOT the ~1 KB the jobs-by-status GSI
+# stores. At ~19k rows that is ~95 MB: roughly $0.02/mo storage plus about the
+# same again for PITR, trending to under $1/mo in a couple of years at the
+# current rate. Easy yes. If it ever does matter, the lever is to expire the
+# BLOB, not the row — workflow_json/workflow_ui are ~98% of the bytes, the
+# gallery never reads them on the list path, and scripts/backfill-job-history.py
+# demonstrates the graph stays recoverable from the output PNG itself.
 
 # In-memory cache for /object_info responses to avoid hammering DDB on every
 # poll. TTL is 60s — when a model is added via the catalog Lambda, that Lambda
@@ -428,7 +440,6 @@ def _post_prompt(event: dict) -> dict:
 
     job_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
-    expire_at = int((now + JOB_TTL).timestamp())
 
     # MiniMax H3 has its own fleet (g6e/L40S — ~45 GiB of weights that a video
     # worker cannot hold), so it needs its own queue: a video worker picking up
@@ -448,7 +459,6 @@ def _post_prompt(event: dict) -> dict:
         "workflow_json": {"S": json.dumps(workflow)},
         "client_id": {"S": body.get("client_id", "")},
         "created_at": {"S": now.isoformat()},
-        "expire_at": {"N": str(expire_at)},
         # Reaper-owned: only the reaper increments this (once per zombie
         # re-queue). The worker never touches it.
         "attempt_count": {"N": "0"},
