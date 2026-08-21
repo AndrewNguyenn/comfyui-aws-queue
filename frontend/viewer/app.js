@@ -146,9 +146,34 @@
     if (!text) return "";
     const neg = /negative/i.test(label) ? " neg" : "";
     return `<div class="section-ttl prompt-ttl">${esc(label)}` +
-      `<button class="prompt-copy" type="button" title="Copy ${esc(label)}">${SVG_COPY}</button>` +
-      `</div>` +
+      `<span class="btns">` +
+        `<button class="prompt-open" type="button" title="Read ${esc(label)} in full">` +
+          `${SVG_EXPAND}</button>` +
+        `<button class="prompt-copy" type="button" title="Copy ${esc(label)}">${SVG_COPY}</button>` +
+      `</span></div>` +
       `<div class="prompt${neg}">${esc(text)}</div>`;
+  }
+  // The info column is 26vw wide and a generation prompt is a paragraph, so a
+  // long one runs well past the fold and is read four words to a line. Lay it
+  // over the stage instead — that is a 900px-wide box with a portrait image
+  // floating in the middle of it, and the whole prompt fits there at once.
+  function openPromptFull(label, text) {
+    const modal = document.querySelector(".modal");
+    if (!modal) return;
+    closePromptFull();
+    const box = document.createElement("div");
+    box.className = "prompt-full";
+    box.innerHTML =
+      `<div class="pf-head"><span class="pf-ttl">${esc(label)}</span>` +
+        `<button class="pf-close" type="button" title="Close">&#10005;</button></div>` +
+      `<div class="pf-body">${esc(text)}</div>`;
+    box.querySelector(".pf-close").onclick = closePromptFull;
+    (modal.querySelector(".stage") || modal).appendChild(box);
+  }
+  function closePromptFull() {
+    const open = document.querySelector(".modal .prompt-full");
+    if (open) open.remove();
+    return !!open;
   }
   // All prompt sections for a job — one per distinct prompt the workflow used
   // (detailer graphs carry several). Empty → a single muted note.
@@ -215,6 +240,8 @@
   const SVG_CHECK =
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l5 5 9-11"/></svg>';
   // Canonical copy glyph — front square + offset back sheet.
+  const SVG_EXPAND =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4H4v5M15 4h5v5M15 20h5v-5M9 20H4v-5"/></svg>';
   const SVG_COPY =
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="1.5"/><path d="M5 15V6.5A1.5 1.5 0 0 1 6.5 5H15"/></svg>';
 
@@ -1363,6 +1390,14 @@
           if (det) {
             det.innerHTML = sourceSection(d) + paramsSection(d.params) +
               promptsBlock(d.prompts);
+            det.querySelectorAll(".prompt-open").forEach((btn) => {
+              btn.onclick = (e) => {
+                e.stopPropagation();
+                const ttl = btn.closest(".prompt-ttl");
+                const body = ttl && ttl.nextElementSibling;
+                if (body) openPromptFull(ttl.firstChild.textContent, body.textContent);
+              };
+            });
             det.querySelectorAll(".prompt-copy").forEach((btn) => {
               btn.onclick = (e) => {
                 e.stopPropagation();
@@ -1539,7 +1574,15 @@
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && selectMode) { setSelectMode(false); return; }
     if (modalIdx < 0) return;
+    // The prompt lies over the modal, so it takes Escape first — closing the
+    // whole thing when you only meant to put the prompt away loses your place
+    // in the gallery.
+    if (e.key === "Escape" && closePromptFull()) return;
     if (e.key === "Escape") closeModal();
+    // Arrows browse the gallery; while a prompt is open you are reading, not
+    // browsing, and jumping to the next image out from under the text is not
+    // what the key meant.
+    else if (document.querySelector(".modal .prompt-full")) return;
     else if (e.key === "ArrowLeft" && modalIdx > 0) { modalIdx--; drawModal(); }
     else if (e.key === "ArrowRight") { const n = filtered().length; if (modalIdx < n - 1) { modalIdx++; drawModal(); } }
   });
