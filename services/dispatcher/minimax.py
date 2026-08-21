@@ -120,6 +120,32 @@ _N_VIDEO = "50"
 # Distillation is documented to hurt "the quietest and most sustained vocal
 # registers", and several of our sets are built on whispered close-mic lines,
 # so this is opt-in per job rather than always-on.
+# The sex LoRA. Trained on MiniMax H3 for missionary, doggy, cowgirl, handjob,
+# blowjob and insertions; the author's own note is "use it at strength 0.5 or
+# below", so that is the default and 1.0 is the hard cap. It is spliced the same
+# way as the turbo LoRA and composes with it.
+_NSFW_LORA = "HMNSFW_AIO_V2.safetensors"
+_NSFW_STRENGTH = 0.5
+_N_NSFW_LORA = "9002"
+
+# What counts as a clip this LoRA is for. Every word here is one our own writer
+# actually produces — it is told to name anatomy directly, so "cock" and "cum"
+# are reliable and coy substitutes never appear. Deliberately NOT "facial":
+# "extreme facial close-up" is a framing in the house camera vocabulary and
+# would light this up on clips with nothing in them.
+_SEX_RE = re.compile(
+    r"\b(cock|cocks|blowjob|handjob|deepthroat|missionary|doggy|cowgirl|"
+    r"fuck|fucks|fucked|fucking|penetrate[sd]?|penetration|penetrating|"
+    r"insertion|insertions|cum|cumming|creampie|riding him|"
+    # Insertion is one of the six acts it was trained on, and the solo version
+    # of it is the one the act words above miss: a clip can be a toy or her own
+    # fingers with no partner in it anywhere.
+    r"dildo|vibrator|fingering)\b"
+    r"|\bfingers?\s+(?:\w+\s+){0,2}(?:into|inside)\s+her\b"
+    r"|\b(?:into|inside)\s+her\s+(?:pussy|arse|ass)\b",
+    re.IGNORECASE,
+)
+
 _TURBO_LORA = "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
 _TURBO_STRENGTH = 0.7   # the publisher's own recommendation
 _TURBO_STEPS = 8
@@ -245,6 +271,13 @@ def maybe_build_minimax(
         seed = options.get("seed")
         seed = int(seed) % _SEED_MAX if seed is not None else random.randint(0, _SEED_MAX - 1)
         wf[_N_NOISE]["inputs"]["noise_seed"] = seed
+
+        # The sex LoRA first, so that with turbo on the chain is
+        # UNet -> nsfw -> turbo -> sampler and the distilled schedule stays
+        # nearest the consumers.
+        nsfw = nsfw_lora_strength(options)
+        if nsfw:
+            splice_nsfw_lora(wf, nsfw)
 
         # Turbo before the explicit steps override, so a caller can still pin a
         # step count on top of it (e.g. to A/B 8 vs 6 on the same LoRA).
@@ -554,21 +587,60 @@ def splice_autoframe(wf: dict, mode: str, options: dict,
     wf.pop(_N_REF_LOAD, None)
 
 
-def splice_turbo_lora(wf: dict) -> None:
-    """Insert the step-distilled LoRA between the UNet and everything using it.
+def _splice_model_lora(wf: dict, nid: str, lora_name: str, strength: float) -> None:
+    """Insert a model-only LoRA between the model and everything reading it.
 
     Both consumers have to be rewired, not just the sampler: BasicScheduler
     derives the sigma schedule from the model, and a distilled model's schedule
     is the whole point. Leaving node 32 on the raw UNet would run 8 steps of an
     undistilled sigma curve — fast and wrong, with no error to show for it.
+
+    Reads whatever the guider currently points at rather than assuming the raw
+    UNet, so two of these compose: spliced one after another they chain, where
+    a hardcoded [_N_UNET, 0] would leave the second one loaded and connected to
+    nothing.
     """
-    wf[_N_TURBO_LORA] = {"class_type": "LoraLoaderModelOnly", "inputs": {
-        "lora_name": _TURBO_LORA,
-        "strength_model": _TURBO_STRENGTH,
-        "model": [_N_UNET, 0],
+    guider = wf.get(_N_GUIDER)
+    if not isinstance(guider, dict):
+        return
+    src = guider.get("inputs", {}).get("model")
+    if not src:
+        return
+    wf[nid] = {"class_type": "LoraLoaderModelOnly", "inputs": {
+        "lora_name": lora_name,
+        "strength_model": strength,
+        "model": src,
     }}
-    for nid in (_N_SCHED, _N_GUIDER):
-        node = wf.get(nid)
-        if isinstance(node, dict) and node.get("inputs", {}).get("model") == [_N_UNET, 0]:
-            node["inputs"]["model"] = [_N_TURBO_LORA, 0]
+    for consumer in (_N_SCHED, _N_GUIDER):
+        node = wf.get(consumer)
+        if isinstance(node, dict) and node.get("inputs", {}).get("model") == src:
+            node["inputs"]["model"] = [nid, 0]
+
+
+def splice_turbo_lora(wf: dict) -> None:
+    """The step-distilled LoRA, plus the step count that is the point of it."""
+    _splice_model_lora(wf, _N_TURBO_LORA, _TURBO_LORA, _TURBO_STRENGTH)
     wf[_N_SCHED]["inputs"]["steps"] = _TURBO_STEPS
+
+
+def splice_nsfw_lora(wf: dict, strength: float = _NSFW_STRENGTH) -> None:
+    """The sex LoRA. Weights only — no step count, no schedule of its own."""
+    _splice_model_lora(wf, _N_NSFW_LORA, _NSFW_LORA, strength)
+
+
+def nsfw_lora_strength(options: dict) -> float:
+    """How strongly to apply the sex LoRA to this job — 0.0 for not at all.
+
+    Decided from the prompt rather than asked of the caller, because every
+    caller would have to answer it and the prompt already says. `nsfw_lora` in
+    the options overrides either way: False to keep it off a clip that reads
+    explicit, a number to pin the strength.
+    """
+    want = options.get("nsfw_lora")
+    if want is False:
+        return 0.0
+    if isinstance(want, bool):          # True — on, at the default
+        return _NSFW_STRENGTH
+    if isinstance(want, (int, float)):
+        return max(0.0, min(1.0, float(want)))
+    return _NSFW_STRENGTH if _SEX_RE.search(str(options.get("prompt") or "")) else 0.0

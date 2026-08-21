@@ -710,3 +710,75 @@ def test_turbo_works_alongside_an_autoframed_first_frame():
     # The video LoRA must not leak onto the frame-0 sampler, which is a
     # different architecture entirely.
     assert wf[minimax._AF_KSAMPLER]["inputs"]["model"] != [minimax._N_TURBO_LORA, 0]
+
+
+# ---------------------------------------------------------------------------
+# The sex LoRA. Decided from the prompt, because every caller would otherwise
+# have to answer a question the prompt already answers.
+# ---------------------------------------------------------------------------
+
+_EXPLICIT = ("At 00:03.000, close-up: his cock pulled out of her mouth and her "
+             "hand pumping it against her cheek.")
+_TAME = ("At 00:03.000, close-up: her hand dragging down over her hip in an "
+         "extreme facial close-up as she turns.")
+
+
+def test_an_explicit_prompt_attaches_the_sex_lora():
+    wf = _build(prompt=_EXPLICIT)
+    node = wf[minimax._N_NSFW_LORA]
+    assert node["inputs"]["lora_name"] == "HMNSFW_AIO_V2.safetensors", node
+    # The author's own ceiling is 0.5; anything above it is a bug, not a taste.
+    assert node["inputs"]["strength_model"] <= 0.5, node
+
+
+def test_a_tame_prompt_does_not():
+    wf = _build(prompt=_TAME)
+    assert minimax._N_NSFW_LORA not in wf, "a clip with nothing in it got the sex LoRA"
+
+
+def test_a_facial_close_up_is_a_framing_not_an_act():
+    # "extreme facial close-up" is in the house camera vocabulary and appears in
+    # clips with nothing sexual in them at all.
+    assert minimax.nsfw_lora_strength({"prompt": "an extreme facial close-up of her face"}) == 0.0
+
+
+def test_solo_insertion_counts_too():
+    # "insertions" is one of the six acts it was trained on, and a solo clip has
+    # none of the partner words that catch the other five.
+    on = "she slides two fingers into her pussy while she keeps walking"
+    assert minimax.nsfw_lora_strength({"prompt": on}) == 0.5, on
+    # Level 8 is bare and touching herself with nothing inside her — the line
+    # this has to draw.
+    off = "she works herself over with a flat palm, breathing through her teeth"
+    assert minimax.nsfw_lora_strength({"prompt": off}) == 0.0, off
+
+
+def test_the_caller_can_veto_and_can_pin():
+    assert minimax.nsfw_lora_strength({"prompt": _EXPLICIT, "nsfw_lora": False}) == 0.0
+    assert minimax.nsfw_lora_strength({"prompt": _TAME, "nsfw_lora": True}) == 0.5
+    assert minimax.nsfw_lora_strength({"prompt": _TAME, "nsfw_lora": 0.3}) == 0.3
+    assert minimax.nsfw_lora_strength({"prompt": _TAME, "nsfw_lora": 9}) == 1.0
+
+
+def test_the_sex_lora_graph_is_still_fully_connected():
+    _assert_fully_reachable(_build(prompt=_EXPLICIT))
+
+
+def test_it_chains_with_turbo_instead_of_dangling():
+    wf = _build(prompt=_EXPLICIT, turbo=True)
+    _assert_fully_reachable(wf)
+    # UNet -> nsfw -> turbo -> sampler: both LoRAs actually in the path, and the
+    # distilled schedule nearest the consumers.
+    assert wf[minimax._N_NSFW_LORA]["inputs"]["model"] == [minimax._N_UNET, 0]
+    assert wf[minimax._N_TURBO_LORA]["inputs"]["model"] == [minimax._N_NSFW_LORA, 0]
+    for nid in (minimax._N_SCHED, minimax._N_GUIDER):
+        assert wf[nid]["inputs"]["model"] == [minimax._N_TURBO_LORA, 0], nid
+    assert wf[minimax._N_SCHED]["inputs"]["steps"] == minimax._TURBO_STEPS
+
+
+def test_it_does_not_leak_onto_the_first_frame_sampler():
+    wf = minimax.maybe_build_minimax(
+        {"prompt": _EXPLICIT, "mode": "fl2v",
+         "autoframe": {"prompt": "Photo. A woman."}}, None)
+    _assert_fully_reachable(wf)
+    assert wf[minimax._AF_KSAMPLER]["inputs"]["model"] != [minimax._N_NSFW_LORA, 0]
