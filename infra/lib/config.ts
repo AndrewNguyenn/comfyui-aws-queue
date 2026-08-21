@@ -319,10 +319,14 @@ export const APP_CONFIG: AppConfig = {
     videoMin: 0,
     videoMax: 3, // v3: lowered from 5 (resolves N2)
     minimaxMin: 0,
-    // Deliberately 1. g6e.xlarge is ~3.2x g5.xlarge on spot and each worker
-    // holds ~45 GiB of weights; a second concurrent worker doubles the burn
-    // for a model this slow. Raise once there is a real queue for it.
-    minimaxMax: 1,
+    // Was 1 ("raise once there is a real queue for it"). That queue arrived:
+    // ~30 clips at ~16 min each is ~8 hours serialised behind one worker, so
+    // the burn a second worker adds is offset by finishing in a third of the
+    // wall-clock. Each new worker still pays a ~6-7 min cold start streaming
+    // ~50 GiB of MiniMax weights plus ~13 GiB of RedMix for frame 0, so this
+    // only pays off across a deep queue — which is exactly when the scaler's
+    // depth bands ramp to it.
+    minimaxMax: 3,
     // NOTE: targetBacklogPerTask is a leftover from a BacklogPerTask design
     // that was never wired up (both fleets used a flat targetValue=1 message
     // instead — see attachSqsTargetTracking's history) and is unread anywhere

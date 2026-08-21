@@ -379,10 +379,23 @@ export class ComputeStack extends Stack {
       );
     }
 
-    const minCapacity =
-      fleetName === 'image' ? config.scaling.imageMin : config.scaling.videoMin;
-    const maxCapacity =
-      fleetName === 'image' ? config.scaling.imageMax : config.scaling.videoMax;
+    // Per-fleet, not a two-way image/other split. This was the latter, so the
+    // minimax ASG silently sized itself from videoMin/videoMax and ignored
+    // minimaxMin/minimaxMax entirely — the same shape of bug as the container
+    // memory cap that made minimax inherit video's 28 GiB and get OOM-killed.
+    // It happened to be harmless only because videoMax and minimaxMax were both
+    // reachable; raising minimaxMax past videoMax would have capped invisibly at
+    // the ASG while the scaler kept asking for more.
+    const minCapacity = {
+      image: config.scaling.imageMin,
+      video: config.scaling.videoMin,
+      minimax: config.scaling.minimaxMin,
+    }[fleetName];
+    const maxCapacity = {
+      image: config.scaling.imageMax,
+      video: config.scaling.videoMax,
+      minimax: config.scaling.minimaxMax,
+    }[fleetName];
 
     const asg = new autoscaling.AutoScalingGroup(this, `${fleetName}Asg`, {
       autoScalingGroupName: `comfy-${fleetName}-asg`,

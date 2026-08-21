@@ -58,11 +58,17 @@ CLUSTER = os.environ["CLUSTER"]  # both fleets share one ECS cluster
 # bound, the fleet's max_workers applies. See module docstring for the table.
 IMAGE_BANDS = [(1, 0), (12, 1), (40, 2)]
 VIDEO_BANDS = [(1, 0), (2, 1), (6, 2)]
-# MiniMax H3 is a single-worker fleet by config (minimaxMax=1): g6e spot is
-# ~3.2x g5 and each worker stages ~45 GiB of weights, so the only decision is
-# on/off. One queued job wakes it; anything more waits rather than doubling the
-# burn on a model this slow.
-MINIMAX_BANDS = [(1, 0)]
+# MiniMax H3 used to be a single-worker fleet, so its only decision was on/off
+# and one band said so: [(1, 0)]. That is a trap now that minimaxMax is 3 —
+# "above the last bound, max_workers applies" means a SINGLE queued clip would
+# wake all three g6e workers, each paying a ~6-7 min cold start to stage ~50 GiB
+# of MiniMax weights plus ~13 GiB of RedMix for frame 0. Three cold starts to
+# render one clip is worse than the serial case it replaced.
+#
+# So spread it. At ~16 min a clip, a second worker only earns its cold start
+# once the queue is deep enough that it saves more than it costs; below that,
+# waiting is cheaper than warming.
+MINIMAX_BANDS = [(1, 0), (6, 1), (15, 2)]
 
 _BANDS = {"image": IMAGE_BANDS, "video": VIDEO_BANDS, "minimax": MINIMAX_BANDS}
 

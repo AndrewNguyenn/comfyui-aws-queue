@@ -136,3 +136,22 @@ if __name__ == "__main__":
         fn()
         print(f"ok  {fn.__name__}")
     print(f"\n{len(fns)} passed")
+
+
+def test_minimax_does_not_wake_the_whole_fleet_for_one_clip():
+    # "Above the last bound, max_workers applies" — so a single-entry band table
+    # means ANY queued job targets max. That was fine at minimaxMax=1 and became
+    # a trap at 3: one clip would pay three ~6-7 min cold starts (~50 GiB of
+    # MiniMax weights plus ~13 GiB of RedMix each) to render one clip.
+    assert h.step_target(0, h.MINIMAX_BANDS, 3) == 0
+    assert h.step_target(1, h.MINIMAX_BANDS, 3) == 1
+    assert h.step_target(5, h.MINIMAX_BANDS, 3) == 1
+    assert h.step_target(6, h.MINIMAX_BANDS, 3) == 2
+    assert h.step_target(15, h.MINIMAX_BANDS, 3) == 3
+
+
+def test_no_fleet_ramps_straight_to_max_on_one_message():
+    # The property, not just the one fleet that tripped it: a table that reaches
+    # max_workers at depth 1 has no ramp at all.
+    for name, bands in h._BANDS.items():
+        assert h.step_target(1, bands, 3) < 3, f"{name} wakes the whole fleet for one job"
