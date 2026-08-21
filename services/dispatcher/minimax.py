@@ -102,7 +102,28 @@ _REF_GROUP = "ref_images"        # Autogrow group; slots ref_image_0..8 live ins
 _N_REF_RESIZE = "11"             # ImageScale cover-crop ahead of first_frame (fl2v mode)
 _N_NOISE = "30"
 _N_SCHED = "32"
+_N_GUIDER = "33"
 _N_VIDEO = "50"
+
+# Step-distilled LoRA (lightx2v). Two things make this the 8-step and not the
+# advertised 4-step build:
+#
+#   * Community testing converged on 8 — "the number in the name is not the
+#     number most people should use". 6-8 steps largely removes the motion
+#     smear 4 steps introduces.
+#   * It is distilled at 12/3 video/audio sigma shifts, which is exactly
+#     ComfyUI's MiniMaxH3SigmaShift default. This template has no shift node,
+#     so it inherits those and the LoRA drops in unchanged. The 4-step 768p
+#     build wants 6/3 instead — using it here would be a silent mismatch, not
+#     an error, because nothing validates shifts against the weights.
+#
+# Distillation is documented to hurt "the quietest and most sustained vocal
+# registers", and several of our sets are built on whispered close-mic lines,
+# so this is opt-in per job rather than always-on.
+_TURBO_LORA = "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
+_TURBO_STRENGTH = 0.7   # the publisher's own recommendation
+_TURBO_STEPS = 8
+_N_TURBO_LORA = "9001"
 
 
 def snap_frames(seconds: float) -> int:
@@ -224,6 +245,11 @@ def maybe_build_minimax(
         seed = options.get("seed")
         seed = int(seed) % _SEED_MAX if seed is not None else random.randint(0, _SEED_MAX - 1)
         wf[_N_NOISE]["inputs"]["noise_seed"] = seed
+
+        # Turbo before the explicit steps override, so a caller can still pin a
+        # step count on top of it (e.g. to A/B 8 vs 6 on the same LoRA).
+        if options.get("turbo"):
+            splice_turbo_lora(wf)
 
         if options.get("steps") is not None:
             wf[_N_SCHED]["inputs"]["steps"] = max(1, min(60, int(options["steps"])))
@@ -526,3 +552,23 @@ def splice_autoframe(wf: dict, mode: str, options: dict,
     else:
         wf[_N_REF2V]["inputs"][_REF_GROUP] = {"ref_image_0": [_AF_DECODE, 0]}
     wf.pop(_N_REF_LOAD, None)
+
+
+def splice_turbo_lora(wf: dict) -> None:
+    """Insert the step-distilled LoRA between the UNet and everything using it.
+
+    Both consumers have to be rewired, not just the sampler: BasicScheduler
+    derives the sigma schedule from the model, and a distilled model's schedule
+    is the whole point. Leaving node 32 on the raw UNet would run 8 steps of an
+    undistilled sigma curve — fast and wrong, with no error to show for it.
+    """
+    wf[_N_TURBO_LORA] = {"class_type": "LoraLoaderModelOnly", "inputs": {
+        "lora_name": _TURBO_LORA,
+        "strength_model": _TURBO_STRENGTH,
+        "model": [_N_UNET, 0],
+    }}
+    for nid in (_N_SCHED, _N_GUIDER):
+        node = wf.get(nid)
+        if isinstance(node, dict) and node.get("inputs", {}).get("model") == [_N_UNET, 0]:
+            node["inputs"]["model"] = [_N_TURBO_LORA, 0]
+    wf[_N_SCHED]["inputs"]["steps"] = _TURBO_STEPS

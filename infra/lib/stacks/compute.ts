@@ -253,13 +253,29 @@ export class ComputeStack extends Stack {
     );
     // Container-instance reads let the scaler see capacity that is ALREADY
     // running, so it never leaves a warm GPU idle while a job waits (see
-    // warm_capacity in the handler). These two APIs take a cluster, not a
-    // container-instance ARN, so they cannot be scoped further than the
-    // cluster — and they are read-only.
+    // warm_capacity in the handler). Read-only, but the two APIs authorize on
+    // DIFFERENT resource types and must be granted separately: List takes the
+    // cluster, Describe takes each container-instance ARN. Granting both
+    // against the cluster ARN — which is what this did at first — fails only
+    // Describe, at runtime, with an AccessDenied the handler swallows by
+    // design. It degrades silently back to band-only scaling, so the tell is
+    // in the scaler's log rather than in a failed deploy.
     fn.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: ['ecs:ListContainerInstances', 'ecs:DescribeContainerInstances'],
+        actions: ['ecs:ListContainerInstances'],
         resources: [this.cluster.clusterArn],
+      })
+    );
+    fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ecs:DescribeContainerInstances'],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'ecs',
+            resource: 'container-instance',
+            resourceName: `${this.cluster.clusterName}/*`,
+          }),
+        ],
       })
     );
     new events.Rule(this, 'FleetScalerSchedule', {

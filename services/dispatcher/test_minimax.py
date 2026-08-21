@@ -656,3 +656,57 @@ def test_autoframe_does_not_hijack_the_viewers_prompt():
     assert any(p["text"] == "STILL PROMPT" for p in prompts[1:]), prompts
     # And the job is still attributed to the video model, not Z-Image.
     assert "minimax" in extract._extract_model(parsed)
+
+
+# --- turbo (step-distilled) LoRA -------------------------------------------
+
+def test_turbo_is_off_unless_asked_for():
+    wf = _build()
+    assert not [n for n in wf.values() if n["class_type"] == "LoraLoaderModelOnly"]
+    assert wf["32"]["inputs"]["steps"] == 20
+
+
+def test_turbo_rewires_BOTH_model_consumers():
+    # The sampler is the obvious one; BasicScheduler is the one that bites.
+    # It derives the sigma schedule FROM THE MODEL, and a distilled model's
+    # schedule is the entire point — leaving it on the raw UNet runs 8 steps of
+    # an undistilled curve, which is fast, wrong, and silent.
+    wf = _build(turbo=True)
+    lora = minimax._N_TURBO_LORA
+    assert wf[lora]["inputs"]["model"] == [minimax._N_UNET, 0]
+    assert wf["32"]["inputs"]["model"] == [lora, 0], "BasicScheduler left on the raw UNet"
+    assert wf["33"]["inputs"]["model"] == [lora, 0], "BasicGuider left on the raw UNet"
+
+
+def test_turbo_sets_the_distilled_step_count():
+    wf = _build(turbo=True)
+    assert wf["32"]["inputs"]["steps"] == minimax._TURBO_STEPS == 8
+
+
+def test_turbo_is_the_8_step_build_not_the_4_step():
+    # The 4-step 768p build is distilled at 6/3 sigma shifts; this template has
+    # no shift node, so it inherits ComfyUI's 12/3 default — which is what the
+    # 8-step was distilled at. Picking the 4-step here would mismatch silently.
+    assert "8step" in minimax._TURBO_LORA
+    assert "fl2v" in minimax._TURBO_LORA
+
+
+def test_an_explicit_step_count_still_wins_over_turbo():
+    # So 8 vs 6 can be A/B'd on the same LoRA.
+    wf = _build(turbo=True, steps=6)
+    assert wf["32"]["inputs"]["steps"] == 6
+    assert wf["32"]["inputs"]["model"] == [minimax._N_TURBO_LORA, 0]
+
+
+def test_turbo_graph_is_still_fully_connected():
+    _assert_fully_reachable(_build(turbo=True))
+
+
+def test_turbo_works_alongside_an_autoframed_first_frame():
+    wf = minimax.maybe_build_minimax(
+        {"prompt": "x", "mode": "fl2v", "turbo": True,
+         "autoframe": {"prompt": "Photo. A woman."}}, None)
+    _assert_fully_reachable(wf)
+    # The video LoRA must not leak onto the frame-0 sampler, which is a
+    # different architecture entirely.
+    assert wf[minimax._AF_KSAMPLER]["inputs"]["model"] != [minimax._N_TURBO_LORA, 0]
