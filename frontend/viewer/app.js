@@ -724,8 +724,48 @@
       if (selectMode) toggleSelect(key, filteredIdx, e.shiftKey);
       else openModal(filteredIdx);
     });
-    loadCardMedia(el, item);
+    // Position on THIS page, not in the whole filtered list — page 2 starts at
+    // filteredIdx 75 and its first row is still the first row on screen.
+    _watchCard(el, item, filteredIdx - page * PER_PAGE);
     return el;
+  }
+
+  // Load a card's media only once it is near the viewport.
+  //
+  // Every card on a page used to start loading the moment it was built — 75 at
+  // a time. That was survivable while the gallery was images: <img loading=lazy>
+  // defers the actual fetch on its own. A video card cannot do that. There is no
+  // lazy attribute for <video>, so `preload="metadata"` starts a range request
+  // immediately, and a page of 75 clips opens 75 of them against one S3 host
+  // that allows about six at a time. Everything below the fold competes with
+  // what you are looking at, and the modal's own request queues behind the lot —
+  // which is what "I have to refresh a few times before videos work" is.
+  //
+  // 600px of margin so a normal scroll never catches an empty tile.
+  // The first rows load straight away rather than waiting to be observed. An
+  // IntersectionObserver does not reliably deliver a first callback for what is
+  // ALREADY on screen before the first frame, and "the top of the page is
+  // blank until you jiggle it" would be a worse bug than the one this fixes.
+  const EAGER_CARDS = 15;   // 5 across x 3 rows
+  let _cardObserver = null;
+  // WeakMap: a card dropped by a re-render is collectable without having to be
+  // unobserved first, which a plain Map would prevent.
+  const _cardPending = new WeakMap();
+  function _watchCard(el, item, onScreenIdx) {
+    if (onScreenIdx < EAGER_CARDS) return loadCardMedia(el, item);
+    if (!("IntersectionObserver" in window)) return loadCardMedia(el, item);
+    if (!_cardObserver) {
+      _cardObserver = new IntersectionObserver((entries, obs) => {
+        for (const e of entries) {
+          if (!e.isIntersecting) continue;
+          obs.unobserve(e.target);
+          const pending = _cardPending.get(e.target);
+          if (pending) { _cardPending.delete(e.target); loadCardMedia(e.target, pending); }
+        }
+      }, { rootMargin: "600px" });
+    }
+    _cardPending.set(el, item);
+    _cardObserver.observe(el);
   }
 
   /* ---------- multi-select ---------- */
