@@ -244,6 +244,33 @@ def test_extract_prompts_through_concat_chain():
     assert secs.get("Negative", "").startswith("worst_quality"), secs
 
 
+def test_a_video_prompt_survives_whole():
+    """A MiniMax clip document is 2.5-4k characters and must arrive intact.
+
+    The cap was 2000, justified as bounding the /jobs LIST response — but the
+    list has been lite for a while and carries no prompts, so all the cap did
+    was eat the end of every video prompt on the detail path. It failed
+    silently: the viewer showed a prompt that simply stopped mid-sentence.
+    """
+    doc = ("For the target video, at 0.00 seconds into the target video, "
+           "<Picture 1> (from [Shot 1]) is fully referenced.\n\n"
+           "integrated_multimodal_description: [Shot 1] Candid handheld phone video. " +
+           ("she rolls her hips against the cushion and checks who is watching. " * 60))
+    assert len(doc) > 3000, len(doc)
+    wf = {
+        "6": {"class_type": "CLIPTextEncode", "_meta": {"title": "Positive"},
+              "inputs": {"text": doc, "clip": ["1", 0]}},
+        "7": {"class_type": "CLIPTextEncode", "_meta": {"title": "Negative"},
+              "inputs": {"text": "worst quality", "clip": ["1", 0]}},
+        "9": {"class_type": "KSampler", "_meta": {"title": "KSampler"},
+              "inputs": {"positive": ["6", 0], "negative": ["7", 0]}},
+    }
+    secs = {s["label"]: s["text"] for s in h._extract_prompts(wf)}
+    got = secs.get("Positive", "")
+    assert len(got) == len(doc.strip()), (len(got), len(doc.strip()))
+    assert got.rstrip().endswith("watching."), got[-60:]
+
+
 def test_serialize_job_only_adds_character_for_pending_statuses():
     item = {
         "job_id": {"S": "j1"},

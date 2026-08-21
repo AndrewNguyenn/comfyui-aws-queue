@@ -110,7 +110,15 @@ def _extract_model(wf: dict) -> str:
     return name.rsplit("/", 1)[-1].rsplit(".", 1)[0]
 
 
-_PROMPT_MAX = 2000  # cap each prompt — keeps the /jobs list response bounded
+# Cap each prompt. The old value was 2000, justified as keeping the /jobs LIST
+# response bounded — but the list has been lite for a while now and carries no
+# prompts at all (see _list_jobs: ~600 B a row). The cap only ever applied to
+# the single-job detail, where it silently ate the end of every video prompt:
+# a MiniMax clip document runs 2.5-4k characters, so the viewer was showing
+# them cut off mid-sentence with nothing to say so. Still bounded, because a
+# workflow can embed an arbitrarily large string and this response has to fit
+# in Lambda's 6 MB — but bounded far above any real prompt.
+_PROMPT_MAX = 20000
 
 # Prompt-specific text input keys — safe to read on any node: a CLIPTextEncode
 # (`text`), an SDXL encoder (`text_g`/`text_l`), a String Literal (`string`),
