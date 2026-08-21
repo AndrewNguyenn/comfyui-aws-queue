@@ -32,6 +32,14 @@ Video bands: video jobs are long-running (minutes, not seconds) and aren't
 worth batching, so a single queued job gets a worker immediately. A couple
 more queued jobs justifies a second worker; >=6 goes to MAX.
 
+Scale-UP has one override on the bands: if work is WAITING and this fleet
+already has warm, agent-connected container instances, the target rises to use
+them (capped by how many jobs are actually waiting). The bands exist to avoid
+paying a cold start for a shallow queue; that argument says nothing about a box
+that is already running. Without this, the capacity provider could hold an idle
+instance while a job sat in the queue — paying for two and using one. It never
+LAUNCHES an instance, so the lazy ramp is unchanged.
+
 Scale-DOWN is sticky, per fleet — a fleet never sheds workers while its own
 queue has work. Once N workers are up they stay up (`max(current, target)`)
 for as long as anything is visible or in flight on THAT fleet's queue.
@@ -114,14 +122,58 @@ def step_target(visible: int, bands: list, max_workers: int) -> int:
     return max_workers
 
 
-def decide(visible: int, inflight: int, current: int, bands: list, max_workers: int) -> int:
-    """Desired worker count for one fleet's queue + current state."""
+def decide(visible: int, inflight: int, current: int, bands: list,
+           max_workers: int, warm: int = 0) -> int:
+    """Desired worker count for one fleet's queue + current state.
+
+    `warm` is how many container instances are registered and agent-connected
+    for this fleet — capacity that is already running and already being paid
+    for. The bands alone ignore it, and that produced the worst possible
+    outcome: a job waiting in the queue while a warm, idle GPU sat next to it,
+    because the band table said a shallow queue does not justify a worker.
+
+    That reasoning is about COLD STARTS — roughly 7 minutes to stage ~50 GiB of
+    weights — and it does not apply to a box that is already up. So when work is
+    actually waiting, never target fewer workers than the warm capacity can
+    absorb. This only ever RAISES the target toward instances that already
+    exist; it never launches one, so the lazy ramp is untouched.
+    """
     if visible == 0 and inflight == 0:
-        # Fully cleared — release gradually (see module docstring).
+        # Fully cleared — release gradually (see module docstring). No warm
+        # boost here, or a fleet with registered instances could never reach 0.
         return max(0, current - 1)
-    # Ratchet up to the step target; never shed while work remains. The
+    target = step_target(visible, bands, max_workers)
+    if visible > 0:
+        # Cap at current + visible: put a warm box to work on a job that is
+        # actually waiting, never spin idle tasks for work that does not exist.
+        target = max(target, min(warm, current + visible))
+    # Ratchet up to the target; never shed while work remains. The
     # min(..., max_workers) also lets a lowered *Max shrink a live fleet.
-    return min(max(current, step_target(visible, bands, max_workers)), max_workers)
+    return min(max(current, target), max_workers)
+
+
+def warm_capacity(fleet_name: str) -> int:
+    """Container instances for this fleet that could take a task right now.
+
+    Best-effort: any failure returns 0, which degrades to the old band-only
+    behaviour rather than breaking the tick. An instance whose agent is
+    disconnected is not counted — it cannot be placed on.
+    """
+    try:
+        arns = ecs.list_container_instances(
+            cluster=CLUSTER,
+            filter=f"attribute:fleet == {fleet_name}",
+            status="ACTIVE",
+        ).get("containerInstanceArns") or []
+        if not arns:
+            return 0
+        instances = ecs.describe_container_instances(
+            cluster=CLUSTER, containerInstances=arns,
+        ).get("containerInstances") or []
+        return sum(1 for i in instances if i.get("agentConnected"))
+    except Exception as e:  # noqa: BLE001
+        print(f"scaler: warm_capacity({fleet_name}) failed, ignoring: {e!r}")
+        return 0
 
 
 def lambda_handler(_event, _context):
@@ -155,7 +207,8 @@ def _scale_fleet(fleet: dict) -> dict:
 
     bands = fleet["bands"]
     max_workers = fleet["max_workers"]
-    new_desired = decide(visible, inflight, current, bands, max_workers)
+    warm = warm_capacity(fleet["name"]) if visible > 0 else 0
+    new_desired = decide(visible, inflight, current, bands, max_workers, warm)
 
     action = "hold"
     if new_desired != current:

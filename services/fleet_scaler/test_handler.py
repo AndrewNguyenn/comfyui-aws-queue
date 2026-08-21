@@ -155,3 +155,47 @@ def test_no_fleet_ramps_straight_to_max_on_one_message():
     # max_workers at depth 1 has no ramp at all.
     for name, bands in h._BANDS.items():
         assert h.step_target(1, bands, 3) < 3, f"{name} wakes the whole fleet for one job"
+
+
+# --- warm capacity ---------------------------------------------------------
+# The bands count only queue depth, which let the capacity provider hold an
+# idle instance while a job waited: billed for two, using one. Observed live —
+# 2 g6e running, 1 task, 1 job queued, CapacityProviderReservation at 50.
+
+def test_a_waiting_job_uses_a_warm_instance_the_bands_would_ignore():
+    # 1 queued, 1 running, 2 warm boxes. Bands say 1 (depth < 6); the warm one
+    # should be put to work rather than sit idle at full price.
+    assert h.decide(1, 1, 1, h.MINIMAX_BANDS, 3, warm=2) == 2
+
+
+def test_warm_capacity_never_exceeds_the_work_that_is_waiting():
+    # 3 warm boxes, 1 job waiting -> 2 workers (the running one plus that job),
+    # not 3. Idle tasks for work that does not exist help nobody.
+    assert h.decide(1, 1, 1, h.MINIMAX_BANDS, 3, warm=3) == 2
+
+
+def test_warm_capacity_is_still_bounded_by_max_workers():
+    assert h.decide(5, 0, 1, h.MINIMAX_BANDS, 3, warm=9) == 3
+
+
+def test_warm_capacity_never_launches_beyond_the_band_when_nothing_is_warm():
+    # The lazy ramp is the whole point of the bands; warm=0 must not change it.
+    assert h.decide(1, 0, 0, h.MINIMAX_BANDS, 3, warm=0) == 1
+    assert h.decide(5, 0, 0, h.MINIMAX_BANDS, 3, warm=0) == 1
+
+
+def test_warm_capacity_does_not_block_release_to_zero():
+    # The dangerous case: a fleet with registered instances must still drain to
+    # 0 when its queue is clear, or it can never scale in.
+    assert h.decide(0, 0, 2, h.MINIMAX_BANDS, 3, warm=2) == 1
+    assert h.decide(0, 0, 1, h.MINIMAX_BANDS, 3, warm=2) == 0
+
+
+def test_inflight_only_does_not_summon_warm_workers():
+    # Nothing is WAITING — the job in flight already has a worker. Adding one
+    # would be an idle task.
+    assert h.decide(0, 1, 1, h.MINIMAX_BANDS, 3, warm=3) == 1
+
+
+def test_warm_capacity_defaults_off_for_existing_callers():
+    assert h.decide(1, 1, 1, h.MINIMAX_BANDS, 3) == 1

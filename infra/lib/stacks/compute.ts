@@ -251,6 +251,17 @@ export class ComputeStack extends Stack {
         resources: fleets.map((f) => f.service.serviceArn),
       })
     );
+    // Container-instance reads let the scaler see capacity that is ALREADY
+    // running, so it never leaves a warm GPU idle while a job waits (see
+    // warm_capacity in the handler). These two APIs take a cluster, not a
+    // container-instance ARN, so they cannot be scoped further than the
+    // cluster — and they are read-only.
+    fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ecs:ListContainerInstances', 'ecs:DescribeContainerInstances'],
+        resources: [this.cluster.clusterArn],
+      })
+    );
     new events.Rule(this, 'FleetScalerSchedule', {
       ruleName: 'comfy-fleet-scaler-tick',
       schedule: events.Schedule.rate(Duration.minutes(1)),
