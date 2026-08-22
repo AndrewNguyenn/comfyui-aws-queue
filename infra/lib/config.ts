@@ -278,8 +278,30 @@ export const APP_CONFIG: AppConfig = {
       // "fallback", it makes it the default, which is how the first attempt
       // landed on 64 GB and OOMed. Every entry here must be a size that can
       // actually run the job, so the only fallback is a LARGER one.
-      primaryInstanceType: 'g6e.4xlarge',
-      fallbackInstanceTypes: ['g6e.8xlarge'],
+      // 2026-08-21: 8xlarge promoted. Not for the RAM — 4xlarge's 128 GB was
+      // already enough — but because the spot market inverted: g6e.4xlarge is
+      // bid up to its ON-DEMAND price ($3.0042 in 1b/1c/1d, a 0% discount)
+      // while 8xlarge sits at $1.72-1.93. Twice the machine for 43% less, and
+      // every g6e size carries exactly ONE L40S, so this buys no GPU and costs
+      // no speed — the workload is GPU-bound and samples identically on both.
+      //
+      // SINGLE entry, deliberately. price-capacity-optimized ignores the order
+      // below and weighs interruption risk as heavily as price, which is why
+      // this fleet kept landing on 4xlarge even while 8xlarge was 43% cheaper.
+      // Leaving 4xlarge in the list as a "fallback" would therefore not be a
+      // fallback — it would keep being the pick, at 2 x 16 = 32 vCPU, stranding
+      // half the quota. The only way to actually select a pool under this
+      // strategy is to be the only pool.
+      //
+      // The cost is real: no fallback means an 8xlarge capacity drought stalls
+      // the fleet outright rather than degrading to a pricier size. Re-adding
+      // 'g6e.4xlarge' here is the one-line rollback if that happens.
+      //
+      // vCPU accounting against the 64 G/VT spot quota: 2 x 32 = 64 exactly,
+      // which is why minimaxMax is 2. Three 8xlarges cannot coexist under this
+      // quota, so asking for a third would strand it pending forever.
+      primaryInstanceType: 'g6e.8xlarge',
+      fallbackInstanceTypes: [],
       // 45 GiB of weights land on the NVMe instance store, not this volume,
       // but the ~26 GB container image is extracted here on every cold boot.
       rootVolumeGb: 250,
@@ -319,6 +341,12 @@ export const APP_CONFIG: AppConfig = {
     videoMin: 0,
     videoMax: 3, // v3: lowered from 5 (resolves N2)
     minimaxMin: 0,
+    // 2 not 3, and the binding constraint is the G/VT spot quota rather than
+    // appetite: the fleet is now g6e.8xlarge (32 vCPU each), so 2 x 32 = 64
+    // saturates the quota exactly. A third would sit pending forever, which is
+    // the MaxSpotInstanceCountExceeded failure this fleet already hit once at
+    // 3 x 4xlarge. Raise to 3 only if the pending 96 vCPU increase lands.
+    //
     // Was 1 ("raise once there is a real queue for it"). That queue arrived:
     // ~30 clips at ~16 min each is ~8 hours serialised behind one worker, so
     // the burn a second worker adds is offset by finishing in a third of the
@@ -326,7 +354,7 @@ export const APP_CONFIG: AppConfig = {
     // ~50 GiB of MiniMax weights plus ~13 GiB of RedMix for frame 0, so this
     // only pays off across a deep queue — which is exactly when the scaler's
     // depth bands ramp to it.
-    minimaxMax: 3,
+    minimaxMax: 2,
     // NOTE: targetBacklogPerTask is a leftover from a BacklogPerTask design
     // that was never wired up (both fleets used a flat targetValue=1 message
     // instead — see attachSqsTargetTracking's history) and is unread anywhere
