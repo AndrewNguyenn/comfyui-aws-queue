@@ -457,6 +457,10 @@ export class ComputeStack extends Stack {
           // OOM-unstable on g4dn.xlarge — reverted; see config.ts.)
           spotAllocationStrategy:
             autoscaling.SpotAllocationStrategy.PRICE_CAPACITY_OPTIMIZED,
+          // Per-fleet bid ceiling; unset means bid on-demand (the AWS default).
+          // A ceiling under the market price yields NO capacity rather than a
+          // pricier instance — see fleet.spotMaxPrice in config.ts.
+          ...(fleet.spotMaxPrice ? { spotMaxPrice: fleet.spotMaxPrice } : {}),
         },
       },
       minCapacity,

@@ -88,6 +88,11 @@ export interface FleetConfig {
   readonly fleetName: FleetName;
   readonly primaryInstanceType: string;
   readonly fallbackInstanceTypes: readonly string[];
+  /** Spot bid ceiling in USD/hr. Omit to bid the on-demand price (the AWS
+   *  default). A ceiling below the market price means NO capacity at all —
+   *  the fleet stalls silently rather than paying more — so only set this
+   *  where the pool's price is well understood. */
+  readonly spotMaxPrice?: string;
   readonly rootVolumeGb: number;
   // gp3 root-volume performance. The container image (~26 GB uncompressed for
   // image, similar for video) is pulled + extracted to /var/lib/docker on this
@@ -302,6 +307,18 @@ export const APP_CONFIG: AppConfig = {
       // quota, so asking for a third would strand it pending forever.
       primaryInstanceType: 'g6e.8xlarge',
       fallbackInstanceTypes: [],
+      // Bid ceiling. Without one AWS bids the on-demand price, which is how
+      // the 4xlarge ended up costing exactly on-demand ($3.0042) with a 0%
+      // spot discount. g6e.8xlarge has held $1.74-1.90 across every AZ for
+      // days, so $2.00 caps the downside with ~5-13% headroom.
+      //
+      // The risk this creates is a SILENT STALL: if the pool rises above
+      // $2.00, nothing launches and jobs queue indefinitely with no error —
+      // and with fallbackInstanceTypes empty there is no second pool to catch
+      // it either. Two independent stall conditions now. If the fleet ever
+      // sits at 0 instances with a non-empty queue, check the spot price
+      // before anything else, and raise or remove this.
+      spotMaxPrice: '2.00',
       // 45 GiB of weights land on the NVMe instance store, not this volume,
       // but the ~26 GB container image is extracted here on every cold boot.
       rootVolumeGb: 250,
