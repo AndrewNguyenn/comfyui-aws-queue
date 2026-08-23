@@ -125,8 +125,23 @@ _N_VIDEO = "50"
 # below", so that is the default and 1.0 is the hard cap. It is spliced the same
 # way as the turbo LoRA and composes with it.
 _NSFW_LORA = "HMNSFW_AIO_V2.safetensors"
-_NSFW_STRENGTH = 0.5
+_NSFW_STRENGTH = 0.35   # 0.5 is the author's ceiling; 0.35 renders anatomy cleaner
 _N_NSFW_LORA = "9002"
+
+# The finish is a second LoRA, and its author says it stacks on top of the
+# anatomy ones. Trigger `cumshot` on V0.5; his recommended weight is 0.9, and
+# with it he runs the 8-step turbo LoRA at 0.20 rather than its own 0.7 — a
+# distilled schedule that strong walks over the action this one is for.
+_CUMSHOT_LORA = "HMCumshot_V2.safetensors"
+_CUMSHOT_STRENGTH = 0.9
+_CUMSHOT_TURBO_STRENGTH = 0.20
+_N_CUMSHOT_LORA = "9003"
+
+# The finish itself, as our writer names it once the hardcore register is on.
+_CUMSHOT_RE = re.compile(
+    r"\b(cumshot|cumming|cum|creampie|ejaculat\w*|spurts?|load)\b",
+    re.IGNORECASE,
+)
 
 # What counts as a clip this LoRA is for. Every word here is one our own writer
 # actually produces — it is told to name anatomy directly, so "cock" and "cum"
@@ -140,9 +155,18 @@ _SEX_RE = re.compile(
     # Insertion is one of the six acts it was trained on, and the solo version
     # of it is the one the act words above miss: a clip can be a toy or her own
     # fingers with no partner in it anywhere.
-    r"dildo|vibrator|fingering)\b"
+    r"dildo|vibrator|fingering|"
+    # The clinical half. Once the writer knows a LoRA is attached it stops
+    # saying "cock" on purpose — that word appears zero times in what the LoRA
+    # was trained on — and says penis / shaft / glans instead. Detecting only
+    # the blunt words would mean the register switch silently turned the LoRA
+    # OFF for exactly the clips it exists for. The trigger tokens are here for
+    # the same reason: they are the most reliable signal of all, because the
+    # writer only ever emits them in this register.
+    r"hmmotion|penis|shaft|glans|corona ridge|urethral|vulva|labia majora|"
+    r"inner labia|clitoral hood|perineum|scrotum)\b"
     r"|\bfingers?\s+(?:\w+\s+){0,2}(?:into|inside)\s+her\b"
-    r"|\b(?:into|inside)\s+her\s+(?:pussy|arse|ass)\b",
+    r"|\b(?:into|inside)\s+her\s+(?:pussy|arse|ass|vulva|vagina)\b",
     re.IGNORECASE,
 )
 
@@ -278,11 +302,17 @@ def maybe_build_minimax(
         nsfw = nsfw_lora_strength(options)
         if nsfw:
             splice_nsfw_lora(wf, nsfw)
+        cumshot = cumshot_lora_strength(options)
+        if cumshot:
+            splice_cumshot_lora(wf, cumshot)
 
         # Turbo before the explicit steps override, so a caller can still pin a
-        # step count on top of it (e.g. to A/B 8 vs 6 on the same LoRA).
+        # step count on top of it (e.g. to A/B 8 vs 6 on the same LoRA). With
+        # the finish LoRA in the chain it goes in at its author's recommended
+        # 0.20 instead of 0.7: at full strength the distilled schedule flattens
+        # the action the finish LoRA exists to produce.
         if options.get("turbo"):
-            splice_turbo_lora(wf)
+            splice_turbo_lora(wf, _CUMSHOT_TURBO_STRENGTH if cumshot else _TURBO_STRENGTH)
 
         if options.get("steps") is not None:
             wf[_N_SCHED]["inputs"]["steps"] = max(1, min(60, int(options["steps"])))
@@ -617,15 +647,36 @@ def _splice_model_lora(wf: dict, nid: str, lora_name: str, strength: float) -> N
             node["inputs"]["model"] = [nid, 0]
 
 
-def splice_turbo_lora(wf: dict) -> None:
+def splice_turbo_lora(wf: dict, strength: float = _TURBO_STRENGTH) -> None:
     """The step-distilled LoRA, plus the step count that is the point of it."""
-    _splice_model_lora(wf, _N_TURBO_LORA, _TURBO_LORA, _TURBO_STRENGTH)
+    _splice_model_lora(wf, _N_TURBO_LORA, _TURBO_LORA, strength)
     wf[_N_SCHED]["inputs"]["steps"] = _TURBO_STEPS
 
 
 def splice_nsfw_lora(wf: dict, strength: float = _NSFW_STRENGTH) -> None:
     """The sex LoRA. Weights only — no step count, no schedule of its own."""
     _splice_model_lora(wf, _N_NSFW_LORA, _NSFW_LORA, strength)
+
+
+def splice_cumshot_lora(wf: dict, strength: float = _CUMSHOT_STRENGTH) -> None:
+    """The finish LoRA, stacked on top of the anatomy one."""
+    _splice_model_lora(wf, _N_CUMSHOT_LORA, _CUMSHOT_LORA, strength)
+
+
+def cumshot_lora_strength(options: dict) -> float:
+    """How strongly to apply the finish LoRA — 0.0 for not at all.
+
+    Same shape as nsfw_lora_strength: read from the prompt, overridable with
+    `cumshot_lora` in the options.
+    """
+    want = options.get("cumshot_lora")
+    if want is False:
+        return 0.0
+    if isinstance(want, bool):
+        return _CUMSHOT_STRENGTH
+    if isinstance(want, (int, float)):
+        return max(0.0, min(1.0, float(want)))
+    return _CUMSHOT_STRENGTH if _CUMSHOT_RE.search(str(options.get("prompt") or "")) else 0.0
 
 
 def nsfw_lora_strength(options: dict) -> float:
