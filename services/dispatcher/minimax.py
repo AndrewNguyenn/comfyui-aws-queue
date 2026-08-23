@@ -128,18 +128,29 @@ _NSFW_LORA = "HMNSFW_AIO_V2.safetensors"
 _NSFW_STRENGTH = 0.35   # 0.5 is the author's ceiling; 0.35 renders anatomy cleaner
 _N_NSFW_LORA = "9002"
 
-# The finish is a second LoRA, and its author says it stacks on top of the
-# anatomy ones. Trigger `cumshot` on V0.5; his recommended weight is 0.9, and
-# with it he runs the 8-step turbo LoRA at 0.20 rather than its own 0.7 — a
-# distilled schedule that strong walks over the action this one is for.
-_CUMSHOT_LORA = "HMCumshot_V2.safetensors"
-_CUMSHOT_STRENGTH = 0.9
-_CUMSHOT_TURBO_STRENGTH = 0.20
+# The finish is a second LoRA, stacked on top of the anatomy one. Epic Cumshots
+# (civitai 2621242, H3 ALPHA), trained as I2V and working — its author says — in
+# the reference model, which is the path every clip here takes. Trigger is
+# `CUMSH0T` with a ZERO, and he runs it at 1.0 on every example he published:
+# "lower than strength 1.0 will roll it back to H3's default paint bucket
+# cumshot". He is equally blunt about the cost — experimental, runny semen, and
+# H3 LoRA quality generally.
+#
+# It replaced HMCumshot_V2 (trigger `cumshot`, weight 0.9), which came with its
+# author's own pairing: the 8-step turbo LoRA dropped to 0.20 because a
+# distilled schedule that strong walked over the action. This one's author says
+# nothing about turbo, so there is no longer a number to justify overriding it
+# and turbo runs at its own 0.7. If the finish comes back flattened, that is the
+# first knob to turn.
+_CUMSHOT_LORA = "epic_cumshots-MiniMaxH3-ALPHA-CUMSH0T.safetensors"
+_CUMSHOT_STRENGTH = 1.0
 _N_CUMSHOT_LORA = "9003"
 
-# The finish itself, as our writer names it once the hardcore register is on.
+# The finish itself, as our writer names it once the hardcore register is on —
+# including the trigger token, which is the most reliable signal of all because
+# nothing else in the language produces it.
 _CUMSHOT_RE = re.compile(
-    r"\b(cumshot|cumming|cum|creampie|ejaculat\w*|spurts?|load)\b",
+    r"\b(cumsh0t|cumshot|cumming|cum|creampie|ejaculat\w*|spurts?|load|semen)\b",
     re.IGNORECASE,
 )
 
@@ -163,7 +174,7 @@ _SEX_RE = re.compile(
     # OFF for exactly the clips it exists for. The trigger tokens are here for
     # the same reason: they are the most reliable signal of all, because the
     # writer only ever emits them in this register.
-    r"hmmotion|penis|shaft|glans|corona ridge|urethral|vulva|labia majora|"
+    r"hmmotion|cumsh0t|penis|shaft|glans|corona ridge|urethral|vulva|labia majora|"
     r"inner labia|clitoral hood|perineum|scrotum)\b"
     r"|\bfingers?\s+(?:\w+\s+){0,2}(?:into|inside)\s+her\b"
     r"|\b(?:into|inside)\s+her\s+(?:pussy|arse|ass|vulva|vagina)\b",
@@ -307,12 +318,9 @@ def maybe_build_minimax(
             splice_cumshot_lora(wf, cumshot)
 
         # Turbo before the explicit steps override, so a caller can still pin a
-        # step count on top of it (e.g. to A/B 8 vs 6 on the same LoRA). With
-        # the finish LoRA in the chain it goes in at its author's recommended
-        # 0.20 instead of 0.7: at full strength the distilled schedule flattens
-        # the action the finish LoRA exists to produce.
+        # step count on top of it (e.g. to A/B 8 vs 6 on the same LoRA).
         if options.get("turbo"):
-            splice_turbo_lora(wf, _CUMSHOT_TURBO_STRENGTH if cumshot else _TURBO_STRENGTH)
+            splice_turbo_lora(wf, _TURBO_STRENGTH)
 
         if options.get("steps") is not None:
             wf[_N_SCHED]["inputs"]["steps"] = max(1, min(60, int(options["steps"])))

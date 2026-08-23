@@ -790,8 +790,11 @@ def test_it_does_not_leak_onto_the_first_frame_sampler():
 
 _CLINICAL = ("hmmotion, blowjob, pov, fast, close-up. Her hand flattens the shaft against "
              "her lips, the glans darker pink than the taut shaft, the corona ridge dragging.")
-_FINISH = ("hmmotion, cumshot, handjob, pov, fast, close-up. Four heavy spurts of thick "
-           "opaque white cum across her cheekbone, the last running off her chin.")
+_FINISH = ("hmmotion, handjob, pov, fast, close-up. CUMSH0T. Continuous short pulses of long "
+           "ropes of white semen across her cheekbone, the last running off her chin.")
+# The trigger with a zero in it, and nothing else a detector could catch on: the
+# writer emits it for the finish LoRA and for nothing else.
+_TRIGGER_ONLY = "CUMSH0T."
 
 
 def test_the_clinical_register_still_attaches_the_sex_lora():
@@ -814,9 +817,25 @@ def test_the_sex_lora_strength_dropped_to_035():
 def test_a_finish_attaches_the_cumshot_lora_too():
     wf = _build(prompt=_FINISH)
     node = wf[minimax._N_CUMSHOT_LORA]
-    assert node["inputs"]["lora_name"] == "HMCumshot_V2.safetensors", node
-    assert node["inputs"]["strength_model"] == 0.9, node
+    assert node["inputs"]["lora_name"] == "epic_cumshots-MiniMaxH3-ALPHA-CUMSH0T.safetensors", node
+    # Its author's own number, and he is explicit that under it the LoRA rolls
+    # back to H3's default paint-bucket finish.
+    assert node["inputs"]["strength_model"] == 1.0, node
     _assert_fully_reachable(wf)
+
+
+def test_the_finish_trigger_alone_attaches_both():
+    # The zero is the trap: `cumsh0t` does not match a detector written for the
+    # word cumshot, and a clip carrying only the trigger would have rendered
+    # with neither LoRA on it.
+    assert minimax.cumshot_lora_strength({"prompt": _TRIGGER_ONLY}) == 1.0
+    assert minimax.nsfw_lora_strength({"prompt": _TRIGGER_ONLY}) == 0.35
+
+
+def test_semen_counts_as_a_finish():
+    # The new LoRA was captioned in that word, so the writer now uses it.
+    assert minimax.cumshot_lora_strength(
+        {"prompt": "long ropes of white semen across her mouth"}) == 1.0
 
 
 def test_a_clip_with_no_finish_does_not_get_it():
@@ -834,11 +853,12 @@ def test_all_three_chain_in_order():
         assert wf[nid]["inputs"]["model"] == [minimax._N_TURBO_LORA, 0], nid
 
 
-def test_turbo_backs_off_when_the_finish_lora_is_in():
-    # Its author runs the 8-step turbo at 0.20 alongside this one; at 0.7 the
-    # distilled schedule flattens the action the finish LoRA is for.
+def test_turbo_runs_at_its_own_strength_either_way():
+    # HMCumshot's author ran the 8-step turbo at 0.20 alongside his LoRA, and we
+    # followed him. Epic Cumshots says nothing about turbo, so there is no
+    # number to justify overriding the publisher's own 0.7 any more.
     hot = _build(prompt=_FINISH, turbo=True)
-    assert hot[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == 0.20
+    assert hot[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == 0.7
     plain = _build(prompt=_CLINICAL, turbo=True)
     assert plain[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == 0.7
 
