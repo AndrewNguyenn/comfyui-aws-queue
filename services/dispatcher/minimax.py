@@ -655,10 +655,29 @@ def _splice_model_lora(wf: dict, nid: str, lora_name: str, strength: float) -> N
             node["inputs"]["model"] = [nid, 0]
 
 
-def splice_turbo_lora(wf: dict, strength: float = _TURBO_STRENGTH) -> None:
-    """The step-distilled LoRA, plus the step count that is the point of it."""
+def splice_turbo_lora(
+    wf: dict, strength: float = _TURBO_STRENGTH, steps: int = _TURBO_STEPS
+) -> None:
+    """The step-distilled LoRA, plus the step count that is the point of it.
+
+    The two are one setting. This pinned the step count at 8 whatever strength
+    it was handed, and for a while the finish LoRA's own pairing handed it 0.20
+    — so four clips rendered 8 steps of a model that was 20% distilled. Fast
+    and wrong with no error to show for it, exactly as the splice helper's
+    docstring warns, and it came back as malformed faces and bodies.
+
+    So weakening the distillation without buying the steps back is refused. It
+    fails at submit, where it is one message, instead of at the end of a
+    twelve-minute render where it is a video nobody can use.
+    """
+    if strength < _TURBO_STRENGTH and steps <= _TURBO_STEPS:
+        raise ValueError(
+            f"turbo at {strength} is a partly distilled model; {steps} steps is "
+            f"the schedule for a fully distilled one ({_TURBO_STRENGTH}). Lowering "
+            "the strength means raising the steps — pass both."
+        )
     _splice_model_lora(wf, _N_TURBO_LORA, _TURBO_LORA, strength)
-    wf[_N_SCHED]["inputs"]["steps"] = _TURBO_STEPS
+    wf[_N_SCHED]["inputs"]["steps"] = steps
 
 
 def splice_nsfw_lora(wf: dict, strength: float = _NSFW_STRENGTH) -> None:

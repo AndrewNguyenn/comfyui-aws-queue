@@ -866,3 +866,33 @@ def test_turbo_runs_at_its_own_strength_either_way():
 def test_the_caller_can_veto_the_finish_lora():
     assert minimax.cumshot_lora_strength({"prompt": _FINISH, "cumshot_lora": False}) == 0.0
     assert minimax.cumshot_lora_strength({"prompt": _CLINICAL, "cumshot_lora": 0.5}) == 0.5
+
+
+def test_weakening_the_distillation_without_steps_is_refused():
+    """The pairing that cost four renders: 8 steps of a 20%-distilled model.
+
+    It rendered, it took twelve minutes, and it came back with malformed faces
+    and bodies. Nothing in the graph said anything was wrong, because nothing
+    was checking.
+    """
+    wf = _build(prompt=_FINISH, turbo=False)
+    try:
+        minimax.splice_turbo_lora(wf, 0.2)
+    except ValueError as e:
+        assert "steps" in str(e), e
+    else:
+        raise AssertionError("turbo at 0.2 on an 8-step schedule was allowed")
+
+
+def test_lowering_the_strength_is_fine_when_the_steps_come_with_it():
+    wf = _build(prompt=_FINISH, turbo=False)
+    minimax.splice_turbo_lora(wf, 0.2, steps=24)
+    assert wf[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == 0.2
+    assert wf[minimax._N_SCHED]["inputs"]["steps"] == 24
+    _assert_fully_reachable(wf)
+
+
+def test_the_default_pairing_is_the_distilled_one():
+    wf = _build(prompt=_FINISH, turbo=True)
+    assert wf[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == minimax._TURBO_STRENGTH
+    assert wf[minimax._N_SCHED]["inputs"]["steps"] == minimax._TURBO_STEPS
