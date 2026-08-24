@@ -672,30 +672,73 @@ def test_turbo_rewires_BOTH_model_consumers():
     # schedule is the entire point — leaving it on the raw UNet runs 8 steps of
     # an undistilled curve, which is fast, wrong, and silent.
     wf = _build(turbo=True, mode="fl2v")
-    lora = minimax._N_TURBO_LORA
+    lora, shift = minimax._N_TURBO_LORA, minimax._N_SIGMA_SHIFT
     assert wf[lora]["inputs"]["model"] == [minimax._N_UNET, 0]
-    assert wf["32"]["inputs"]["model"] == [lora, 0], "BasicScheduler left on the raw UNet"
-    assert wf["33"]["inputs"]["model"] == [lora, 0], "BasicGuider left on the raw UNet"
+    assert wf[shift]["inputs"]["model"] == [lora, 0]
+    assert wf["32"]["inputs"]["model"] == [shift, 0], "BasicScheduler left on the raw UNet"
+    assert wf["33"]["inputs"]["model"] == [shift, 0], "BasicGuider left on the raw UNet"
 
 
 def test_turbo_sets_the_distilled_step_count():
     wf = _build(turbo=True, mode="fl2v")
-    assert wf["32"]["inputs"]["steps"] == minimax._TURBO_STEPS == 8
+    assert wf["32"]["inputs"]["steps"] == minimax._TURBO_BUILDS[("fl2v", 8)]["steps"] == 8
 
 
-def test_turbo_is_the_8_step_build_not_the_4_step():
-    # The 4-step 768p build is distilled at 6/3 sigma shifts; this template has
-    # no shift node, so it inherits ComfyUI's 12/3 default — which is what the
-    # 8-step was distilled at. Picking the 4-step here would mismatch silently.
-    assert "8step" in minimax._TURBO_LORA
-    assert "fl2v" in minimax._TURBO_LORA
+def test_a_bare_turbo_flag_is_still_the_8_step_build():
+    # `turbo: true` is what every job queued while this was a checkbox carries,
+    # and 8 steps is what it rendered. A step count is now a choice; the
+    # absence of one is not a licence to change what those jobs mean.
+    wf = _build(turbo=True, mode="fl2v")
+    assert "8step" in wf[minimax._N_TURBO_LORA]["inputs"]["lora_name"]
+    assert "fl2v" in wf[minimax._N_TURBO_LORA]["inputs"]["lora_name"]
+
+
+def test_the_four_step_build_brings_its_own_shifts():
+    """The mismatch this table exists to prevent.
+
+    The 4-step 768p build is distilled at 6/3 video/audio shifts; the 8-step at
+    12/3, which is also MiniMaxH3SigmaShift's default. Splice the 4-step LoRA
+    and inherit the default and it renders — wrong, quietly, with nothing in
+    the graph to say so.
+    """
+    wf = _build(turbo=4, mode="fl2v")
+    assert "4step" in wf[minimax._N_TURBO_LORA]["inputs"]["lora_name"]
+    assert "768p" in wf[minimax._N_TURBO_LORA]["inputs"]["lora_name"]
+    assert wf["32"]["inputs"]["steps"] == 4
+    shift = wf[minimax._N_SIGMA_SHIFT]["inputs"]
+    assert (shift["shift_video"], shift["shift_audio"]) == (6.0, 3.0), shift
+    _assert_fully_reachable(wf)
+
+
+def test_the_eight_step_build_writes_its_shifts_explicitly():
+    # They happen to equal the node's defaults. Writing them anyway is what
+    # keeps the 4-step from ever inheriting them.
+    wf = _build(turbo=8, mode="fl2v")
+    shift = wf[minimax._N_SIGMA_SHIFT]["inputs"]
+    assert (shift["shift_video"], shift["shift_audio"]) == (12.0, 3.0), shift
+
+
+def test_the_step_count_can_be_written_out():
+    # The panel sends what the operator picked; "4step" reads better in a log
+    # than 4 does, and both have to mean the same build.
+    for want in (4, "4", "4step", "4 step"):
+        wf = _build(turbo=want, mode="fl2v")
+        assert wf["32"]["inputs"]["steps"] == 4, want
+
+
+def test_a_step_count_with_no_build_is_refused():
+    # Not rounded to the nearest build, not silently ignored: there is no
+    # 6-step distillation, and pretending otherwise is how you get a
+    # twelve-minute render of the wrong schedule.
+    assert _build(turbo=6, mode="fl2v") is None
+    assert _build(turbo="fast", mode="fl2v") is None
 
 
 def test_an_explicit_step_count_still_wins_over_turbo():
     # So 8 vs 6 can be A/B'd on the same LoRA.
     wf = _build(turbo=True, steps=6, mode="fl2v")
     assert wf["32"]["inputs"]["steps"] == 6
-    assert wf["32"]["inputs"]["model"] == [minimax._N_TURBO_LORA, 0]
+    assert wf["32"]["inputs"]["model"] == [minimax._N_SIGMA_SHIFT, 0]
 
 
 def test_turbo_graph_is_still_fully_connected():
@@ -771,9 +814,10 @@ def test_it_chains_with_turbo_instead_of_dangling():
     # distilled schedule nearest the consumers.
     assert wf[minimax._N_NSFW_LORA]["inputs"]["model"] == [minimax._N_UNET, 0]
     assert wf[minimax._N_TURBO_LORA]["inputs"]["model"] == [minimax._N_NSFW_LORA, 0]
+    assert wf[minimax._N_SIGMA_SHIFT]["inputs"]["model"] == [minimax._N_TURBO_LORA, 0]
     for nid in (minimax._N_SCHED, minimax._N_GUIDER):
-        assert wf[nid]["inputs"]["model"] == [minimax._N_TURBO_LORA, 0], nid
-    assert wf[minimax._N_SCHED]["inputs"]["steps"] == minimax._TURBO_STEPS
+        assert wf[nid]["inputs"]["model"] == [minimax._N_SIGMA_SHIFT, 0], nid
+    assert wf[minimax._N_SCHED]["inputs"]["steps"] == 8
 
 
 def test_it_does_not_leak_onto_the_first_frame_sampler():
@@ -852,18 +896,22 @@ def test_all_three_chain_in_order():
     assert wf[minimax._N_NSFW_LORA]["inputs"]["model"] == [minimax._N_UNET, 0]
     assert wf[minimax._N_CUMSHOT_LORA]["inputs"]["model"] == [minimax._N_NSFW_LORA, 0]
     assert wf[minimax._N_TURBO_LORA]["inputs"]["model"] == [minimax._N_CUMSHOT_LORA, 0]
+    # ...and the shift last of all, because it IS the sigma curve the scheduler
+    # reads off the model.
+    assert wf[minimax._N_SIGMA_SHIFT]["inputs"]["model"] == [minimax._N_TURBO_LORA, 0]
     for nid in (minimax._N_SCHED, minimax._N_GUIDER):
-        assert wf[nid]["inputs"]["model"] == [minimax._N_TURBO_LORA, 0], nid
+        assert wf[nid]["inputs"]["model"] == [minimax._N_SIGMA_SHIFT, 0], nid
 
 
 def test_turbo_runs_at_its_own_strength_either_way():
     # HMCumshot's author ran the 8-step turbo at 0.20 alongside his LoRA, and we
     # followed him. Epic Cumshots says nothing about turbo, so there is no
-    # number to justify overriding the publisher's own 0.7 any more.
+    # number to justify overriding the author's own 1.0 — which is what every
+    # one of lightx2v's published graphs sets it to.
     hot = _build(prompt=_FINISH, turbo=True, mode="fl2v")
-    assert hot[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == 0.7
+    assert hot[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == 1.0
     plain = _build(prompt=_CLINICAL, turbo=True, mode="fl2v")
-    assert plain[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == 0.7
+    assert plain[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == 1.0
 
 
 def test_the_caller_can_veto_the_finish_lora():
@@ -879,8 +927,9 @@ def test_weakening_the_distillation_without_steps_is_refused():
     was checking.
     """
     wf = _build(prompt=_FINISH, turbo=False)
+    build = minimax._TURBO_BUILDS[("fl2v", 8)]
     try:
-        minimax.splice_turbo_lora(wf, 0.2)
+        minimax.splice_turbo_lora(wf, build, 0.2)
     except ValueError as e:
         assert "steps" in str(e), e
     else:
@@ -889,36 +938,67 @@ def test_weakening_the_distillation_without_steps_is_refused():
 
 def test_lowering_the_strength_is_fine_when_the_steps_come_with_it():
     wf = _build(prompt=_FINISH, turbo=False)
-    minimax.splice_turbo_lora(wf, 0.2, steps=24)
+    minimax.splice_turbo_lora(wf, minimax._TURBO_BUILDS[("fl2v", 8)], 0.2, steps=24)
     assert wf[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == 0.2
     assert wf[minimax._N_SCHED]["inputs"]["steps"] == 24
     _assert_fully_reachable(wf)
 
 
 def test_the_default_pairing_is_the_distilled_one():
+    build = minimax._TURBO_BUILDS[("fl2v", 8)]
     wf = _build(prompt=_FINISH, turbo=True, mode="fl2v")
-    assert wf[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == minimax._TURBO_STRENGTH
-    assert wf[minimax._N_SCHED]["inputs"]["steps"] == minimax._TURBO_STEPS
+    assert wf[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == build["strength"]
+    assert wf[minimax._N_SCHED]["inputs"]["steps"] == build["steps"]
 
 
-def test_turbo_is_not_spliced_onto_a_ref2va_graph():
-    """The 8-step LoRA is published for FL2VA and this build ships ref2va too.
+def test_the_fl2va_lora_is_never_spliced_onto_a_ref2va_graph():
+    """The FL2VA LoRA is published for FL2VA and this build ships ref2va too.
 
     Same file size, matching keys: it would load clean and render wrong, which
-    is the failure this module has now had twice.
+    is the failure this module has now had twice. Ref mode is distilled by its
+    OWN build, not by making an exception for that one.
     """
+    for want in (True, 4):
+        wf = _build(prompt=_FINISH, turbo=want, mode="ref")
+        name = wf[minimax._N_TURBO_LORA]["inputs"]["lora_name"]
+        assert "ref2v" in name, name
+        assert "fl2v" not in name, name
+
+
+def test_ref_mode_gets_the_ref2va_distillation():
     wf = _build(prompt=_FINISH, turbo=True, mode="ref")
-    assert minimax._N_TURBO_LORA not in wf, "FL2VA turbo LoRA went onto a ref graph"
-    assert not any("turbo" in (n.get("inputs", {}).get("lora_name") or "")
-                   for n in wf.values())
-    # and the schedule stays where an undistilled model needs it
-    assert wf[minimax._N_SCHED]["inputs"]["steps"] == 20, wf[minimax._N_SCHED]["inputs"]
+    assert wf[minimax._N_SCHED]["inputs"]["steps"] == 4
+    shift = wf[minimax._N_SIGMA_SHIFT]["inputs"]
+    assert (shift["shift_video"], shift["shift_audio"]) == (12.0, 3.0), shift
+    _assert_fully_reachable(wf)
+
+
+def test_there_is_no_eight_step_ref_build_and_asking_says_so():
+    # An explicit 8 in ref mode is a specific request for weights that do not
+    # exist. It fails at submit rather than quietly rendering the 4-step.
+    assert _build(prompt=_FINISH, turbo=8, mode="ref") is None
+    try:
+        minimax.turbo_build({"turbo": 8}, "ref")
+    except ValueError as e:
+        assert "8-step" in str(e) and "[4]" in str(e), e
+    else:
+        raise AssertionError("an 8-step ref build was invented")
+
+
+def test_every_build_carries_weights_for_its_own_task():
+    # The whole table in one line: a build whose file does not name its mode is
+    # the mismatch that has cost this module two rounds of bad renders.
+    for (mode, steps), build in minimax._TURBO_BUILDS.items():
+        tag = "fl2v" if mode == "fl2v" else "ref2v"
+        assert tag in build["lora"], (mode, build["lora"])
+        assert f"{steps}step" in build["lora"], (steps, build["lora"])
 
 
 def test_turbo_still_applies_in_fl2v():
+    build = minimax._TURBO_BUILDS[("fl2v", 8)]
     wf = _build(prompt=_FINISH, turbo=True, mode="fl2v")
-    assert wf[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == minimax._TURBO_STRENGTH
-    assert wf[minimax._N_SCHED]["inputs"]["steps"] == minimax._TURBO_STEPS
+    assert wf[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == build["strength"]
+    assert wf[minimax._N_SCHED]["inputs"]["steps"] == build["steps"]
 
 
 def test_a_ref_job_without_turbo_is_unchanged():

@@ -105,17 +105,21 @@ _N_SCHED = "32"
 _N_GUIDER = "33"
 _N_VIDEO = "50"
 
-# Step-distilled LoRA (lightx2v). Two things make this the 8-step and not the
-# advertised 4-step build:
+# Step-distilled LoRAs (lightx2v / ModelTC). A build is a LoRA file, a step
+# count and a pair of sigma shifts, and those four are ONE setting: the
+# author's model table pairs them, and nothing in ComfyUI validates a shift
+# against the weights it is sampling. Run the 4-step 768p build on the 8-step's
+# 12/3 shifts and it renders — wrong, quietly, with nothing to show for it. So
+# the table is the only place a build is described, and the splice applies all
+# four together.
 #
-#   * Community testing converged on 8 — "the number in the name is not the
-#     number most people should use". 6-8 steps largely removes the motion
-#     smear 4 steps introduces.
-#   * It is distilled at 12/3 video/audio sigma shifts, which is exactly
-#     ComfyUI's MiniMaxH3SigmaShift default. This template has no shift node,
-#     so it inherits those and the LoRA drops in unchanged. The 4-step 768p
-#     build wants 6/3 instead — using it here would be a silent mismatch, not
-#     an error, because nothing validates shifts against the weights.
+#   https://github.com/ModelTC/Minimax-H3-Turbo#1-model-specs
+#
+# Keyed by (mode, steps), because the distillation is per task: the FL2VA LoRA
+# is published as "adapted for merging with pruned FL2VA model" and there is a
+# ref2va build of the same size sitting beside it — matching keys, loads clean,
+# renders wrong. There is no 8-step ref2va build at all, which is why asking
+# for one is an error rather than a substitution.
 #
 # Distillation is documented to hurt "the quietest and most sustained vocal
 # registers", and several of our sets are built on whispered close-mic lines,
@@ -191,10 +195,37 @@ _SEX_RE = re.compile(
     re.IGNORECASE,
 )
 
-_TURBO_LORA = "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
-_TURBO_STRENGTH = 0.7   # the publisher's own recommendation
-_TURBO_STEPS = 8
+_TURBO_BUILDS = {
+    # 8 steps, distilled at 544p. The safe one: more steps is less motion smear
+    # and more of the quiet vocal register, at roughly twice the sampling.
+    ("fl2v", 8): {
+        "lora": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+        "steps": 8, "shift_video": 12.0, "shift_audio": 3.0, "strength": 1.0,
+    },
+    # 4 steps, and the only build distilled at 768p — which is the canvas we
+    # actually render (768x1152). Half the sampling of the 8-step and trained
+    # at our own resolution rather than upscaled from 544p; the tradeoff is the
+    # motion smear four steps is known for.
+    ("fl2v", 4): {
+        "lora": "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+        "steps": 4, "shift_video": 6.0, "shift_audio": 3.0, "strength": 1.0,
+    },
+    # The ref2va distillation. Turbo used to be refused outright in ref mode
+    # because the only LoRA on the box was the FL2VA one; this is the build
+    # that was missing, not a reason the mode cannot be distilled.
+    ("ref", 4): {
+        "lora": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+        "steps": 4, "shift_video": 12.0, "shift_audio": 3.0, "strength": 1.0,
+    },
+}
+# What a bare `turbo: true` means, per mode. `true` carries no step count, so
+# reading it as "this mode's default build" is interpretation rather than
+# substitution — and it keeps every job queued while turbo was a checkbox
+# rendering. An explicit `turbo: 8` in ref mode is a different thing: a
+# specific request for a build that does not exist, and it says so.
+_TURBO_DEFAULT_STEPS = {"fl2v": 8, "ref": 4}
 _N_TURBO_LORA = "9001"
+_N_SIGMA_SHIFT = "9004"
 
 
 def snap_frames(seconds: float) -> int:
@@ -329,21 +360,9 @@ def maybe_build_minimax(
 
         # Turbo before the explicit steps override, so a caller can still pin a
         # step count on top of it (e.g. to A/B 8 vs 6 on the same LoRA).
-        #
-        # FL2VA ONLY. It is published as "adapted for merging with pruned FL2VA
-        # model" and this build has a ref2va checkpoint sitting beside it at
-        # the same size — a LoRA whose keys happen to match loads clean and
-        # renders wrong, with nothing to show for it. Skipping it also leaves
-        # the step count alone, which is what the ref template ships and what
-        # an undistilled model needs; taking the LoRA away and keeping its
-        # 8-step schedule is the same failure from the other end.
-        if options.get("turbo"):
-            if mode == "fl2v":
-                splice_turbo_lora(wf, _TURBO_STRENGTH)
-            else:
-                print(f"minimax: turbo requested on mode={mode!r}; the 8-step LoRA is "
-                      f"FL2VA-only, running {wf[_N_SCHED]['inputs']['steps']} undistilled "
-                      "steps instead")
+        build = turbo_build(options, mode)
+        if build:
+            splice_turbo_lora(wf, build, options.get("turbo_strength"))
 
         if options.get("steps") is not None:
             wf[_N_SCHED]["inputs"]["steps"] = max(1, min(60, int(options["steps"])))
@@ -648,8 +667,8 @@ def splice_autoframe(wf: dict, mode: str, options: dict,
     wf.pop(_N_REF_LOAD, None)
 
 
-def _splice_model_lora(wf: dict, nid: str, lora_name: str, strength: float) -> None:
-    """Insert a model-only LoRA between the model and everything reading it.
+def _splice_model_node(wf: dict, nid: str, class_type: str, inputs: dict) -> None:
+    """Insert a model patch between the model and everything reading it.
 
     Both consumers have to be rewired, not just the sampler: BasicScheduler
     derives the sigma schedule from the model, and a distilled model's schedule
@@ -657,8 +676,8 @@ def _splice_model_lora(wf: dict, nid: str, lora_name: str, strength: float) -> N
     undistilled sigma curve — fast and wrong, with no error to show for it.
 
     Reads whatever the guider currently points at rather than assuming the raw
-    UNet, so two of these compose: spliced one after another they chain, where
-    a hardcoded [_N_UNET, 0] would leave the second one loaded and connected to
+    UNet, so these compose: spliced one after another they chain, where a
+    hardcoded [_N_UNET, 0] would leave the second one loaded and connected to
     nothing.
     """
     guider = wf.get(_N_GUIDER)
@@ -667,40 +686,92 @@ def _splice_model_lora(wf: dict, nid: str, lora_name: str, strength: float) -> N
     src = guider.get("inputs", {}).get("model")
     if not src:
         return
-    wf[nid] = {"class_type": "LoraLoaderModelOnly", "inputs": {
-        "lora_name": lora_name,
-        "strength_model": strength,
-        "model": src,
-    }}
+    wf[nid] = {"class_type": class_type, "inputs": dict(inputs, model=src)}
     for consumer in (_N_SCHED, _N_GUIDER):
         node = wf.get(consumer)
         if isinstance(node, dict) and node.get("inputs", {}).get("model") == src:
             node["inputs"]["model"] = [nid, 0]
 
 
-def splice_turbo_lora(
-    wf: dict, strength: float = _TURBO_STRENGTH, steps: int = _TURBO_STEPS
-) -> None:
-    """The step-distilled LoRA, plus the step count that is the point of it.
+def _splice_model_lora(wf: dict, nid: str, lora_name: str, strength: float) -> None:
+    """A model-only LoRA, on the chain shared with every other model patch."""
+    _splice_model_node(wf, nid, "LoraLoaderModelOnly",
+                       {"lora_name": lora_name, "strength_model": strength})
 
-    The two are one setting. This pinned the step count at 8 whatever strength
-    it was handed, and for a while the finish LoRA's own pairing handed it 0.20
-    — so four clips rendered 8 steps of a model that was 20% distilled. Fast
-    and wrong with no error to show for it, exactly as the splice helper's
-    docstring warns, and it came back as malformed faces and bodies.
 
-    So weakening the distillation without buying the steps back is refused. It
-    fails at submit, where it is one message, instead of at the end of a
-    twelve-minute render where it is a video nobody can use.
+def turbo_build(options: dict, mode: str) -> Optional[dict]:
+    """Which distilled build this job asked for, or None for the base model.
+
+    `turbo` is a step count — 4 or 8 — because that is the thing a caller
+    actually chooses between; the LoRA file and the sigma shifts follow from
+    it. `True` means this mode's default build, which is what a checkbox
+    could ever have meant and is what every job queued before this carries.
     """
-    if strength < _TURBO_STRENGTH and steps <= _TURBO_STEPS:
+    want = options.get("turbo")
+    if want is None or want is False or want == 0 or want == "":
+        return None
+    if want is True:
+        steps = _TURBO_DEFAULT_STEPS.get(mode, 8)
+    else:
+        try:
+            steps = int(str(want).lower().replace("step", "").strip())
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"turbo={want!r} is not a step count; pass 4, 8 or false."
+            ) from None
+    build = _TURBO_BUILDS.get((mode, steps))
+    if not build:
+        have = sorted(n for m, n in _TURBO_BUILDS if m == mode)
         raise ValueError(
-            f"turbo at {strength} is a partly distilled model; {steps} steps is "
-            f"the schedule for a fully distilled one ({_TURBO_STRENGTH}). Lowering "
-            "the strength means raising the steps — pass both."
+            f"there is no {steps}-step turbo build for mode={mode!r}. "
+            + (f"Distilled builds for this mode: {have}." if have
+               else "This mode has no distilled build at all.")
         )
-    _splice_model_lora(wf, _N_TURBO_LORA, _TURBO_LORA, strength)
-    wf[_N_SCHED]["inputs"]["steps"] = steps
+    return build
+
+
+def splice_turbo_lora(wf: dict, build: dict, strength: Optional[float] = None,
+                      steps: Optional[int] = None) -> None:
+    """A distilled build: the LoRA, its step count, and its sigma shifts.
+
+    All three are one setting. This used to pin the step count at 8 whatever
+    strength it was handed, and for a while the finish LoRA's own pairing
+    handed it 0.20 — so four clips rendered 8 steps of a model that was 20%
+    distilled. Fast and wrong with no error to show for it, and it came back as
+    malformed faces and bodies. So weakening the distillation is refused here,
+    at submit, where it is one message rather than a twelve-minute render
+    nobody can use.
+
+    The shifts are written explicitly even when they match the node's own
+    defaults. Inheriting them is how the 4-step build would have gone in on the
+    8-step's schedule: correct today, silently wrong the moment the table gains
+    a row that disagrees with the default.
+    """
+    s = build["strength"] if strength is None else float(strength)
+    n = build["steps"] if steps is None else int(steps)
+    if s < build["strength"] and n <= build["steps"]:
+        raise ValueError(
+            f"turbo at {s} is a partly distilled model; {n} steps is the schedule "
+            f"for a fully distilled one ({build['strength']}). Lowering the "
+            "strength means raising the steps — pass both."
+        )
+    _splice_model_lora(wf, _N_TURBO_LORA, build["lora"], s)
+    _splice_sigma_shift(wf, build["shift_video"], build["shift_audio"])
+    wf[_N_SCHED]["inputs"]["steps"] = n
+
+
+def _splice_sigma_shift(wf: dict, shift_video: float, shift_audio: float) -> None:
+    """The flow shifts the build was distilled at, patched onto the model.
+
+    Spliced after the LoRAs so the chain is UNet -> nsfw -> finish -> turbo ->
+    shift -> sampler, and both consumers move with it for the same reason the
+    LoRAs rewire both: BasicScheduler derives the sigma curve from the model,
+    and the shift IS the sigma curve.
+    """
+    _splice_model_node(wf, _N_SIGMA_SHIFT, "MiniMaxH3SigmaShift", {
+        "shift_video": float(shift_video),
+        "shift_audio": float(shift_audio),
+    })
 
 
 def splice_nsfw_lora(wf: dict, strength: float = _NSFW_STRENGTH) -> None:
