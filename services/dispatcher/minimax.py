@@ -329,8 +329,21 @@ def maybe_build_minimax(
 
         # Turbo before the explicit steps override, so a caller can still pin a
         # step count on top of it (e.g. to A/B 8 vs 6 on the same LoRA).
+        #
+        # FL2VA ONLY. It is published as "adapted for merging with pruned FL2VA
+        # model" and this build has a ref2va checkpoint sitting beside it at
+        # the same size — a LoRA whose keys happen to match loads clean and
+        # renders wrong, with nothing to show for it. Skipping it also leaves
+        # the step count alone, which is what the ref template ships and what
+        # an undistilled model needs; taking the LoRA away and keeping its
+        # 8-step schedule is the same failure from the other end.
         if options.get("turbo"):
-            splice_turbo_lora(wf, _TURBO_STRENGTH)
+            if mode == "fl2v":
+                splice_turbo_lora(wf, _TURBO_STRENGTH)
+            else:
+                print(f"minimax: turbo requested on mode={mode!r}; the 8-step LoRA is "
+                      f"FL2VA-only, running {wf[_N_SCHED]['inputs']['steps']} undistilled "
+                      "steps instead")
 
         if options.get("steps") is not None:
             wf[_N_SCHED]["inputs"]["steps"] = max(1, min(60, int(options["steps"])))

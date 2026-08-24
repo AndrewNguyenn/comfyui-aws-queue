@@ -671,7 +671,7 @@ def test_turbo_rewires_BOTH_model_consumers():
     # It derives the sigma schedule FROM THE MODEL, and a distilled model's
     # schedule is the entire point — leaving it on the raw UNet runs 8 steps of
     # an undistilled curve, which is fast, wrong, and silent.
-    wf = _build(turbo=True)
+    wf = _build(turbo=True, mode="fl2v")
     lora = minimax._N_TURBO_LORA
     assert wf[lora]["inputs"]["model"] == [minimax._N_UNET, 0]
     assert wf["32"]["inputs"]["model"] == [lora, 0], "BasicScheduler left on the raw UNet"
@@ -679,7 +679,7 @@ def test_turbo_rewires_BOTH_model_consumers():
 
 
 def test_turbo_sets_the_distilled_step_count():
-    wf = _build(turbo=True)
+    wf = _build(turbo=True, mode="fl2v")
     assert wf["32"]["inputs"]["steps"] == minimax._TURBO_STEPS == 8
 
 
@@ -693,13 +693,13 @@ def test_turbo_is_the_8_step_build_not_the_4_step():
 
 def test_an_explicit_step_count_still_wins_over_turbo():
     # So 8 vs 6 can be A/B'd on the same LoRA.
-    wf = _build(turbo=True, steps=6)
+    wf = _build(turbo=True, steps=6, mode="fl2v")
     assert wf["32"]["inputs"]["steps"] == 6
     assert wf["32"]["inputs"]["model"] == [minimax._N_TURBO_LORA, 0]
 
 
 def test_turbo_graph_is_still_fully_connected():
-    _assert_fully_reachable(_build(turbo=True))
+    _assert_fully_reachable(_build(turbo=True, mode="fl2v"))
 
 
 def test_turbo_works_alongside_an_autoframed_first_frame():
@@ -765,7 +765,7 @@ def test_the_sex_lora_graph_is_still_fully_connected():
 
 
 def test_it_chains_with_turbo_instead_of_dangling():
-    wf = _build(prompt=_EXPLICIT, turbo=True)
+    wf = _build(prompt=_EXPLICIT, turbo=True, mode="fl2v")
     _assert_fully_reachable(wf)
     # UNet -> nsfw -> turbo -> sampler: both LoRAs actually in the path, and the
     # distilled schedule nearest the consumers.
@@ -847,7 +847,7 @@ def test_a_clip_with_no_finish_does_not_get_it():
 
 
 def test_all_three_chain_in_order():
-    wf = _build(prompt=_FINISH, turbo=True)
+    wf = _build(prompt=_FINISH, turbo=True, mode="fl2v")
     _assert_fully_reachable(wf)
     assert wf[minimax._N_NSFW_LORA]["inputs"]["model"] == [minimax._N_UNET, 0]
     assert wf[minimax._N_CUMSHOT_LORA]["inputs"]["model"] == [minimax._N_NSFW_LORA, 0]
@@ -860,9 +860,9 @@ def test_turbo_runs_at_its_own_strength_either_way():
     # HMCumshot's author ran the 8-step turbo at 0.20 alongside his LoRA, and we
     # followed him. Epic Cumshots says nothing about turbo, so there is no
     # number to justify overriding the publisher's own 0.7 any more.
-    hot = _build(prompt=_FINISH, turbo=True)
+    hot = _build(prompt=_FINISH, turbo=True, mode="fl2v")
     assert hot[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == 0.7
-    plain = _build(prompt=_CLINICAL, turbo=True)
+    plain = _build(prompt=_CLINICAL, turbo=True, mode="fl2v")
     assert plain[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == 0.7
 
 
@@ -896,6 +896,31 @@ def test_lowering_the_strength_is_fine_when_the_steps_come_with_it():
 
 
 def test_the_default_pairing_is_the_distilled_one():
-    wf = _build(prompt=_FINISH, turbo=True)
+    wf = _build(prompt=_FINISH, turbo=True, mode="fl2v")
     assert wf[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == minimax._TURBO_STRENGTH
     assert wf[minimax._N_SCHED]["inputs"]["steps"] == minimax._TURBO_STEPS
+
+
+def test_turbo_is_not_spliced_onto_a_ref2va_graph():
+    """The 8-step LoRA is published for FL2VA and this build ships ref2va too.
+
+    Same file size, matching keys: it would load clean and render wrong, which
+    is the failure this module has now had twice.
+    """
+    wf = _build(prompt=_FINISH, turbo=True, mode="ref")
+    assert minimax._N_TURBO_LORA not in wf, "FL2VA turbo LoRA went onto a ref graph"
+    assert not any("turbo" in (n.get("inputs", {}).get("lora_name") or "")
+                   for n in wf.values())
+    # and the schedule stays where an undistilled model needs it
+    assert wf[minimax._N_SCHED]["inputs"]["steps"] == 20, wf[minimax._N_SCHED]["inputs"]
+
+
+def test_turbo_still_applies_in_fl2v():
+    wf = _build(prompt=_FINISH, turbo=True, mode="fl2v")
+    assert wf[minimax._N_TURBO_LORA]["inputs"]["strength_model"] == minimax._TURBO_STRENGTH
+    assert wf[minimax._N_SCHED]["inputs"]["steps"] == minimax._TURBO_STEPS
+
+
+def test_a_ref_job_without_turbo_is_unchanged():
+    wf = _build(prompt=_FINISH, mode="ref")
+    assert wf[minimax._N_SCHED]["inputs"]["steps"] == 20
