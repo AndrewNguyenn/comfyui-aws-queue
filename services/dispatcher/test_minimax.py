@@ -865,9 +865,12 @@ def test_a_finish_attaches_the_cumshot_lora_too():
     wf = _build(prompt=_FINISH)
     node = wf[minimax._N_CUMSHOT_LORA]
     assert node["inputs"]["lora_name"] == "epic_cumshots-MiniMaxH3-ALPHA-CUMSH0T.safetensors", node
-    # Its author's own number, and he is explicit that under it the LoRA rolls
-    # back to H3's default paint-bucket finish.
-    assert node["inputs"]["strength_model"] == 1.0, node
+    # NOT its author's 1.0. At full strength it stacks on the anatomy LoRA for
+    # the whole clip and the genitalia came back malformed and sometimes
+    # doubled; a controlled A/B on one prompt put 0.8 ahead of 1.0 and the
+    # operator settled on 0.75. His warning about rolling back to a paint-bucket
+    # finish under 1.0 did not hold here.
+    assert node["inputs"]["strength_model"] == minimax._CUMSHOT_STRENGTH == 0.75, node
     _assert_fully_reachable(wf)
 
 
@@ -875,14 +878,23 @@ def test_the_finish_trigger_alone_attaches_both():
     # The zero is the trap: `cumsh0t` does not match a detector written for the
     # word cumshot, and a clip carrying only the trigger would have rendered
     # with neither LoRA on it.
-    assert minimax.cumshot_lora_strength({"prompt": _TRIGGER_ONLY}) == 1.0
+    assert minimax.cumshot_lora_strength({"prompt": _TRIGGER_ONLY}) == minimax._CUMSHOT_STRENGTH
     assert minimax.nsfw_lora_strength({"prompt": _TRIGGER_ONLY}) == 0.5
 
 
 def test_semen_counts_as_a_finish():
     # The new LoRA was captioned in that word, so the writer now uses it.
     assert minimax.cumshot_lora_strength(
-        {"prompt": "long ropes of white semen across her mouth"}) == 1.0
+        {"prompt": "long ropes of white semen across her mouth"}) == minimax._CUMSHOT_STRENGTH
+
+
+def test_the_house_number_is_not_the_author_s_and_a_caller_can_still_pin_either():
+    # 0.75 is ours, measured. His 1.0 is still one option away, and so is off.
+    assert minimax._CUMSHOT_STRENGTH == 0.75
+    assert minimax.cumshot_lora_strength({"prompt": _FINISH, "cumshot_lora": 1.0}) == 1.0
+    assert minimax.cumshot_lora_strength({"prompt": _FINISH, "cumshot_lora": False}) == 0.0
+    wf = _build(prompt=_FINISH, cumshot_lora=0.9)
+    assert wf[minimax._N_CUMSHOT_LORA]["inputs"]["strength_model"] == 0.9
 
 
 def test_a_clip_with_no_finish_does_not_get_it():

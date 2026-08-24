@@ -154,10 +154,22 @@ _N_NSFW_LORA = "9002"
 # author's own pairing: the 8-step turbo LoRA dropped to 0.20 because a
 # distilled schedule that strong walked over the action. This one's author says
 # nothing about turbo, so there is no longer a number to justify overriding it
-# and turbo runs at its own 0.7. If the finish comes back flattened, that is the
-# first knob to turn.
+# and turbo runs at its own strength.
+#
+# 0.75, not his 1.0. At 1.0 it stacks on top of the anatomy LoRA for the WHOLE
+# clip — including the eight seconds before anything fires, where an adapter
+# trained on semen leaving a body has nothing to do but push on the anatomy —
+# and renders came back with malformed and sometimes duplicated genitalia. A
+# controlled A/B on one prompt (same photograph, same turbo build, same step
+# count, strength the only variable) put 0.8 clearly ahead of 1.0, and 0.75 is
+# where the operator settled after watching it.
+#
+# His warning about going below 1.0 — "lower than strength 1.0 will roll it back
+# to H3's default paint bucket cumshot" — did not hold here. If a finish does
+# come back flattened, this is the first knob to turn, and `cumshot_lora` in the
+# options overrides it per job.
 _CUMSHOT_LORA = "epic_cumshots-MiniMaxH3-ALPHA-CUMSH0T.safetensors"
-_CUMSHOT_STRENGTH = 1.0
+_CUMSHOT_STRENGTH = 0.75
 _N_CUMSHOT_LORA = "9003"
 
 # The finish itself, as our writer names it once the hardcore register is on —
