@@ -125,7 +125,17 @@ _N_VIDEO = "50"
 # below", so that is the default and 1.0 is the hard cap. It is spliced the same
 # way as the turbo LoRA and composes with it.
 _NSFW_LORA = "HMNSFW_AIO_V2.safetensors"
-_NSFW_STRENGTH = 0.35   # 0.5 is the author's ceiling; 0.35 renders anatomy cleaner
+# 0.5 is the author's ceiling — "use it at strength 0.5 or below" — and we sat
+# at 0.35 under it. That was chosen before the finish LoRA existed; stacked
+# under Epic Cumshots at 1.0 the anatomy LoRA was being outweighed nearly three
+# to one over the whole clip, and the penis came back malformed. Up to the
+# ceiling, which is the most this one is allowed to do about it.
+#
+# Worth knowing where the ceiling leaves us: the author's own note on this
+# checkpoint is "I2V works great across most positions, with the occasional
+# deformed genitalia. I'm training separate genitalia LoRAs that should help" —
+# so some of this is the LoRA and no strength fixes it.
+_NSFW_STRENGTH = 0.5
 _N_NSFW_LORA = "9002"
 
 # The finish is a second LoRA, stacked on top of the anatomy one. Epic Cumshots

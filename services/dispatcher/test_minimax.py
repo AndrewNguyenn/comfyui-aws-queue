@@ -746,7 +746,7 @@ def test_solo_insertion_counts_too():
     # "insertions" is one of the six acts it was trained on, and a solo clip has
     # none of the partner words that catch the other five.
     on = "she slides two fingers into her pussy while she keeps walking"
-    assert minimax.nsfw_lora_strength({"prompt": on}) == 0.35, on
+    assert minimax.nsfw_lora_strength({"prompt": on}) == 0.5, on
     # Level 8 is bare and touching herself with nothing inside her — the line
     # this has to draw.
     off = "she works herself over with a flat palm, breathing through her teeth"
@@ -755,7 +755,7 @@ def test_solo_insertion_counts_too():
 
 def test_the_caller_can_veto_and_can_pin():
     assert minimax.nsfw_lora_strength({"prompt": _EXPLICIT, "nsfw_lora": False}) == 0.0
-    assert minimax.nsfw_lora_strength({"prompt": _TAME, "nsfw_lora": True}) == 0.35
+    assert minimax.nsfw_lora_strength({"prompt": _TAME, "nsfw_lora": True}) == 0.5
     assert minimax.nsfw_lora_strength({"prompt": _TAME, "nsfw_lora": 0.3}) == 0.3
     assert minimax.nsfw_lora_strength({"prompt": _TAME, "nsfw_lora": 9}) == 1.0
 
@@ -802,16 +802,19 @@ def test_the_clinical_register_still_attaches_the_sex_lora():
     # "cock". If the detector only knew the blunt words, the switch would have
     # turned the LoRA OFF for exactly the clips it exists for.
     assert "cock" not in _CLINICAL.lower()
-    assert minimax.nsfw_lora_strength({"prompt": _CLINICAL}) == 0.35, _CLINICAL
+    assert minimax.nsfw_lora_strength({"prompt": _CLINICAL}) == 0.5, _CLINICAL
 
 
 def test_the_trigger_token_alone_is_enough():
-    assert minimax.nsfw_lora_strength({"prompt": "hmmotion, side, slow, wide shot."}) == 0.35
+    assert minimax.nsfw_lora_strength({"prompt": "hmmotion, side, slow, wide shot."}) == 0.5
 
 
-def test_the_sex_lora_strength_dropped_to_035():
+def test_the_sex_lora_runs_at_its_authors_ceiling():
+    # "Use it at strength 0.5 or below." We sat at 0.35 under that until the
+    # finish LoRA landed at 1.0 on top and outweighed it three to one.
     wf = _build(prompt=_CLINICAL)
-    assert wf[minimax._N_NSFW_LORA]["inputs"]["strength_model"] == 0.35
+    assert wf[minimax._N_NSFW_LORA]["inputs"]["strength_model"] == 0.5
+    assert minimax._NSFW_STRENGTH <= 0.5, "0.5 is the author's stated ceiling"
 
 
 def test_a_finish_attaches_the_cumshot_lora_too():
@@ -829,7 +832,7 @@ def test_the_finish_trigger_alone_attaches_both():
     # word cumshot, and a clip carrying only the trigger would have rendered
     # with neither LoRA on it.
     assert minimax.cumshot_lora_strength({"prompt": _TRIGGER_ONLY}) == 1.0
-    assert minimax.nsfw_lora_strength({"prompt": _TRIGGER_ONLY}) == 0.35
+    assert minimax.nsfw_lora_strength({"prompt": _TRIGGER_ONLY}) == 0.5
 
 
 def test_semen_counts_as_a_finish():
