@@ -546,7 +546,15 @@ export class ComputeStack extends Stack {
 
     const container = taskDef.addContainer(`${fleetName}Container`, {
       containerName: `comfy-${fleetName}-worker`,
-      image: ecs.ContainerImage.fromEcrRepository(ecrRepository, 'latest'),
+      // Pinned to an immutable commit SHA, never 'latest'. CodeBuild pushes
+      // both tags in one `buildx --push`, so 'latest' meant any rebuild
+      // silently became prod on the next instance launch — and, because the
+      // video and minimax fleets share comfy-video-worker, rotating one fleet
+      // moved the other's image too. See FleetConfig.imageTag in config.ts.
+      image: ecs.ContainerImage.fromEcrRepository(
+        ecrRepository,
+        config.fleets[fleetName].imageTag,
+      ),
       gpuCount: 1,
       // FUSE access for mount-s3 — uniform across image + video.
       // TODO: investigate unprivileged FUSE fd handoff (mount-s3 CONFIGURATION.md)

@@ -88,6 +88,18 @@ export interface FleetConfig {
   readonly fleetName: FleetName;
   readonly primaryInstanceType: string;
   readonly fallbackInstanceTypes: readonly string[];
+  /** ECR tag the task definition pins. Use an immutable commit SHA, never
+   *  'latest'.
+   *
+   *  Every CodeBuild run pushes BOTH `:$SHA` and `:latest` in one
+   *  `buildx --push` (codebuild/buildspec-video-worker.yml), so with 'latest'
+   *  a rebuild silently becomes prod on the next instance launch — running
+   *  workers keep their pulled image, but any scale-up or spot replacement
+   *  gets the new one. Pinning makes "what is in prod" unambiguous and makes
+   *  rollback a one-line revert instead of a rebuild.
+   *
+   *  Bump this deliberately, after the new image has been tested. */
+  readonly imageTag: string;
   /** Spot bid ceiling in USD/hr. Omit to bid the on-demand price (the AWS
    *  default). A ceiling below the market price means NO capacity at all —
    *  the fleet stalls silently rather than paying more — so only set this
@@ -136,6 +148,8 @@ export const APP_CONFIG: AppConfig = {
   fleets: {
     image: {
       fleetName: 'image',
+      // comfy-image-worker. Pinned 2026-08-25; was ':latest'.
+      imageTag: 'd33b87af655e56e702a4362887f2b02a66abef56',
       // HISTORY (superseded — fleet was g5.xlarge-only until 2026-07-12; see the
       // dated blocks below for the current mix):
       // We trialled a g4dn (T4) lowest-price config for cost and it BACKFIRED for
@@ -227,6 +241,8 @@ export const APP_CONFIG: AppConfig = {
     },
     video: {
       fleetName: 'video',
+      // comfy-video-worker. Pinned 2026-08-25; was ':latest'.
+      imageTag: '59a5cadf212756394db2e30764bec79415561bb4',
       // 2026-08-19: primary moved g5.xlarge -> g5.2xlarge. Same A10G (22 GB
       // VRAM, sm_86) but 32 GB system RAM instead of 16 GB, and RAM is what
       // binds here. SCAIL-2 loads a 15.3 GiB transformer plus a 10.6 GiB umt5
@@ -259,6 +275,10 @@ export const APP_CONFIG: AppConfig = {
     // from v0.30.0, and that image is now v0.33.0.
     minimax: {
       fleetName: 'minimax',
+      // Shares comfy-video-worker with the video fleet. Pinned 2026-08-25;
+      // was ':latest', which meant rotating comfy-video silently moved this
+      // fleet's image too (and vice versa) with nothing recording it.
+      imageTag: '59a5cadf212756394db2e30764bec79415561bb4',
       // g6e.2xlarge (64 GB RAM) is primary, not g6e.xlarge (32 GB), for the
       // same reason the video fleet left g5.xlarge: the binding constraint is
       // SYSTEM memory, not VRAM. ComfyUI parks the 25.3 GiB int8_convrot text
