@@ -26,6 +26,7 @@ import urllib3
 # workers/image/entrypoint.sh). No download path needed here.
 from comfy_client import ComfyClient, JobCancelled
 from comfy_supervisor import ComfySupervisor
+import scale_in_protection
 from object_info_publisher import publish_object_info
 from output_uploader import OutputUploader
 from spot_handler import SpotHandler, make_default_on_terminate
@@ -106,6 +107,13 @@ def main() -> int:
     # viewer can show what hardware a generation is running on.
     instance_type = _fetch_instance_type()
     log.info("worker instance type: %s", instance_type or "(unknown)")
+
+    # DAEMON fleets can't use ECS managed termination protection (it ignores
+    # daemon tasks), so this worker holds its own instance against voluntary
+    # ASG scale-in while a job runs. Clear first: a worker killed mid-job leaves
+    # the flag set with nothing to release it, and the ASG could then never
+    # scale that instance in. No-op on fleets where ASG_NAME is unset.
+    scale_in_protection.release_stale()
 
     # Install custom nodes from the S3 manifest BEFORE starting ComfyUI so
     # they register on the first /object_info publish. This is what makes
@@ -215,6 +223,9 @@ def main() -> int:
             continue
 
         spot.set_in_flight(job_id, receipt)
+        # Held until the finally below. Best-effort: if it fails we still run
+        # the job (see scale_in_protection docstring).
+        scale_in_protection.protect()
         heartbeat_stop = threading.Event()
         heartbeat_thread = threading.Thread(
             target=_heartbeat_loop,
@@ -326,6 +337,7 @@ def main() -> int:
         finally:
             heartbeat_stop.set()
             spot.clear_in_flight()
+            scale_in_protection.release()
             if success:
                 # Successful jobs delete from queue so they don't redeliver.
                 try:

@@ -100,6 +100,28 @@ export interface FleetConfig {
    *
    *  Bump this deliberately, after the new image has been tested. */
   readonly imageTag: string;
+  /** Run this fleet's ECS service with schedulingStrategy DAEMON — exactly
+   *  one task on every instance matching its placement constraints — instead
+   *  of REPLICA with a desiredCount.
+   *
+   *  This is what lets ONE ASG launch a mix of GPU architectures and have each
+   *  instance run the task definition (and therefore the container image)
+   *  built for its own GPU: one DAEMON service per architecture, each
+   *  constrained on `attribute:ecs.instance-type`. The ASG decides HOW MANY;
+   *  the constraints decide WHICH IMAGE.
+   *
+   *  Turning this on has three consequences, all handled in compute.ts:
+   *   - DAEMON tasks never sit pending, so ECS managed scaling has nothing to
+   *     react to. It is disabled and the fleet-scaler Lambda drives ASG
+   *     desired capacity directly (see services/fleet_scaler).
+   *   - Managed termination protection explicitly IGNORES daemon tasks, so it
+   *     is disabled too and the worker protects its own instance while a job
+   *     is running (see workers/shared/worker.py).
+   *   - schedulingStrategy is immutable on an existing ECS service, so turning
+   *     this on forces a service REPLACEMENT — and CloudFormation cannot do
+   *     that while a fixed physical serviceName is held. The service must be
+   *     renamed in the same change. */
+  readonly daemonScheduling?: boolean;
   /** Spot bid ceiling in USD/hr. Omit to bid the on-demand price (the AWS
    *  default). A ceiling below the market price means NO capacity at all —
    *  the fleet stalls silently rather than paying more — so only set this
@@ -275,6 +297,11 @@ export const APP_CONFIG: AppConfig = {
     // from v0.30.0, and that image is now v0.33.0.
     minimax: {
       fleetName: 'minimax',
+      // DAEMON-scheduled: one task per matching instance, ASG-driven capacity.
+      // This is what makes room for a second service on the SAME ASG pinned to
+      // a different GPU architecture and image (g7e/Blackwell). See the
+      // daemonScheduling docs above and compute.ts.
+      daemonScheduling: true,
       // Shares comfy-video-worker with the video fleet. Pinned 2026-08-25;
       // was ':latest', which meant rotating comfy-video silently moved this
       // fleet's image too (and vice versa) with nothing recording it.

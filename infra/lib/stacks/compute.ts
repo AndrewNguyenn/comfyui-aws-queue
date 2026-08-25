@@ -57,7 +57,7 @@ export class ComputeStack extends Stack {
       config,
       ecrRepoArn: ci.imageWorkerRepo.repositoryArn,
     });
-    const imageCapacityProvider = this.makeCapacityProvider('image', this.imageAsg);
+    const imageCapacityProvider = this.makeCapacityProvider('image', this.imageAsg, config.fleets.image);
     this.cluster.addAsgCapacityProvider(imageCapacityProvider);
 
     const imageTaskDef = this.makeTaskDefinition('image', {
@@ -102,7 +102,7 @@ export class ComputeStack extends Stack {
       config,
       ecrRepoArn: ci.videoWorkerRepo.repositoryArn,
     });
-    const videoCapacityProvider = this.makeCapacityProvider('video', this.videoAsg);
+    const videoCapacityProvider = this.makeCapacityProvider('video', this.videoAsg, config.fleets.video);
     this.cluster.addAsgCapacityProvider(videoCapacityProvider);
 
     const videoTaskDef = this.makeTaskDefinition('video', {
@@ -146,7 +146,11 @@ export class ComputeStack extends Stack {
       config,
       ecrRepoArn: ci.videoWorkerRepo.repositoryArn,
     });
-    const minimaxCapacityProvider = this.makeCapacityProvider('minimax', this.minimaxAsg);
+    const minimaxCapacityProvider = this.makeCapacityProvider(
+      'minimax',
+      this.minimaxAsg,
+      config.fleets.minimax,
+    );
     this.cluster.addAsgCapacityProvider(minimaxCapacityProvider);
 
     const minimaxTaskDef = this.makeTaskDefinition('minimax', {
@@ -154,14 +158,29 @@ export class ComputeStack extends Stack {
       queueUrl: queue.minimaxJobsQueue.queueUrl,
       storage,
       config,
+      asgName: this.minimaxAsg.autoScalingGroupName,
     });
-    this.grantWorkerPermissions(minimaxTaskDef.taskRole, queue.minimaxJobsQueue, storage);
+    this.grantWorkerPermissions(
+      minimaxTaskDef.taskRole,
+      queue.minimaxJobsQueue,
+      storage,
+      this.minimaxAsg,
+    );
 
-    const minimaxService = new ecs.Ec2Service(this, 'MinimaxService', {
-      serviceName: 'comfy-minimax',
+    // DAEMON, not REPLICA: one task on every g6e instance this ASG launches,
+    // with no desiredCount to own. The instance-type half of the constraint is
+    // what makes room for a second service pinned to a different architecture
+    // (and therefore a different image) on the SAME ASG — see
+    // FleetConfig.daemonScheduling.
+    //
+    // Renamed from 'comfy-minimax': schedulingStrategy is immutable, so this
+    // is a replacement, and CFN cannot create the new service while the old
+    // one holds that physical name.
+    const minimaxService = new ecs.Ec2Service(this, 'MinimaxAdaService', {
+      serviceName: 'comfy-minimax-ada',
       cluster: this.cluster,
       taskDefinition: minimaxTaskDef,
-      desiredCount: 0, // Owned by the comfy-fleet-scaler Lambda (see below)
+      daemon: true,
       capacityProviderStrategies: [
         {
           capacityProvider: minimaxCapacityProvider.capacityProviderName,
@@ -169,14 +188,13 @@ export class ComputeStack extends Stack {
         },
       ],
       minHealthyPercent: 0,
-      maxHealthyPercent: 100,
       placementConstraints: [
-        ecs.PlacementConstraint.memberOf(`attribute:fleet == minimax`),
+        ecs.PlacementConstraint.memberOf(
+          `attribute:fleet == minimax and attribute:ecs.instance-type =~ g6e.*`,
+        ),
       ],
     });
-    (minimaxService.node.defaultChild as ecs.CfnService).addPropertyDeletionOverride(
-      'DesiredCount',
-    );
+    void minimaxService;
 
     // ONE Lambda drives all fleets' desired counts — see makeFleetScaler.
     // Replaces video's former ECS Application Auto Scaling target-tracking
@@ -187,9 +205,12 @@ export class ComputeStack extends Stack {
     // same as image already did.
     this.makeFleetScaler(
       [
+        // image + video stay on the ECS-service actuator (REPLICA services,
+        // managed scaling on). minimax is DAEMON, so its capacity is driven on
+        // the ASG directly — see makeFleetScaler and services/fleet_scaler.
         { name: 'image', service: imageService, queue: queue.imageJobsQueue, max: config.scaling.imageMax },
         { name: 'video', service: videoService, queue: queue.videoJobsQueue, max: config.scaling.videoMax },
-        { name: 'minimax', service: minimaxService, queue: queue.minimaxJobsQueue, max: config.scaling.minimaxMax },
+        { name: 'minimax', asg: this.minimaxAsg, queue: queue.minimaxJobsQueue, max: config.scaling.minimaxMax },
       ],
     );
   }
@@ -208,7 +229,11 @@ export class ComputeStack extends Stack {
   private makeFleetScaler(
     fleets: {
       name: FleetName;
-      service: ecs.Ec2Service;
+      /** REPLICA fleets: the scaler sets this service's desiredCount. */
+      service?: ecs.Ec2Service;
+      /** DAEMON fleets: the scaler sets this ASG's desired capacity instead.
+       *  Exactly one of `service` / `asg` per fleet. */
+      asg?: autoscaling.AutoScalingGroup;
       queue: import('aws-cdk-lib/aws-sqs').IQueue;
       max: number;
     }[],
@@ -226,16 +251,19 @@ export class ComputeStack extends Stack {
       memorySize: 128,
       logRetention: logs.RetentionDays.ONE_WEEK,
       environment: {
-        CLUSTER: this.cluster.clusterName,
-        // <FLEET>_QUEUE_URL / _SERVICE / _MAX_WORKERS per fleet; the handler
-        // discovers fleets from these rather than a hardcoded list, so adding
-        // one here is the only change needed on the Lambda side.
+        CLUSTER: this.cluster.clusterName, // SERVICE-mode fleets only
+        // <FLEET>_QUEUE_URL / _MAX_WORKERS plus exactly ONE of _SERVICE / _ASG
+        // per fleet — the presence of _ASG is what selects the actuator. The
+        // handler discovers fleets from these rather than a hardcoded list, so
+        // adding one here is the only change needed on the Lambda side.
         ...Object.fromEntries(
           fleets.flatMap((f) => {
             const k = f.name.toUpperCase();
             return [
               [`${k}_QUEUE_URL`, f.queue.queueUrl],
-              [`${k}_SERVICE`, f.service.serviceName],
+              f.asg
+                ? [`${k}_ASG`, f.asg.autoScalingGroupName]
+                : [`${k}_SERVICE`, f.service!.serviceName],
               [`${k}_MAX_WORKERS`, String(f.max)],
             ];
           })
@@ -245,39 +273,71 @@ export class ComputeStack extends Stack {
     for (const f of fleets) {
       f.queue.grant(fn, 'sqs:GetQueueAttributes');
     }
-    fn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['ecs:DescribeServices', 'ecs:UpdateService'],
-        resources: fleets.map((f) => f.service.serviceArn),
-      })
-    );
-    // Container-instance reads let the scaler see capacity that is ALREADY
-    // running, so it never leaves a warm GPU idle while a job waits (see
-    // warm_capacity in the handler). Read-only, but the two APIs authorize on
-    // DIFFERENT resource types and must be granted separately: List takes the
-    // cluster, Describe takes each container-instance ARN. Granting both
-    // against the cluster ARN — which is what this did at first — fails only
-    // Describe, at runtime, with an AccessDenied the handler swallows by
-    // design. It degrades silently back to band-only scaling, so the tell is
-    // in the scaler's log rather than in a failed deploy.
-    fn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['ecs:ListContainerInstances'],
-        resources: [this.cluster.clusterArn],
-      })
-    );
-    fn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['ecs:DescribeContainerInstances'],
-        resources: [
-          Stack.of(this).formatArn({
-            service: 'ecs',
-            resource: 'container-instance',
-            resourceName: `${this.cluster.clusterName}/*`,
-          }),
-        ],
-      })
-    );
+    // Two actuators, two permission sets — each granted only for the fleets
+    // that actually use it.
+    //
+    // SERVICE mode (image, video): set desiredCount, and read container
+    // instances so the scaler can see capacity that is ALREADY running and
+    // never leave a warm GPU idle while a job waits (see warm_capacity). The
+    // two read APIs authorize on DIFFERENT resource types and must be granted
+    // separately: List takes the cluster, Describe takes each container-
+    // instance ARN. Granting both against the cluster ARN — which is what this
+    // did at first — fails only Describe, at runtime, with an AccessDenied the
+    // handler swallows by design. It degrades silently back to band-only
+    // scaling, so the tell is in the scaler's log rather than a failed deploy.
+    //
+    // ASG mode (minimax): the service is DAEMON, so there is no desiredCount
+    // to set and managed scaling has nothing to react to. The scaler owns ASG
+    // capacity outright. DescribeAutoScalingGroups has no resource-level
+    // support and must be '*'; SetDesiredCapacity is scoped. Same shape as the
+    // killswitch in monitoring.ts.
+    const serviceFleets = fleets.filter((f) => !f.asg);
+    const asgFleets = fleets.filter((f) => f.asg);
+
+    if (serviceFleets.length > 0) {
+      fn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ['ecs:DescribeServices', 'ecs:UpdateService'],
+          resources: serviceFleets.map((f) => f.service!.serviceArn),
+        })
+      );
+      fn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ['ecs:ListContainerInstances'],
+          resources: [this.cluster.clusterArn],
+        })
+      );
+      fn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ['ecs:DescribeContainerInstances'],
+          resources: [
+            Stack.of(this).formatArn({
+              service: 'ecs',
+              resource: 'container-instance',
+              resourceName: `${this.cluster.clusterName}/*`,
+            }),
+          ],
+        })
+      );
+    }
+
+    if (asgFleets.length > 0) {
+      fn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ['autoscaling:DescribeAutoScalingGroups'],
+          resources: ['*'],
+        })
+      );
+      fn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ['autoscaling:SetDesiredCapacity'],
+          resources: asgFleets.map(
+            (f) =>
+              `arn:aws:autoscaling:${this.region}:${this.account}:autoScalingGroup:*:autoScalingGroupName/${f.asg!.autoScalingGroupName}`
+          ),
+        })
+      );
+    }
     new events.Rule(this, 'FleetScalerSchedule', {
       ruleName: 'comfy-fleet-scaler-tick',
       schedule: events.Schedule.rate(Duration.minutes(1)),
@@ -478,34 +538,66 @@ export class ComputeStack extends Stack {
       // Required by the capacity provider's managed termination protection
       // (see makeCapacityProvider): the CP removes scale-in protection only
       // from drained/idle instances before the ASG terminates them.
-      newInstancesProtectedFromScaleIn: true,
+      // Required by managed termination protection, and only meaningful when
+      // the capacity provider owns the flag. DAEMON fleets manage it from the
+      // worker instead (see makeCapacityProvider), so instances must start
+      // UNprotected or nothing would ever scale in.
+      newInstancesProtectedFromScaleIn: !fleet.daemonScheduling,
     });
 
     return asg;
   }
 
   /**
-   * Capacity provider with managed scaling so ASG follows ECS task count.
+   * Capacity provider. REPLICA fleets use managed scaling so the ASG follows
+   * ECS task count; DAEMON fleets do not (see below).
    */
   private makeCapacityProvider(
     fleetName: FleetName,
-    asg: autoscaling.AutoScalingGroup
+    asg: autoscaling.AutoScalingGroup,
+    fleet: FleetConfig,
   ): ecs.AsgCapacityProvider {
+    // DAEMON fleets turn BOTH managed features off, for different reasons:
+    //
+    //  - Managed SCALING has nothing to react to. It sizes the ASG from tasks
+    //    that need placement, and daemon tasks never sit pending — they place
+    //    on whatever instances exist. Left on, it would also fight the
+    //    fleet-scaler Lambda, which now sets desired capacity directly (AWS:
+    //    "Don't change or manage the desired capacity for the Auto Scaling
+    //    group ... with any scaling policies other than the one Amazon ECS
+    //    manages").
+    //
+    //  - Managed TERMINATION PROTECTION does not do anything for us here. AWS:
+    //    "Tasks that are run by a service that uses the DAEMON scheduling
+    //    strategy are ignored and an instance can be terminated by cluster
+    //    auto scaling even when the instance is running these tasks." So it
+    //    would unprotect a busy worker anyway.
+    //
+    // That second point is why workers/shared/worker.py sets its OWN instance
+    // scale-in protection while a job is running. It is not optional: the ASG
+    // carries an ECS managed-draining lifecycle hook on EC2_INSTANCE_TERMINATING
+    // (1h heartbeat), and terminating a busy instance is exactly the shape that
+    // once wedged one in Terminating:Wait for ~17h, jamming scale-in and
+    // holding ~2 GPUs up across idle windows (2026-07-12). Self-protection
+    // keeps voluntary scale-in off busy boxes so that hook is never asked to
+    // drain a running render.
+    //
+    // NOTE either way: scale-in protection does NOT block spot reclamation.
+    // AWS still reclaims spot regardless; this governs only *voluntary* ASG
+    // scale-in.
+    const managed = !fleet.daemonScheduling;
     return new ecs.AsgCapacityProvider(this, `${fleetName}CapacityProvider`, {
       capacityProviderName: `cp-${fleetName}-spot`,
       autoScalingGroup: asg,
-      enableManagedScaling: true,
-      // ENABLED so the capacity provider owns scale-in: it unprotects only
-      // drained/idle instances, so the ASG never issues a raw terminate that
-      // wedges in the drain lifecycle hook. A DISABLED CP once left a spot
-      // instance stuck in Terminating:Wait for ~17h, jamming the ASG's
-      // scale-in and holding ~2 GPUs up across idle windows (2026-07-12).
-      // NOTE: scale-in protection does NOT block spot reclamation — AWS still
-      // reclaims spot regardless; this only governs *voluntary* ASG scale-in.
-      enableManagedTerminationProtection: true,
-      targetCapacityPercent: 100,
-      minimumScalingStepSize: 1,
-      maximumScalingStepSize: 1,
+      enableManagedScaling: managed,
+      enableManagedTerminationProtection: managed,
+      ...(managed
+        ? {
+            targetCapacityPercent: 100,
+            minimumScalingStepSize: 1,
+            maximumScalingStepSize: 1,
+          }
+        : {}),
       spotInstanceDraining: true, // Critical: graceful drain on spot termination notice
     });
   }
@@ -518,9 +610,9 @@ export class ComputeStack extends Stack {
    */
   private makeTaskDefinition(
     fleetName: FleetName,
-    deps: { ecrRepository: import('aws-cdk-lib/aws-ecr').IRepository; queueUrl: string; storage: StorageStack; config: AppConfig }
+    deps: { ecrRepository: import('aws-cdk-lib/aws-ecr').IRepository; queueUrl: string; storage: StorageStack; config: AppConfig; asgName?: string }
   ): ecs.Ec2TaskDefinition {
-    const { ecrRepository, queueUrl, storage, config } = deps;
+    const { ecrRepository, queueUrl, storage, config, asgName } = deps;
 
     // Both fleets use mount-s3 + NVMe cache. host-cache bind-mount + FUSE
     // capability + /dev/fuse device are uniform across image and video.
@@ -609,6 +701,11 @@ export class ComputeStack extends Stack {
         OBJECT_INFO_TABLE: storage.objectInfoTable.tableName,
         AWS_REGION: this.region,
         VISIBILITY_TIMEOUT_SECONDS: fleetName === 'image' ? '900' : '2700',
+        // DAEMON fleets only. Tells the worker which ASG to hold itself in
+        // while a job runs, since ECS managed termination protection ignores
+        // daemon tasks (see makeCapacityProvider). Empty elsewhere, which
+        // disables workers/shared/scale_in_protection.py outright.
+        ASG_NAME: asgName ?? '',
         // For /internal/object_info publish (resolves review C2 + C3):
         DISPATCHER_API_URL: dispatcherApiUrl,
         WORKER_API_KEY_ID: workerApiKeyId,
@@ -655,9 +752,23 @@ export class ComputeStack extends Stack {
   private grantWorkerPermissions(
     role: iam.IRole,
     queue: import('aws-cdk-lib/aws-sqs').IQueue,
-    storage: StorageStack
+    storage: StorageStack,
+    /** DAEMON fleets only — lets the worker hold its own instance against
+     *  voluntary ASG scale-in while a job runs, replacing the ECS managed
+     *  termination protection that daemon tasks don't get. */
+    asg?: autoscaling.AutoScalingGroup,
   ): void {
     queue.grantConsumeMessages(role);
+    if (asg) {
+      role.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          actions: ['autoscaling:SetInstanceProtection'],
+          resources: [
+            `arn:aws:autoscaling:${this.region}:${this.account}:autoScalingGroup:*:autoScalingGroupName/${asg.autoScalingGroupName}`,
+          ],
+        })
+      );
+    }
     storage.modelsBucket.grantRead(role); // GetObject + ListBucket only — NO put/delete
     storage.outputsBucket.grantWrite(role); // PutObject + GetObject (verify); no Delete
     // manifest_installer reads s3://<outputs>/manifests/custom-nodes.json on
