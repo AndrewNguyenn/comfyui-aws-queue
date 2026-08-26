@@ -146,6 +146,9 @@ export class ComputeStack extends Stack {
       config,
       ecrRepoArn: ci.videoWorkerRepo.repositoryArn,
     });
+    // Still created even though the DAEMON service can't reference it: the
+    // capacity provider is what attaches ECS managed draining and spot
+    // instance draining to the ASG (see makeCapacityProvider).
     const minimaxCapacityProvider = this.makeCapacityProvider(
       'minimax',
       this.minimaxAsg,
@@ -176,17 +179,19 @@ export class ComputeStack extends Stack {
     // Renamed from 'comfy-minimax': schedulingStrategy is immutable, so this
     // is a replacement, and CFN cannot create the new service while the old
     // one holds that physical name.
+    //
+    // No capacityProviderStrategies: ECS rejects the combination outright
+    // ("Specifying a capacity provider strategy is not supported when you
+    // create a service using the DAEMON scheduling strategy" — learned from a
+    // rolled-back deploy, 2026-08-26). It isn't needed anyway: with managed
+    // scaling off the capacity provider does no scheduling work, and the
+    // daemon places on whatever the ASG launches. Omitting both launchType
+    // and capacityProviderStrategies makes CDK emit LaunchType: EC2.
     const minimaxService = new ecs.Ec2Service(this, 'MinimaxAdaService', {
       serviceName: 'comfy-minimax-ada',
       cluster: this.cluster,
       taskDefinition: minimaxTaskDef,
       daemon: true,
-      capacityProviderStrategies: [
-        {
-          capacityProvider: minimaxCapacityProvider.capacityProviderName,
-          weight: 1,
-        },
-      ],
       minHealthyPercent: 0,
       placementConstraints: [
         ecs.PlacementConstraint.memberOf(
