@@ -9,6 +9,37 @@ set -euo pipefail
 echo "comfy-video-worker starting on $(hostname)"
 echo "fleet=${FLEET:-video} queue=${QUEUE_URL:-unset}"
 
+# GPU preflight — fail LOUD, not slow.
+#
+# Nothing downstream checks that torch can see a GPU. ComfyUI falls back to CPU
+# without complaint, so a driver/CUDA mismatch (this container's CUDA wants a
+# newer driver than the ECS AMI ships and NVIDIA forward-compat did not engage)
+# or an image on the wrong silicon (the ada arch list has no sm_120, no PTX)
+# would produce a RUNNING, billing worker that never finishes a job and looks
+# healthy to ECS. Exiting here turns that into a visible crash loop in the
+# service's events instead. The kernel launch is deliberate: "no kernel image
+# is available for execution on the device" only fires on a launch, not on
+# is_available().
+echo "gpu preflight:"
+nvidia-smi --query-gpu=name,driver_version,compute_cap,memory.total --format=csv,noheader 2>&1 | sed 's/^/  /' || true
+if ! python3 - <<'EOF'
+import sys, torch
+ok = torch.cuda.is_available()
+print(f"  torch {torch.__version__} cuda {torch.version.cuda} available={ok}")
+if not ok:
+    sys.exit(1)
+cc = torch.cuda.get_device_capability(0)
+print(f"  {torch.cuda.get_device_name(0)} sm_{cc[0]}{cc[1]} archs={torch.cuda.get_arch_list()}")
+(torch.ones(8, device="cuda") * 2).sum().item()
+print("  kernel launch OK")
+EOF
+then
+    echo "FATAL: torch cannot use the GPU on this host; refusing to run on CPU" >&2
+    sleep 60   # keep the daemon's restart loop slow enough to read
+    exit 78
+fi
+
+
 export TQDM_DISABLE=1
 export TRANSFORMERS_VERBOSITY=warning
 export DIFFUSERS_VERBOSITY=warning
