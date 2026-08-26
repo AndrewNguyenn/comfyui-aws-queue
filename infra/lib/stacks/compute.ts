@@ -537,7 +537,16 @@ export class ComputeStack extends Stack {
     const asg = new autoscaling.AutoScalingGroup(this, `${fleetName}Asg`, {
       autoScalingGroupName: `comfy-${fleetName}-asg`,
       vpc: network.vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
+      // Restrict to AZs that actually offer this fleet's instance types when
+      // the fleet says so. The ASG otherwise round-robins launch attempts
+      // across every VPC AZ, and an AZ with no such offering fails each one
+      // with InvalidFleetConfiguration — observed 2026-08-26 on minimax
+      // (g6e is in 1a-1d, g7e only 1b/1d, the VPC also has 1f), where two of
+      // three consecutive attempts during a drought went to 1f.
+      vpcSubnets: {
+        subnetType: ec2.SubnetType.PUBLIC,
+        ...(fleet.availabilityZones ? { availabilityZones: [...fleet.availabilityZones] } : {}),
+      },
       mixedInstancesPolicy: {
         launchTemplate,
         launchTemplateOverrides: [

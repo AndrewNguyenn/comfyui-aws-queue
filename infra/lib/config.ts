@@ -88,6 +88,10 @@ export interface FleetConfig {
   readonly fleetName: FleetName;
   readonly primaryInstanceType: string;
   readonly fallbackInstanceTypes: readonly string[];
+  /** Restrict the ASG to these AZs. Set it when the fleet's instance types
+   *  are not offered in every VPC AZ — otherwise the ASG spends launch
+   *  attempts on AZs that reject the type outright. Unset = all VPC AZs. */
+  readonly availabilityZones?: readonly string[];
   /** ECR tag the task definition pins. Use an immutable commit SHA, never
    *  'latest'.
    *
@@ -371,7 +375,15 @@ export const APP_CONFIG: AppConfig = {
       // it either. Two independent stall conditions now. If the fleet ever
       // sits at 0 instances with a non-empty queue, check the spot price
       // before anything else, and raise or remove this.
-      spotMaxPrice: '2.00',
+      // 2026-08-26: $2.00 -> $2.50 ahead of g7e.4xlarge joining this ASG. Its
+      // spot sits at $1.79-1.97 (1b/1d), so $2.00 left ~1.5% headroom on the
+      // 1d pool — an accidental exclusion waiting to happen. $2.50 is ~27%
+      // over both g7e and g6e.8xlarge ($1.68-1.76 today) and still under the
+      // on-demand price of every size in the family.
+      spotMaxPrice: '2.50',
+      // Only the AZs that offer g6e (1a-1d) and g7e (1b/1d). The VPC also
+      // spans 1f, which offers neither; see compute.ts vpcSubnets.
+      availabilityZones: ['us-east-1a', 'us-east-1b', 'us-east-1c', 'us-east-1d'],
       // 45 GiB of weights land on the NVMe instance store, not this volume,
       // but the ~26 GB container image is extracted here on every cold boot.
       rootVolumeGb: 250,
