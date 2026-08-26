@@ -88,6 +88,58 @@ export interface FleetConfig {
   readonly fleetName: FleetName;
   readonly primaryInstanceType: string;
   readonly fallbackInstanceTypes: readonly string[];
+  /** Restrict the ASG to these AZs. Set it when the fleet's instance types
+   *  are not offered in every VPC AZ — otherwise the ASG spends launch
+   *  attempts on AZs that reject the type outright. Unset = all VPC AZs. */
+  readonly availabilityZones?: readonly string[];
+  /** Capacity units per instance type (ASG instance weights). Set it when
+   *  the pool's instance types differ in throughput: the allocation strategy
+   *  then ranks Spot pools by price PER UNIT (price / weight), which is the
+   *  only way to make a price-aware strategy prefer a pricier-per-hour but
+   *  faster-per-job type. Desired/min/max capacity are then in units, and
+   *  the group can sit ABOVE desired (a 2-unit instance satisfies desired=1).
+   *  Unset = every type counts 1. */
+  readonly instanceWeights?: Readonly<Record<string, number>>;
+  /** ECR tag the task definition pins. Use an immutable commit SHA, never
+   *  'latest'.
+   *
+   *  Every CodeBuild run pushes BOTH `:$SHA` and `:latest` in one
+   *  `buildx --push` (codebuild/buildspec-video-worker.yml), so with 'latest'
+   *  a rebuild silently becomes prod on the next instance launch — running
+   *  workers keep their pulled image, but any scale-up or spot replacement
+   *  gets the new one. Pinning makes "what is in prod" unambiguous and makes
+   *  rollback a one-line revert instead of a rebuild.
+   *
+   *  Bump this deliberately, after the new image has been tested. */
+  readonly imageTag: string;
+  /** Blackwell (sm_120) build of the same worker, from
+   *  comfy-video-worker-blackwell. When set, compute.ts adds a SECOND DAEMON
+   *  service on this fleet's ASG constrained to g7e.* running this image,
+   *  beside the Ada one on g6e.*. Requires daemonScheduling. Unset = the
+   *  fleet is Ada-only and g7e must NOT be in its instance types. */
+  readonly blackwellImageTag?: string;
+  /** Run this fleet's ECS service with schedulingStrategy DAEMON — exactly
+   *  one task on every instance matching its placement constraints — instead
+   *  of REPLICA with a desiredCount.
+   *
+   *  This is what lets ONE ASG launch a mix of GPU architectures and have each
+   *  instance run the task definition (and therefore the container image)
+   *  built for its own GPU: one DAEMON service per architecture, each
+   *  constrained on `attribute:ecs.instance-type`. The ASG decides HOW MANY;
+   *  the constraints decide WHICH IMAGE.
+   *
+   *  Turning this on has three consequences, all handled in compute.ts:
+   *   - DAEMON tasks never sit pending, so ECS managed scaling has nothing to
+   *     react to. It is disabled and the fleet-scaler Lambda drives ASG
+   *     desired capacity directly (see services/fleet_scaler).
+   *   - Managed termination protection explicitly IGNORES daemon tasks, so it
+   *     is disabled too and the worker protects its own instance while a job
+   *     is running (see workers/shared/worker.py).
+   *   - schedulingStrategy is immutable on an existing ECS service, so turning
+   *     this on forces a service REPLACEMENT — and CloudFormation cannot do
+   *     that while a fixed physical serviceName is held. The service must be
+   *     renamed in the same change. */
+  readonly daemonScheduling?: boolean;
   /** Spot bid ceiling in USD/hr. Omit to bid the on-demand price (the AWS
    *  default). A ceiling below the market price means NO capacity at all —
    *  the fleet stalls silently rather than paying more — so only set this
@@ -136,6 +188,8 @@ export const APP_CONFIG: AppConfig = {
   fleets: {
     image: {
       fleetName: 'image',
+      // comfy-image-worker. Pinned 2026-08-25; was ':latest'.
+      imageTag: 'd33b87af655e56e702a4362887f2b02a66abef56',
       // HISTORY (superseded — fleet was g5.xlarge-only until 2026-07-12; see the
       // dated blocks below for the current mix):
       // We trialled a g4dn (T4) lowest-price config for cost and it BACKFIRED for
@@ -227,6 +281,8 @@ export const APP_CONFIG: AppConfig = {
     },
     video: {
       fleetName: 'video',
+      // comfy-video-worker. Pinned 2026-08-25; was ':latest'.
+      imageTag: '44d01ec0c8f5e5d7bd40d691962c4a859a35dc79',
       // 2026-08-19: primary moved g5.xlarge -> g5.2xlarge. Same A10G (22 GB
       // VRAM, sm_86) but 32 GB system RAM instead of 16 GB, and RAM is what
       // binds here. SCAIL-2 loads a 15.3 GiB transformer plus a 10.6 GiB umt5
@@ -259,6 +315,21 @@ export const APP_CONFIG: AppConfig = {
     // from v0.30.0, and that image is now v0.33.0.
     minimax: {
       fleetName: 'minimax',
+      // DAEMON-scheduled: one task per matching instance, ASG-driven capacity.
+      // This is what makes room for a second service on the SAME ASG pinned to
+      // a different GPU architecture and image (g7e/Blackwell). See the
+      // daemonScheduling docs above and compute.ts.
+      daemonScheduling: true,
+      // Shares comfy-video-worker with the video fleet. Pinned 2026-08-25;
+      // was ':latest', which meant rotating comfy-video silently moved this
+      // fleet's image too (and vice versa) with nothing recording it.
+      imageTag: '44d01ec0c8f5e5d7bd40d691962c4a859a35dc79',
+      // Blackwell (g7e / sm_120) image: NGC 26.07, torch 2.13, CUDA 13.3.
+      // Setting this creates the second DAEMON service (comfy-minimax-blackwell)
+      // constrained to g7e.*. Proven 2026-08-26 on a g7e.4xlarge outside the
+      // ASG: forward-compat engages on the AMI's 580 driver, sm_120 kernels
+      // launch, DynamicVRAM on, 97 GB VRAM. Same repo/SHA discipline as above.
+      blackwellImageTag: '44d01ec0c8f5e5d7bd40d691962c4a859a35dc79',
       // g6e.2xlarge (64 GB RAM) is primary, not g6e.xlarge (32 GB), for the
       // same reason the video fleet left g5.xlarge: the binding constraint is
       // SYSTEM memory, not VRAM. ComfyUI parks the 25.3 GiB int8_convrot text
@@ -290,23 +361,33 @@ export const APP_CONFIG: AppConfig = {
       // every g6e size carries exactly ONE L40S, so this buys no GPU and costs
       // no speed — the workload is GPU-bound and samples identically on both.
       //
-      // SINGLE entry, deliberately. price-capacity-optimized ignores the order
-      // below and weighs interruption risk as heavily as price, which is why
-      // this fleet kept landing on 4xlarge even while 8xlarge was 43% cheaper.
-      // Leaving 4xlarge in the list as a "fallback" would therefore not be a
-      // fallback — it would keep being the pick, at 2 x 16 = 32 vCPU, stranding
-      // half the quota. The only way to actually select a pool under this
-      // strategy is to be the only pool.
+      // 2026-08-26: g7e.4xlarge is PRIMARY, g6e.8xlarge the drought fallback,
+      // and the ASG is told so through instance WEIGHTS — the only lever that
+      // moves a price-aware allocation strategy. price-capacity-optimized
+      // ignores the order below and ranks pools by price per unit hour, and
+      // per instance-hour g6e.8xlarge ($1.68-1.76) undercuts g7e ($1.79-1.97).
+      // Per VIDEO it is the other way round: the same 8-step clip measured
+      // 760 s on g6e (4xlarge and 8xlarge alike, one L40S each) and 400 s on
+      // g7e (RTX PRO 6000 Blackwell, 96 GB VRAM, no weight offload), so g7e
+      // is ~42% cheaper per clip on spot ($0.21 vs $0.36) and its ON-DEMAND
+      // ($0.44) beats g6e.4xlarge SPOT ($0.57). Weighting g7e=2, g6e=1 makes
+      // the allocator see $0.94/unit vs $1.72/unit and pick g7e whenever it
+      // has capacity; g6e fires when g7e is dry (it lives in 1b/1d only).
       //
-      // The cost is real: no fallback means an 8xlarge capacity drought stalls
-      // the fleet outright rather than degrading to a pricier size. Re-adding
-      // 'g6e.4xlarge' here is the one-line rollback if that happens.
+      // Units, not instances: minimaxMax and the scaler's desired capacity are
+      // in g6e-worker-equivalents. desired=1 or 2 -> one g7e (the group sits
+      // at or above desired); a second g7e arrives at 3+, i.e. at the
+      // scaler's MAX band. That is throughput-equivalent to the old ladder
+      // (one g7e ~ two g6e), with better per-clip cost, and it never strands
+      // quota: 16 vCPU each, four fit the 64 vCPU G/VT spot quota.
       //
-      // vCPU accounting against the 64 G/VT spot quota: 2 x 32 = 64 exactly,
-      // which is why minimaxMax is 2. Three 8xlarges cannot coexist under this
-      // quota, so asking for a third would strand it pending forever.
-      primaryInstanceType: 'g6e.8xlarge',
-      fallbackInstanceTypes: [],
+      // The two types need two images — the ada image cannot run one kernel
+      // on sm_120 — which is what blackwellImageTag and the second daemon
+      // service are for. Do NOT list g7e here without that tag set, or a g7e
+      // launch is an idle, billing instance no service places on.
+      primaryInstanceType: 'g7e.4xlarge',
+      fallbackInstanceTypes: ['g6e.8xlarge'],
+      instanceWeights: { 'g7e.4xlarge': 2, 'g6e.8xlarge': 1 },
       // Bid ceiling. Without one AWS bids the on-demand price, which is how
       // the 4xlarge ended up costing exactly on-demand ($3.0042) with a 0%
       // spot discount. g6e.8xlarge has held $1.74-1.90 across every AZ for
@@ -318,7 +399,15 @@ export const APP_CONFIG: AppConfig = {
       // it either. Two independent stall conditions now. If the fleet ever
       // sits at 0 instances with a non-empty queue, check the spot price
       // before anything else, and raise or remove this.
-      spotMaxPrice: '2.00',
+      // 2026-08-26: $2.00 -> $2.50 ahead of g7e.4xlarge joining this ASG. Its
+      // spot sits at $1.79-1.97 (1b/1d), so $2.00 left ~1.5% headroom on the
+      // 1d pool — an accidental exclusion waiting to happen. $2.50 is ~27%
+      // over both g7e and g6e.8xlarge ($1.68-1.76 today) and still under the
+      // on-demand price of every size in the family.
+      spotMaxPrice: '2.50',
+      // Only the AZs that offer g6e (1a-1d) and g7e (1b/1d). The VPC also
+      // spans 1f, which offers neither; see compute.ts vpcSubnets.
+      availabilityZones: ['us-east-1a', 'us-east-1b', 'us-east-1c', 'us-east-1d'],
       // 45 GiB of weights land on the NVMe instance store, not this volume,
       // but the ~26 GB container image is extracted here on every cold boot.
       rootVolumeGb: 250,
@@ -358,11 +447,8 @@ export const APP_CONFIG: AppConfig = {
     videoMin: 0,
     videoMax: 3, // v3: lowered from 5 (resolves N2)
     minimaxMin: 0,
-    // 2 not 3, and the binding constraint is the G/VT spot quota rather than
-    // appetite: the fleet is now g6e.8xlarge (32 vCPU each), so 2 x 32 = 64
-    // saturates the quota exactly. A third would sit pending forever, which is
-    // the MaxSpotInstanceCountExceeded failure this fleet already hit once at
-    // 3 x 4xlarge. Raise to 3 only if the pending 96 vCPU increase lands.
+    // History: 1 -> 2 (2026-08-21, g6e.8xlarge x2 = the whole 64 vCPU G/VT
+    // spot quota) -> 4 units (2026-08-26, weighted pool, see below).
     //
     // Was 1 ("raise once there is a real queue for it"). That queue arrived:
     // ~30 clips at ~16 min each is ~8 hours serialised behind one worker, so
@@ -371,7 +457,15 @@ export const APP_CONFIG: AppConfig = {
     // ~50 GiB of MiniMax weights plus ~13 GiB of RedMix for frame 0, so this
     // only pays off across a deep queue — which is exactly when the scaler's
     // depth bands ramp to it.
-    minimaxMax: 2,
+    // UNITS, not instances (fleets.minimax.instanceWeights): g7e.4xlarge=2,
+    // g6e.8xlarge=1. 4 units = two g7e (32 vCPU), or FOUR g6e.8xlarge —
+    // 128 vCPU, double the 64 vCPU G/VT spot quota, so in a g7e drought with
+    // a deep queue (target 4) the third and fourth g6e launches fail with
+    // MaxSpotInstanceCountExceeded and the ASG keeps retrying them. Accepted:
+    // it is not billed and the two that did launch drain the queue. Giving
+    // g6e.8xlarge weight 2 would cap that, but would also make it the
+    // cheaper pool per unit again ($0.86 vs $0.94) and undo the preference.
+    minimaxMax: 4,
     // NOTE: targetBacklogPerTask is a leftover from a BacklogPerTask design
     // that was never wired up (both fleets used a flat targetValue=1 message
     // instead — see attachSqsTargetTracking's history) and is unread anywhere

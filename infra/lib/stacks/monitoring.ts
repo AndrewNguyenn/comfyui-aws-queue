@@ -1,4 +1,4 @@
-import { Stack, StackProps, Duration, RemovalPolicy } from 'aws-cdk-lib';
+import { ArnFormat, Stack, StackProps, Duration, RemovalPolicy } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as budgets from 'aws-cdk-lib/aws-budgets';
 import * as sns from 'aws-cdk-lib/aws-sns';
@@ -87,11 +87,19 @@ export class MonitoringStack extends Stack {
 
     // ---------- Kill-switch Lambda ----------
     // Names are deterministic (see compute.ts: cluster `${projectName}-cluster`,
-    // services 'comfy-image'/'comfy-video', ASGs `comfy-${fleet}-asg`), so we
+    // ASGs `comfy-${fleet}-asg`, services 'comfy-image'/'comfy-video'), so we
     // target them by name and avoid a cross-stack ref to ComputeStack.
-    const fleets = ['image', 'video'];
-    const asgNames = fleets.map((f) => `comfy-${f}-asg`);
-    const serviceNames = fleets.map((f) => `comfy-${f}`);
+    //
+    // ALL three ASGs get MaxSize=0 — that is the only durable stop (the
+    // handler docstring explains why). minimax matters most here: its ASG is
+    // driven directly by the fleet scaler, so MaxSize=0 is its entire safety
+    // net. Its services are DAEMON (comfy-minimax-ada/-blackwell) and have no
+    // desiredCount to zero, so they are deliberately NOT in the service list;
+    // with MaxSize=0 there is nothing for a daemon to place on anyway.
+    const asgFleets = ['image', 'video', 'minimax'];
+    const serviceFleets = ['image', 'video'];
+    const asgNames = asgFleets.map((f) => `comfy-${f}-asg`);
+    const serviceNames = serviceFleets.map((f) => `comfy-${f}`);
     const clusterName = `${config.projectName}-cluster`;
 
     const killSwitchFn = new lambda.Function(this, 'KillSwitchFn', {
@@ -106,7 +114,7 @@ export class MonitoringStack extends Stack {
         ECS_CLUSTER: clusterName,
         ECS_SERVICES: serviceNames.join(','),
       },
-      description: 'Cost kill-switch: zeros the image+video ASGs and ECS services on a budget breach.',
+      description: 'Cost kill-switch: zeros every GPU ASG (image, video, minimax) and the replica ECS services on a budget breach.',
     });
 
     // Describe has no resource-level support; scope Update to the two ASGs and
@@ -116,9 +124,16 @@ export class MonitoringStack extends Stack {
       resources: ['*'],
     }));
     killSwitchFn.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['autoscaling:UpdateAutoScalingGroup'],
-      resources: asgNames.map((n) =>
-        `arn:aws:autoscaling:${this.region}:${this.account}:autoScalingGroup:*:autoScalingGroupName/${n}`),
+      // SetInstanceProtection: minimax workers hold scale-in protection while
+      // rendering, and an ASG cannot terminate a protected instance, so the
+      // handler clears it before zeroing (services/killswitch/handler.py).
+      actions: ['autoscaling:UpdateAutoScalingGroup', 'autoscaling:SetInstanceProtection'],
+      resources: asgNames.map((n) => Stack.of(this).formatArn({
+        service: 'autoscaling',
+        resource: 'autoScalingGroup',
+        resourceName: `*:autoScalingGroupName/${n}`,
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      })),
     }));
     killSwitchFn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['ecs:UpdateService'],
