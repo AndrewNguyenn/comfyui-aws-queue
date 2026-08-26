@@ -20,12 +20,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import boto3
-import urllib3
 
 # Model files appear under /opt/comfy/models/<type>/ via mount-s3 (see
 # workers/image/entrypoint.sh). No download path needed here.
 from comfy_client import ComfyClient, JobCancelled
 from comfy_supervisor import ComfySupervisor
+import imds
+import scale_in_protection
 from object_info_publisher import publish_object_info
 from output_uploader import OutputUploader
 from spot_handler import SpotHandler, make_default_on_terminate
@@ -71,32 +72,13 @@ sqs = boto3.client("sqs", region_name=REGION)
 ddb = boto3.client("dynamodb", region_name=REGION)
 s3 = boto3.client("s3", region_name=REGION)
 
-_IMDS = "http://169.254.169.254/latest"
-_imds_http = urllib3.PoolManager(timeout=urllib3.Timeout(connect=1.0, read=2.0))
-
-
 def _fetch_instance_type() -> str:
     """This worker's EC2 instance type via IMDSv2, or '' if unavailable.
 
-    Both GPU fleets run a spot-capacity ASG spanning several instance types
-    (g5/g6 .xlarge/.2xlarge), so the type is only knowable from the instance
-    itself — there is no fleet-wide constant. Best-effort: a lookup failure
-    just means the job carries no instance_type."""
-    try:
-        tok = _imds_http.request(
-            "PUT", f"{_IMDS}/api/token",
-            headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"},
-        )
-        if tok.status != 200:
-            return ""
-        r = _imds_http.request(
-            "GET", f"{_IMDS}/meta-data/instance-type",
-            headers={"X-aws-ec2-metadata-token": tok.data.decode().strip()},
-        )
-        return r.data.decode().strip() if r.status == 200 else ""
-    except Exception:  # noqa: BLE001
-        log.exception("instance-type lookup failed (non-fatal)")
-        return ""
+    Both GPU fleets run a spot-capacity ASG spanning several instance types,
+    so the type is only knowable from the instance itself. Best-effort: a
+    lookup failure just means the job carries no instance_type."""
+    return imds.text("meta-data/instance-type")
 
 
 def main() -> int:
@@ -106,6 +88,13 @@ def main() -> int:
     # viewer can show what hardware a generation is running on.
     instance_type = _fetch_instance_type()
     log.info("worker instance type: %s", instance_type or "(unknown)")
+
+    # DAEMON fleets can't use ECS managed termination protection (it ignores
+    # daemon tasks), so this worker holds its own instance against voluntary
+    # ASG scale-in while a job runs. Clear first: a worker killed mid-job leaves
+    # the flag set with nothing to release it, and the ASG could then never
+    # scale that instance in. No-op on fleets where ASG_NAME is unset.
+    scale_in_protection.release_stale()
 
     # Install custom nodes from the S3 manifest BEFORE starting ComfyUI so
     # they register on the first /object_info publish. This is what makes
@@ -135,6 +124,10 @@ def main() -> int:
     def _terminate_chain(in_flight):
         on_terminate(in_flight)
         comfy.stop(timeout=10)
+        # Runs on the watcher thread, where SystemExit only ends THAT thread.
+        # The process actually exits because stopping ComfyUI fails the
+        # running job and the poll loop below checks spot.terminating before
+        # taking another. Keep that loop guard; this line is not the exit.
         sys.exit(0)
 
     spot = SpotHandler(on_terminate=_terminate_chain)
@@ -142,8 +135,16 @@ def main() -> int:
 
     # SIGTERM (from ECS draining or manual stop) — graceful shutdown
     def _on_sigterm(_signo, _frame):
-        log.warning("received SIGTERM; draining")
+        # Release the in-flight job FIRST (SQS visibility 0 + DDB queued) so it
+        # redelivers now instead of after the visibility timeout. SystemExit
+        # then unwinds through the job's finally (protection released, message
+        # NOT deleted) without hitting `except Exception`. Review M1.
+        log.warning("received SIGTERM; releasing in-flight job and draining")
         spot.terminating = True
+        try:
+            on_terminate(spot.take_in_flight())
+        except Exception:  # noqa: BLE001
+            log.exception("release on SIGTERM failed")
         comfy.stop(timeout=30)
         sys.exit(0)
 
@@ -215,6 +216,9 @@ def main() -> int:
             continue
 
         spot.set_in_flight(job_id, receipt)
+        # Held until the finally below. Best-effort: if it fails we still run
+        # the job (see scale_in_protection docstring).
+        scale_in_protection.protect()
         heartbeat_stop = threading.Event()
         heartbeat_thread = threading.Thread(
             target=_heartbeat_loop,
@@ -320,25 +324,34 @@ def main() -> int:
             success = True
 
         except Exception as e:  # noqa: BLE001
-            log.exception("job %s failed", job_id)
-            _set_job_status(job_id, "failed", extra={"error": str(e)[:500]})
+            if spot.terminating:
+                # The termination path already released the job back to the
+                # queue (status=queued, visibility 0); the failure here is just
+                # ComfyUI being stopped under it. Don't overwrite that.
+                log.warning("job %s interrupted by termination; left queued for redelivery", job_id)
+            else:
+                log.exception("job %s failed", job_id)
+                _set_job_status(job_id, "failed", extra={"error": str(e)[:500]})
 
         finally:
             heartbeat_stop.set()
+            # A job the termination path handed back (visibility 0, DDB
+            # status=queued — see _on_sigterm / spot_handler) must STAY in the
+            # queue; deleting it here would orphan a job that DDB says is
+            # queued. Every other outcome deletes: successes and cancels so
+            # they don't redeliver, failures to avoid retry storms (v3 N9 —
+            # they're in DDB for the user to inspect; the DLQ catches
+            # accidental retries).
+            handed_back = spot.terminating and not success
             spot.clear_in_flight()
-            if success:
-                # Successful jobs delete from queue so they don't redeliver.
+            scale_in_protection.release()
+            if handed_back:
+                log.warning("job %s handed back for redelivery; leaving its message in the queue", job_id)
+            else:
                 try:
                     sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=receipt)
                 except Exception:  # noqa: BLE001
                     log.exception("failed to delete sqs message for %s", job_id)
-            else:
-                # Failed jobs: delete to avoid retry storms (v3 N9). They're in DDB
-                # for the user to inspect. SQS DLQ catches accidental retries.
-                try:
-                    sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=receipt)
-                except Exception:  # noqa: BLE001
-                    pass
 
     log.info("worker exiting cleanly")
     return 0
