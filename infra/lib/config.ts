@@ -458,8 +458,13 @@ export const APP_CONFIG: AppConfig = {
     // only pays off across a deep queue — which is exactly when the scaler's
     // depth bands ramp to it.
     // UNITS, not instances (fleets.minimax.instanceWeights): g7e.4xlarge=2,
-    // g6e.8xlarge=1. 4 units = two g7e (32 vCPU) or two g6e.8xlarge (64 vCPU,
-    // the whole G/VT spot quota — a third fails to launch, harmlessly).
+    // g6e.8xlarge=1. 4 units = two g7e (32 vCPU), or FOUR g6e.8xlarge —
+    // 128 vCPU, double the 64 vCPU G/VT spot quota, so in a g7e drought with
+    // a deep queue (target 4) the third and fourth g6e launches fail with
+    // MaxSpotInstanceCountExceeded and the ASG keeps retrying them. Accepted:
+    // it is not billed and the two that did launch drain the queue. Giving
+    // g6e.8xlarge weight 2 would cap that, but would also make it the
+    // cheaper pool per unit again ($0.86 vs $0.94) and undo the preference.
     minimaxMax: 4,
     // NOTE: targetBacklogPerTask is a leftover from a BacklogPerTask design
     // that was never wired up (both fleets used a flat targetValue=1 message

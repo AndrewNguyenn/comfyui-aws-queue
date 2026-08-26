@@ -64,6 +64,7 @@ def lambda_handler(event, _context):
     # 1. Hard-stop both ASGs (min=max=desired=0).
     for name in ASG_NAMES:
         before = None
+        groups: list = []  # never stale from the previous ASG on a describe failure
         try:
             groups = asg.describe_auto_scaling_groups(
                 AutoScalingGroupNames=[name]
@@ -79,6 +80,9 @@ def lambda_handler(event, _context):
             # (workers/shared/scale_in_protection.py) and re-take it on every
             # pickup, so an ASG at desired=0 could never terminate a busy box.
             # This is the budget backstop: clear the flag first, best-effort.
+            # (A worker can re-protect between this call and the ASG's
+            # scale-in activity; the ASG keeps retrying and the worker
+            # releases at job end, so the window only delays, never defeats.)
             try:
                 iids = [i["InstanceId"] for i in (groups[0].get("Instances", []) if groups else [])]
                 if iids:

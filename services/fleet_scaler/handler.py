@@ -10,6 +10,17 @@ by which env vars are set. The decision logic is identical in both.
       desiredCount; the capacity provider's managed scaling turns that into
       instances. Used by image and video.
 
+UNITS, NOT WORKERS, on a weighted ASG. minimax's ASG carries instance
+weights (config.ts fleets.minimax.instanceWeights: g7e.4xlarge=2,
+g6e.8xlarge=1), so for that fleet every number this module produces or
+reads — band targets, max_workers, DesiredCapacity — is in capacity UNITS
+(g6e-worker-equivalents), not instances. A desired of 1 or 2 is ONE g7e; the
+group sits at or above desired (AWS never terminates an instance that would
+drop it below), so the release ladder 4->3->2->1->0 can take a tick that
+moves nothing. The bands below still read naturally: one g7e does two g6e
+worth of clips in the same time, so "2 units at 6 queued" is the same
+throughput promise either way.
+
   ASG mode ({FLEET}_ASG)  — sets the Auto Scaling group's desired capacity
       directly. Used where the service is DAEMON-scheduled (one task per
       matching instance, no desiredCount to set), which is how one ASG can
@@ -101,7 +112,7 @@ VIDEO_BANDS = [(1, 0), (2, 1), (6, 2)]
 # So spread it. At ~16 min a clip, a second worker only earns its cold start
 # once the queue is deep enough that it saves more than it costs; below that,
 # waiting is cheaper than warming.
-MINIMAX_BANDS = [(1, 0), (6, 1), (15, 2)]
+MINIMAX_BANDS = [(1, 0), (6, 1), (15, 2)]  # in capacity UNITS — see module docstring
 
 _BANDS = {"image": IMAGE_BANDS, "video": VIDEO_BANDS, "minimax": MINIMAX_BANDS}
 

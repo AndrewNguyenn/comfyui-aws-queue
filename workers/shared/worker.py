@@ -331,21 +331,23 @@ def main() -> int:
 
         finally:
             heartbeat_stop.set()
+            # A job the termination path handed back (visibility 0, DDB
+            # status=queued — see _on_sigterm / spot_handler) must STAY in the
+            # queue; deleting it here would orphan a job that DDB says is
+            # queued. Every other outcome deletes: successes and cancels so
+            # they don't redeliver, failures to avoid retry storms (v3 N9 —
+            # they're in DDB for the user to inspect; the DLQ catches
+            # accidental retries).
+            handed_back = spot.terminating and not success
             spot.clear_in_flight()
             scale_in_protection.release()
-            if success:
-                # Successful jobs delete from queue so they don't redeliver.
+            if handed_back:
+                log.warning("job %s handed back for redelivery; leaving its message in the queue", job_id)
+            else:
                 try:
                     sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=receipt)
                 except Exception:  # noqa: BLE001
                     log.exception("failed to delete sqs message for %s", job_id)
-            else:
-                # Failed jobs: delete to avoid retry storms (v3 N9). They're in DDB
-                # for the user to inspect. SQS DLQ catches accidental retries.
-                try:
-                    sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=receipt)
-                except Exception:  # noqa: BLE001
-                    pass
 
     log.info("worker exiting cleanly")
     return 0

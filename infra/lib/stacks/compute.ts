@@ -656,12 +656,6 @@ export class ComputeStack extends Stack {
     });
   }
 
-  /**
-   * Task definition. Worker is a single container, network mode `host`.
-   *
-   * DISPATCHER_API_URL and worker API key are looked up from SSM at deploy
-   * time (resolves circular Compute ↔ Api dependency from review C3).
-   */
   /** `arn:<partition>:autoscaling:<region>:<account>:autoScalingGroup:*:autoScalingGroupName/<name>`
    *  — the shape IAM wants for SetDesiredCapacity / SetInstanceProtection /
    *  UpdateAutoScalingGroup. The group's own UUID is unknowable at synth. */
@@ -699,6 +693,12 @@ export class ComputeStack extends Stack {
     });
   }
 
+  /**
+   * Task definition. Worker is a single container, network mode `host`.
+   *
+   * DISPATCHER_API_URL and worker API key are looked up from SSM at deploy
+   * time (resolves circular Compute ↔ Api dependency from review C3).
+   */
   private makeTaskDefinition(
     fleetName: FleetName,
     deps: {
