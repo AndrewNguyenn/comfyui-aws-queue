@@ -1,7 +1,37 @@
 """Graduated, sticky autoscaler for ALL GPU worker fleets (image, video, minimax).
 
-Runs every minute (EventBridge). For each fleet, sets its ECS service's
-desired count from that fleet's own SQS queue depth.
+Runs every minute (EventBridge). For each fleet, sets its Auto Scaling
+group's desired capacity from that fleet's own SQS queue depth.
+
+2026-08-25: fleets may now actuate in EITHER of two modes, chosen per fleet
+by which env vars are set. The decision logic is identical in both.
+
+  SERVICE mode ({FLEET}_SERVICE)  — the original. Sets the ECS service's
+      desiredCount; the capacity provider's managed scaling turns that into
+      instances. Used by image and video.
+
+  ASG mode ({FLEET}_ASG)  — sets the Auto Scaling group's desired capacity
+      directly. Used where the service is DAEMON-scheduled (one task per
+      matching instance, no desiredCount to set), which is how one ASG can
+      launch a mix of GPU architectures and have each instance pick up the
+      task definition — and therefore the container image — built for its own
+      GPU. DAEMON tasks never sit pending, so managed scaling has nothing to
+      react to and is turned off for those fleets; this Lambda owns capacity.
+
+UNITS, NOT WORKERS, on a weighted ASG. minimax's ASG carries instance
+weights (config.ts fleets.minimax.instanceWeights: g7e.4xlarge=2,
+g6e.8xlarge=1), so for that fleet every number this module produces or
+reads — band targets, max_workers, DesiredCapacity — is in capacity UNITS
+(g6e-worker-equivalents), not instances. A desired of 1 or 2 is ONE g7e; the
+group sits at or above desired (AWS never terminates an instance that would
+drop it below), so the release ladder 4->3->2->1->0 can take a tick that
+moves nothing. The bands below still read naturally: one g7e does two g6e
+worth of clips in the same time, so "2 units at 6 queued" is the same
+throughput promise either way.
+
+Both modes coexist deliberately: converting a fleet is a service REPLACEMENT
+(schedulingStrategy is immutable), so fleets migrate one at a time rather than
+in one high-blast-radius deploy.
 
 Originally image-only (replacing image's old App Auto Scaling
 target-tracking policy, which jumped straight to max on any message).
@@ -11,7 +41,7 @@ minutes below target to fire (see infra/lib/stacks/compute.ts history), so
 every video burst paid ~15-30 min of idle GPU at burst end. This scaler
 releases one worker per tick (~1-2 min) once a fleet's queue drains, same as
 image already did. One Lambda, one 1-min tick, drives both — each fleet's
-queue/service/bands/max are independent (see FLEETS below).
+queue/asg/bands/max are independent (see FLEETS below).
 
 Scale-UP is graduated and lazy — workers track the visible backlog. Bands
 (visible queue depth -> target workers), per fleet:
@@ -32,13 +62,18 @@ Video bands: video jobs are long-running (minutes, not seconds) and aren't
 worth batching, so a single queued job gets a worker immediately. A couple
 more queued jobs justifies a second worker; >=6 goes to MAX.
 
-Scale-UP has one override on the bands: if work is WAITING and this fleet
-already has warm, agent-connected container instances, the target rises to use
-them (capped by how many jobs are actually waiting). The bands exist to avoid
-paying a cold start for a shallow queue; that argument says nothing about a box
-that is already running. Without this, the capacity provider could hold an idle
-instance while a job sat in the queue — paying for two and using one. It never
-LAUNCHES an instance, so the lazy ramp is unchanged.
+Scale-UP has one override on the bands, in SERVICE mode only: if work is
+WAITING and the fleet already has warm, agent-connected container instances,
+the target rises to use them (capped by how many jobs are actually waiting).
+The bands exist to avoid paying a cold start for a shallow queue; that says
+nothing about a box already running. Without it the capacity provider could
+hold an idle instance while a job sat in the queue — paying for two, using
+one. It never LAUNCHES an instance, so the lazy ramp is unchanged.
+
+In ASG mode the override is meaningless and is skipped: task count and
+instance count are the same number by construction, so `warm` would always
+equal `current` and `max(target, min(warm, current + visible))` could only
+return `current` — which the ratchet already guarantees.
 
 Scale-DOWN is sticky, per fleet — a fleet never sheds workers while its own
 queue has work. Once N workers are up they stay up (`max(current, target)`)
@@ -60,7 +95,8 @@ import os
 
 import boto3
 
-CLUSTER = os.environ["CLUSTER"]  # both fleets share one ECS cluster
+# Only SERVICE-mode fleets use this; ASG-mode fleets never touch ECS.
+CLUSTER = os.environ.get("CLUSTER", "")
 
 # (exclusive_upper_bound, target_workers) pairs, ascending. Above the last
 # bound, the fleet's max_workers applies. See module docstring for the table.
@@ -76,7 +112,7 @@ VIDEO_BANDS = [(1, 0), (2, 1), (6, 2)]
 # So spread it. At ~16 min a clip, a second worker only earns its cold start
 # once the queue is deep enough that it saves more than it costs; below that,
 # waiting is cheaper than warming.
-MINIMAX_BANDS = [(1, 0), (6, 1), (15, 2)]
+MINIMAX_BANDS = [(1, 0), (6, 1), (15, 2)]  # in capacity UNITS — see module docstring
 
 _BANDS = {"image": IMAGE_BANDS, "video": VIDEO_BANDS, "minimax": MINIMAX_BANDS}
 
@@ -90,13 +126,18 @@ def _discover_fleets() -> list:
     for name, bands in _BANDS.items():
         key = name.upper()
         queue_url = os.environ.get(f"{key}_QUEUE_URL")
+        # Exactly one actuator per fleet. ASG wins if both are somehow set, so
+        # a half-finished migration fails toward the newer path rather than
+        # driving a DAEMON service's nonexistent desiredCount.
+        asg_name = os.environ.get(f"{key}_ASG")
         service = os.environ.get(f"{key}_SERVICE")
-        if not queue_url or not service:
+        if not queue_url or not (asg_name or service):
             continue
         found.append({
             "name": name,
             "queue_url": queue_url,
-            "service": service,
+            "asg": asg_name,
+            "service": None if asg_name else service,
             "max_workers": int(os.environ.get(f"{key}_MAX_WORKERS", "3")),
             "bands": bands,
         })
@@ -107,6 +148,7 @@ FLEETS = _discover_fleets()
 
 sqs = boto3.client("sqs")
 ecs = boto3.client("ecs")
+asg = boto3.client("autoscaling")
 
 
 def step_target(visible: int, bands: list, max_workers: int) -> int:
@@ -155,9 +197,10 @@ def decide(visible: int, inflight: int, current: int, bands: list,
 def warm_capacity(fleet_name: str) -> int:
     """Container instances for this fleet that could take a task right now.
 
-    Best-effort: any failure returns 0, which degrades to the old band-only
-    behaviour rather than breaking the tick. An instance whose agent is
-    disconnected is not counted — it cannot be placed on.
+    SERVICE mode only — see the module docstring. Best-effort: any failure
+    returns 0, which degrades to band-only behaviour rather than breaking the
+    tick. An instance whose agent is disconnected is not counted; it cannot be
+    placed on.
     """
     try:
         arns = ecs.list_container_instances(
@@ -198,25 +241,47 @@ def _scale_fleet(fleet: dict) -> dict:
     visible = int(attrs.get("ApproximateNumberOfMessages", 0))
     inflight = int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0))
 
-    resp = ecs.describe_services(cluster=CLUSTER, services=[fleet["service"]])
-    services = resp.get("services") or []
-    if not services:
-        print(f"scaler: service {fleet['service']} not found; failures={resp.get('failures')}")
-        return {"action": "noop", "reason": "service-not-found"}
-    current = int(services[0]["desiredCount"])
+    on_asg = bool(fleet["asg"])
+
+    if on_asg:
+        resp = asg.describe_auto_scaling_groups(AutoScalingGroupNames=[fleet["asg"]])
+        groups = resp.get("AutoScalingGroups") or []
+        if not groups:
+            print(f"scaler: asg {fleet['asg']} not found")
+            return {"action": "noop", "reason": "asg-not-found"}
+        current = int(groups[0]["DesiredCapacity"])
+    else:
+        resp = ecs.describe_services(cluster=CLUSTER, services=[fleet["service"]])
+        services = resp.get("services") or []
+        if not services:
+            print(f"scaler: service {fleet['service']} not found; failures={resp.get('failures')}")
+            return {"action": "noop", "reason": "service-not-found"}
+        current = int(services[0]["desiredCount"])
 
     bands = fleet["bands"]
     max_workers = fleet["max_workers"]
-    warm = warm_capacity(fleet["name"]) if visible > 0 else 0
+    # The warm override is a SERVICE-mode concept only (module docstring).
+    warm = 0 if on_asg else (warm_capacity(fleet["name"]) if visible > 0 else 0)
     new_desired = decide(visible, inflight, current, bands, max_workers, warm)
 
     action = "hold"
     if new_desired != current:
-        ecs.update_service(cluster=CLUSTER, service=fleet["service"], desiredCount=new_desired)
+        if on_asg:
+            # HonorCooldown defaults to False, which is what we want: the tick
+            # is already the rate limit, and a cooldown would swallow the
+            # one-per-tick release just as the queue clears.
+            asg.set_desired_capacity(
+                AutoScalingGroupName=fleet["asg"], DesiredCapacity=new_desired,
+            )
+        else:
+            ecs.update_service(
+                cluster=CLUSTER, service=fleet["service"], desiredCount=new_desired,
+            )
         action = "scale-up" if new_desired > current else "scale-down"
 
     print(
-        f"scaler: fleet={fleet['name']} visible={visible} inflight={inflight} current={current} "
+        f"scaler: fleet={fleet['name']}({'asg' if on_asg else 'svc'}) visible={visible} "
+        f"inflight={inflight} current={current} "
         f"step_target={step_target(visible, bands, max_workers)} -> {action} desired={new_desired}"
     )
     return {

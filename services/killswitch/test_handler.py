@@ -26,7 +26,8 @@ def _fresh_mocks():
     ks.asg = MagicMock()
     ks.ecs = MagicMock()
     ks.asg.describe_auto_scaling_groups.return_value = {
-        "AutoScalingGroups": [{"MinSize": 0, "MaxSize": 6, "DesiredCapacity": 5}]
+        "AutoScalingGroups": [{"MinSize": 0, "MaxSize": 6, "DesiredCapacity": 5,
+                               "Instances": [{"InstanceId": "i-busy"}, {"InstanceId": "i-idle"}]}]
     }
 
 
@@ -52,6 +53,15 @@ def test_fire_zeros_all_asgs_and_services():
         assert c.kwargs["DesiredCapacity"] == 0
     assert {c.kwargs["AutoScalingGroupName"] for c in asg_calls} == {
         "comfy-image-asg", "comfy-video-asg"}
+    # Scale-in protection is cleared on every instance BEFORE the group is
+    # zeroed, or a protected mid-render worker outlives the budget breach.
+    prot_calls = ks.asg.set_instance_protection.call_args_list
+    assert len(prot_calls) == 2
+    for c in prot_calls:
+        assert c.kwargs["ProtectedFromScaleIn"] is False
+        assert sorted(c.kwargs["InstanceIds"]) == ["i-busy", "i-idle"]
+    names = [c[0] for c in ks.asg.mock_calls]
+    assert names.index("set_instance_protection") < names.index("update_auto_scaling_group")
     svc_calls = ks.ecs.update_service.call_args_list
     assert len(svc_calls) == 2
     for c in svc_calls:

@@ -10,12 +10,12 @@ import sys
 import types
 
 sys.modules.setdefault("boto3", types.SimpleNamespace(client=lambda *a, **k: None))
-os.environ.setdefault("CLUSTER", "c")
 os.environ.setdefault("IMAGE_QUEUE_URL", "x-image")
+os.environ.setdefault("CLUSTER", "c")
 os.environ.setdefault("IMAGE_SERVICE", "s-image")
 os.environ["IMAGE_MAX_WORKERS"] = "3"  # matches config.ts scaling.imageMax
 os.environ.setdefault("VIDEO_QUEUE_URL", "x-video")
-os.environ.setdefault("VIDEO_SERVICE", "s-video")
+os.environ.setdefault("VIDEO_ASG", "asg-video")
 os.environ["VIDEO_MAX_WORKERS"] = "3"  # matches config.ts scaling.videoMax
 
 _spec = importlib.util.spec_from_file_location(
@@ -95,21 +95,30 @@ def test_fleets_env_wiring():
     assert names == {"image", "video"}
     by_name = {f["name"]: f for f in h.FLEETS}
     assert by_name["image"]["queue_url"] == "x-image"
-    assert by_name["image"]["service"] == "s-image"
+    assert by_name["image"]["service"] == "s-image"   # SERVICE mode
+    assert by_name["image"]["asg"] is None
     assert by_name["image"]["bands"] is h.IMAGE_BANDS
     assert by_name["video"]["queue_url"] == "x-video"
-    assert by_name["video"]["service"] == "s-video"
+    assert by_name["video"]["asg"] == "asg-video"     # ASG mode
+    assert by_name["video"]["service"] is None
     assert by_name["video"]["bands"] is h.VIDEO_BANDS
 
 
 def test_one_fleet_error_does_not_block_the_other():
-    # stub sqs/ecs: image fleet's GetQueueAttributes blows up, video's succeeds
+    # stub sqs/asg: image fleet's GetQueueAttributes blows up, video's succeeds
     class FakeSqs:
         def get_queue_attributes(self, QueueUrl, AttributeNames):
             if QueueUrl == "x-image":
                 raise RuntimeError("sqs boom")
             return {"Attributes": {"ApproximateNumberOfMessages": "0",
                                     "ApproximateNumberOfMessagesNotVisible": "0"}}
+
+    class FakeAsg:
+        def describe_auto_scaling_groups(self, AutoScalingGroupNames):
+            return {"AutoScalingGroups": [{"DesiredCapacity": 0}]}
+
+        def set_desired_capacity(self, **kwargs):
+            raise AssertionError("should not scale an already-0, already-drained fleet")
 
     class FakeEcs:
         def describe_services(self, cluster, services):
@@ -118,24 +127,17 @@ def test_one_fleet_error_does_not_block_the_other():
         def update_service(self, **kwargs):
             raise AssertionError("should not scale an already-0, already-drained service")
 
-    saved_sqs, saved_ecs = h.sqs, h.ecs
-    h.sqs, h.ecs = FakeSqs(), FakeEcs()
+    saved = h.sqs, h.asg, h.ecs
+    h.sqs, h.asg, h.ecs = FakeSqs(), FakeAsg(), FakeEcs()
     try:
         results = h.lambda_handler({}, None)
     finally:
-        h.sqs, h.ecs = saved_sqs, saved_ecs
+        h.sqs, h.asg, h.ecs = saved
 
     assert results["image"]["action"] == "error"
     assert "sqs boom" in results["image"]["error"]
     assert results["video"]["action"] == "hold"
 
-
-if __name__ == "__main__":
-    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    for fn in fns:
-        fn()
-        print(f"ok  {fn.__name__}")
-    print(f"\n{len(fns)} passed")
 
 
 def test_minimax_does_not_wake_the_whole_fleet_for_one_clip():
@@ -199,3 +201,180 @@ def test_inflight_only_does_not_summon_warm_workers():
 
 def test_warm_capacity_defaults_off_for_existing_callers():
     assert h.decide(1, 1, 1, h.MINIMAX_BANDS, 3) == 1
+
+
+def test_scale_up_actuates_on_the_asg_not_the_service():
+    """The actuator moved from ECS desiredCount to ASG desired capacity.
+
+    The sibling error test only asserts we DON'T scale a drained fleet, so
+    without this nothing checks that a real scale-up reaches AWS at all, or
+    that it names the right ASG.
+    """
+    calls = []
+
+    class FakeSqs:
+        def get_queue_attributes(self, QueueUrl, AttributeNames):
+            # 3 waiting on video -> bands (2,1),(6,2) put the target at 2
+            n = "3" if QueueUrl == "x-video" else "0"
+            return {"Attributes": {"ApproximateNumberOfMessages": n,
+                                   "ApproximateNumberOfMessagesNotVisible": "0"}}
+
+    class FakeAsg:
+        def describe_auto_scaling_groups(self, AutoScalingGroupNames):
+            return {"AutoScalingGroups": [{"DesiredCapacity": 0}]}
+
+        def set_desired_capacity(self, **kw):
+            calls.append(kw)
+
+    class FakeEcs:
+        def describe_services(self, cluster, services):
+            return {"services": [{"desiredCount": 0}]}
+
+        def update_service(self, **kwargs):
+            raise AssertionError("SERVICE-mode fleet must not be touched here")
+
+    saved = h.sqs, h.asg, h.ecs
+    h.sqs, h.asg, h.ecs = FakeSqs(), FakeAsg(), FakeEcs()
+    try:
+        results = h.lambda_handler({}, None)
+    finally:
+        h.sqs, h.asg, h.ecs = saved
+
+    assert results["video"]["action"] == "scale-up"
+    assert results["video"]["desired"] == 2
+    # image is SERVICE mode with an empty queue -> never reaches the ASG API
+    assert results["image"]["action"] == "hold"
+    assert calls == [{"AutoScalingGroupName": "asg-video", "DesiredCapacity": 2}]
+
+
+def test_asg_not_found_is_a_noop_not_a_crash():
+    """A missing ASG must not take the whole tick down with it."""
+    class FakeSqs:
+        def get_queue_attributes(self, QueueUrl, AttributeNames):
+            return {"Attributes": {"ApproximateNumberOfMessages": "5",
+                                   "ApproximateNumberOfMessagesNotVisible": "0"}}
+
+    class FakeAsg:
+        def describe_auto_scaling_groups(self, AutoScalingGroupNames):
+            return {"AutoScalingGroups": []}
+
+        def set_desired_capacity(self, **kw):
+            raise AssertionError("must not actuate on an ASG we could not read")
+
+    class FakeEcs:
+        def describe_services(self, cluster, services):
+            return {"services": [{"desiredCount": 0}]}
+
+        def update_service(self, **kwargs):
+            raise AssertionError("SERVICE-mode fleet must not be touched here")
+
+    saved = h.sqs, h.asg, h.ecs
+    h.sqs, h.asg, h.ecs = FakeSqs(), FakeAsg(), FakeEcs()
+    try:
+        results = h.lambda_handler({}, None)
+    finally:
+        h.sqs, h.asg, h.ecs = saved
+
+    assert results["video"]["action"] == "noop"
+    assert results["video"]["reason"] == "asg-not-found"
+
+
+def test_scale_down_actuates_on_the_asg():
+    """A drained ASG-mode fleet steps its DESIRED CAPACITY down by one — on the
+    ASG, not on a service. The scale-up sibling proved the up path; nothing
+    proved the release ever reaches the ASG API."""
+    calls = []
+
+    class FakeSqs:
+        def get_queue_attributes(self, QueueUrl, AttributeNames):
+            return {"Attributes": {"ApproximateNumberOfMessages": "0",
+                                   "ApproximateNumberOfMessagesNotVisible": "0"}}
+
+    class FakeAsg:
+        def describe_auto_scaling_groups(self, AutoScalingGroupNames):
+            return {"AutoScalingGroups": [{"DesiredCapacity": 2}]}
+
+        def set_desired_capacity(self, **kw):
+            calls.append(kw)
+
+    class FakeEcs:
+        def describe_services(self, cluster, services):
+            return {"services": [{"desiredCount": 0}]}
+
+        def update_service(self, **kwargs):
+            raise AssertionError("release must not touch a service in ASG mode")
+
+    saved = h.sqs, h.asg, h.ecs
+    h.sqs, h.asg, h.ecs = FakeSqs(), FakeAsg(), FakeEcs()
+    try:
+        results = h.lambda_handler({}, None)
+    finally:
+        h.sqs, h.asg, h.ecs = saved
+
+    assert results["video"]["action"] == "scale-down"
+    assert calls == [{"AutoScalingGroupName": "asg-video", "DesiredCapacity": 1}]
+
+
+def test_asg_wins_when_both_actuators_are_set():
+    """Half-finished migration: both VIDEO_ASG and VIDEO_SERVICE present. The
+    scaler must drive the ASG and forget the service, or it would be setting
+    desiredCount on a DAEMON service that has none."""
+    os.environ["VIDEO_SERVICE"] = "s-video-stale"
+    try:
+        fleets = {f["name"]: f for f in h._discover_fleets()}
+    finally:
+        del os.environ["VIDEO_SERVICE"]
+    assert fleets["video"]["asg"] == "asg-video"
+    assert fleets["video"]["service"] is None
+    assert fleets["image"]["service"] == "s-image" and fleets["image"]["asg"] is None
+
+
+def test_asg_mode_never_consults_warm_capacity():
+    """warm_capacity() counts ECS container instances to raise a SERVICE-mode
+    target toward boxes that are already up. Under DAEMON scheduling task
+    count == instance count by construction, so the scaler skips it — and
+    must not even call ECS for it (the Lambda's IAM has no ecs:* for ASG
+    fleets)."""
+    class FakeSqs:
+        def get_queue_attributes(self, QueueUrl, AttributeNames):
+            n = "1" if QueueUrl == "x-video" else "0"
+            return {"Attributes": {"ApproximateNumberOfMessages": n,
+                                   "ApproximateNumberOfMessagesNotVisible": "0"}}
+
+    class FakeAsg:
+        def describe_auto_scaling_groups(self, AutoScalingGroupNames):
+            return {"AutoScalingGroups": [{"DesiredCapacity": 1}]}
+
+        def set_desired_capacity(self, **kw):
+            raise AssertionError("1 waiting on 1 worker is a hold, not a scale")
+
+    class FakeEcs:
+        def describe_services(self, cluster, services):
+            return {"services": [{"desiredCount": 0}]}
+
+        def list_container_instances(self, **kw):
+            raise AssertionError("ASG-mode fleet consulted warm_capacity()")
+
+        def describe_container_instances(self, **kw):
+            raise AssertionError("ASG-mode fleet consulted warm_capacity()")
+
+        def update_service(self, **kwargs):
+            raise AssertionError("SERVICE call in ASG mode")
+
+    saved = h.sqs, h.asg, h.ecs
+    h.sqs, h.asg, h.ecs = FakeSqs(), FakeAsg(), FakeEcs()
+    try:
+        results = h.lambda_handler({}, None)
+    finally:
+        h.sqs, h.asg, h.ecs = saved
+
+    assert results["video"]["action"] == "hold", results["video"]
+
+
+if __name__ == "__main__":
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    for fn in fns:
+        fn()
+        print(f"ok  {fn.__name__}")
+    print(f"\n{len(fns)} passed")
+

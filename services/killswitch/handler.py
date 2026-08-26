@@ -5,7 +5,7 @@ Wired to the `comfy-killswitch` SNS topic, which the AWS Budget's 100% ACTUAL
 notification publishes to (see infra/lib/stacks/monitoring.ts). ANY SNS delivery
 is treated as "fire" — the message body is not inspected.
 
-What it does, for both fleets (image + video):
+What it does, for every GPU fleet (image, video, minimax):
   1. ASG -> MinSize=0, MaxSize=0, DesiredCapacity=0. **MaxSize=0 is the only
      durable hard-stop**: the ECS capacity provider's managed scaling drives the
      ASG's DesiredCapacity but is hard-capped by MaxSize, so it cannot launch or
@@ -13,7 +13,7 @@ What it does, for both fleets (image + video):
      the ASG min/max, so this holds.
   2. ECS service -> desiredCount=0. This is only a transient courtesy that stops
      tasks being scheduled in the moment — it is NOT belt-and-suspenders: the
-     comfy-fleet-scaler Lambda (every 60s, both fleets) re-raises desiredCount
+     comfy-fleet-scaler Lambda (every 60s, all fleets) re-raises desiredCount
      above 0 within ~a minute if a fleet's queue is non-empty.
      That resurrected "want" is harmless — MaxSize=0 means it can never be
      satisfied, so no instance launches (the steady state is just the service
@@ -33,7 +33,8 @@ DRIFT from CloudFormation. To bring compute back, either redeploy the compute
 stack (`cd infra && npx cdk deploy ComfyComputeStack -c useGoldenAmi=true` —
 resets the ASG bounds from config) or manually restore, e.g.
 `aws autoscaling update-auto-scaling-group --auto-scaling-group-name \
-comfy-image-asg --min-size 0 --max-size 6 --desired-capacity 0` (video max 3),
+comfy-image-asg --min-size 0 --max-size 6 --desired-capacity 0` (video max 3,
+minimax max 4 — units, see config.ts instanceWeights),
 then let the ECS services scale back up.
 """
 import json
@@ -63,6 +64,7 @@ def lambda_handler(event, _context):
     # 1. Hard-stop both ASGs (min=max=desired=0).
     for name in ASG_NAMES:
         before = None
+        groups: list = []  # never stale from the previous ASG on a describe failure
         try:
             groups = asg.describe_auto_scaling_groups(
                 AutoScalingGroupNames=[name]
@@ -74,6 +76,23 @@ def lambda_handler(event, _context):
         except Exception as e:  # noqa: BLE001
             before = f"describe-failed: {e!r}"
         if not dry:
+            # The minimax workers hold scale-in protection while rendering
+            # (workers/shared/scale_in_protection.py) and re-take it on every
+            # pickup, so an ASG at desired=0 could never terminate a busy box.
+            # This is the budget backstop: clear the flag first, best-effort.
+            # (A worker can re-protect between this call and the ASG's
+            # scale-in activity; the ASG keeps retrying and the worker
+            # releases at job end, so the window only delays, never defeats.)
+            try:
+                iids = [i["InstanceId"] for i in (groups[0].get("Instances", []) if groups else [])]
+                if iids:
+                    asg.set_instance_protection(
+                        AutoScalingGroupName=name, InstanceIds=iids,
+                        ProtectedFromScaleIn=False,
+                    )
+                    actions.append({"asg": name, "unprotected": iids})
+            except Exception as e:  # noqa: BLE001
+                actions.append({"asg": name, "unprotect_error": repr(e)})
             try:
                 asg.update_auto_scaling_group(
                     AutoScalingGroupName=name,
