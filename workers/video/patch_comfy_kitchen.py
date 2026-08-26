@@ -28,12 +28,15 @@ crash-looping every worker.
 """
 
 import ast
+import os
 import pathlib
 import sys
 
+# Site-packages root differs per NGC base (24.10 = py3.10, 26.07 = py3.12);
+# the Dockerfile passes it through PYTHON_SITE.
 TARGET = pathlib.Path(
-    "/usr/local/lib/python3.10/dist-packages/comfy_kitchen/backends/eager/na.py"
-)
+    os.environ.get("PYTHON_SITE", "/usr/local/lib/python3.10/dist-packages")
+) / "comfy_kitchen/backends/eager/na.py"
 
 ANCHOR = """@torch.library.custom_op("comfy_kitchen::na3d", mutates_args=())
 def _op_na3d(

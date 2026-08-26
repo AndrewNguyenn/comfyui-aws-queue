@@ -31,12 +31,15 @@ is caught at build time rather than by every MiniMax node vanishing later.
 """
 
 import ast
+import os
 import pathlib
 import sys
 
+# Site-packages root differs per NGC base (24.10 = py3.10, 26.07 = py3.12);
+# the Dockerfile passes it through PYTHON_SITE.
 TARGET = pathlib.Path(
-    "/usr/local/lib/python3.10/dist-packages/torchaudio/_extension/__init__.py"
-)
+    os.environ.get("PYTHON_SITE", "/usr/local/lib/python3.10/dist-packages")
+) / "torchaudio/_extension/__init__.py"
 
 ANCHOR = """if _IS_TORCHAUDIO_EXT_AVAILABLE:
     _load_lib("libtorchaudio")

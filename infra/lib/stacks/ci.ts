@@ -29,9 +29,13 @@ export interface CiStackProps extends StackProps {
 export class CiStack extends Stack {
   public readonly imageWorkerRepo: ecr.Repository;
   public readonly videoWorkerRepo: ecr.Repository;
+  /** Blackwell (sm_120) build of the same Dockerfile; its own repo so the
+   *  keep-last-10 lifecycle rule never evicts one variant for the other. */
+  public readonly videoWorkerBlackwellRepo: ecr.Repository;
   public readonly metadataRepo: ecr.Repository;
   public readonly imageWorkerProject: codebuild.Project;
   public readonly videoWorkerProject: codebuild.Project;
+  public readonly videoWorkerBlackwellProject: codebuild.Project;
   public readonly metadataProject: codebuild.Project;
 
   constructor(scope: Construct, id: string, props: CiStackProps) {
@@ -66,6 +70,14 @@ export class CiStack extends Stack {
       emptyOnDelete: false,
     });
 
+    this.videoWorkerBlackwellRepo = new ecr.Repository(this, 'VideoWorkerBlackwellRepo', {
+      repositoryName: 'comfy-video-worker-blackwell',
+      imageScanOnPush: true,
+      removalPolicy: RemovalPolicy.RETAIN,
+      lifecycleRules,
+      emptyOnDelete: false,
+    });
+
     // Metadata instance image (CPU-only, ~1 GB, served from always-on t3.small).
     this.metadataRepo = new ecr.Repository(this, 'MetadataRepo', {
       repositoryName: 'comfy-metadata',
@@ -82,6 +94,7 @@ export class CiStack extends Stack {
     });
     this.imageWorkerRepo.grantPullPush(buildRole);
     this.videoWorkerRepo.grantPullPush(buildRole);
+    this.videoWorkerBlackwellRepo.grantPullPush(buildRole);
     this.metadataRepo.grantPullPush(buildRole);
     buildRole.addToPolicy(
       new iam.PolicyStatement({
@@ -170,6 +183,18 @@ export class CiStack extends Stack {
       buildSpec: codebuild.BuildSpec.fromSourceFilename('codebuild/buildspec-video-worker.yml'),
       timeout: Duration.minutes(90),
       logging: { cloudWatch: { logGroup: buildLogs, prefix: 'video-worker' } },
+    });
+
+    // Same Dockerfile, blackwell profile (NGC 26.07, +sm_120). Three CUDA
+    // archs and a bigger base, so a longer timeout. See the buildspec header.
+    this.videoWorkerBlackwellProject = new codebuild.Project(this, 'VideoWorkerBlackwellBuildProject', {
+      projectName: 'comfy-build-video-worker-blackwell',
+      role: buildRole,
+      source: sourceFromGitHub,
+      environment: buildEnvironment,
+      buildSpec: codebuild.BuildSpec.fromSourceFilename('codebuild/buildspec-video-worker-blackwell.yml'),
+      timeout: Duration.minutes(120),
+      logging: { cloudWatch: { logGroup: buildLogs, prefix: 'video-worker-blackwell' } },
     });
   }
 }
