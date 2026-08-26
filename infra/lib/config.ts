@@ -189,7 +189,9 @@ export const APP_CONFIG: AppConfig = {
     image: {
       fleetName: 'image',
       // comfy-image-worker. Pinned 2026-08-25; was ':latest'.
-      imageTag: 'd33b87af655e56e702a4362887f2b02a66abef56',
+      // 2026-08-26: rebuilt with the shared worker fixes (hand-back on any
+      // termination, one IMDS client). Rotated while the fleet was idle.
+      imageTag: '44d01ec0c8f5e5d7bd40d691962c4a859a35dc79',
       // HISTORY (superseded — fleet was g5.xlarge-only until 2026-07-12; see the
       // dated blocks below for the current mix):
       // We trialled a g4dn (T4) lowest-price config for cost and it BACKFIRED for
