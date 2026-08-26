@@ -29,9 +29,13 @@ export interface CiStackProps extends StackProps {
 export class CiStack extends Stack {
   public readonly imageWorkerRepo: ecr.Repository;
   public readonly videoWorkerRepo: ecr.Repository;
+  /** Blackwell (sm_120) build of the same Dockerfile; its own repo so the
+   *  keep-last-10 lifecycle rule never evicts one variant for the other. */
+  public readonly videoWorkerBlackwellRepo: ecr.Repository;
   public readonly metadataRepo: ecr.Repository;
   public readonly imageWorkerProject: codebuild.Project;
   public readonly videoWorkerProject: codebuild.Project;
+  public readonly videoWorkerBlackwellProject: codebuild.Project;
   public readonly metadataProject: codebuild.Project;
 
   constructor(scope: Construct, id: string, props: CiStackProps) {
@@ -39,13 +43,24 @@ export class CiStack extends Stack {
     const { config } = props;
 
     // ----- ECR Repos -----
-    // Lifecycle: keep last 10 by imagePushedAt, regardless of tag (since we
-    // tag every image with both `latest` and the commit SHA).
+    // Lifecycle. Task definitions pin images by commit SHA (config.ts
+    // imageTag), so a pinned image must outlive many rebuilds: the old
+    // "keep last 10, any tag" rule counted the buildx `:cache` manifest each
+    // build leaves untagged, which made it ~5 builds of retention — and an
+    // evicted pin only surfaces as CannotPullContainerError at the next
+    // instance launch. Expire untagged manifests on age, keep 30 of the rest
+    // (ECR requires the ANY rule to carry the highest priority number).
     const lifecycleRules: ecr.LifecycleRule[] = [
       {
         rulePriority: 1,
-        description: 'Keep last 10 images',
-        maxImageCount: 10,
+        description: 'Expire untagged (superseded buildx cache manifests)',
+        tagStatus: ecr.TagStatus.UNTAGGED,
+        maxImageAge: Duration.days(14),
+      },
+      {
+        rulePriority: 2,
+        description: 'Keep last 30 images',
+        maxImageCount: 30,
         tagStatus: ecr.TagStatus.ANY,
       },
     ];
@@ -60,6 +75,14 @@ export class CiStack extends Stack {
 
     this.videoWorkerRepo = new ecr.Repository(this, 'VideoWorkerRepo', {
       repositoryName: 'comfy-video-worker',
+      imageScanOnPush: true,
+      removalPolicy: RemovalPolicy.RETAIN,
+      lifecycleRules,
+      emptyOnDelete: false,
+    });
+
+    this.videoWorkerBlackwellRepo = new ecr.Repository(this, 'VideoWorkerBlackwellRepo', {
+      repositoryName: 'comfy-video-worker-blackwell',
       imageScanOnPush: true,
       removalPolicy: RemovalPolicy.RETAIN,
       lifecycleRules,
@@ -82,6 +105,7 @@ export class CiStack extends Stack {
     });
     this.imageWorkerRepo.grantPullPush(buildRole);
     this.videoWorkerRepo.grantPullPush(buildRole);
+    this.videoWorkerBlackwellRepo.grantPullPush(buildRole);
     this.metadataRepo.grantPullPush(buildRole);
     buildRole.addToPolicy(
       new iam.PolicyStatement({
@@ -170,6 +194,18 @@ export class CiStack extends Stack {
       buildSpec: codebuild.BuildSpec.fromSourceFilename('codebuild/buildspec-video-worker.yml'),
       timeout: Duration.minutes(90),
       logging: { cloudWatch: { logGroup: buildLogs, prefix: 'video-worker' } },
+    });
+
+    // Same Dockerfile, blackwell profile (NGC 26.07, +sm_120). Three CUDA
+    // archs and a bigger base, so a longer timeout. See the buildspec header.
+    this.videoWorkerBlackwellProject = new codebuild.Project(this, 'VideoWorkerBlackwellBuildProject', {
+      projectName: 'comfy-build-video-worker-blackwell',
+      role: buildRole,
+      source: sourceFromGitHub,
+      environment: buildEnvironment,
+      buildSpec: codebuild.BuildSpec.fromSourceFilename('codebuild/buildspec-video-worker-blackwell.yml'),
+      timeout: Duration.minutes(120),
+      logging: { cloudWatch: { logGroup: buildLogs, prefix: 'video-worker-blackwell' } },
     });
   }
 }

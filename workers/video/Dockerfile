@@ -9,7 +9,28 @@
 # to FP8 weights without testing for the black-frame regression.
 
 # ---------- Stage 1: build base ----------
-FROM nvcr.io/nvidia/pytorch:24.10-py3 AS base
+# Two build PROFILES from one Dockerfile, selected by build args. Everything
+# torch-version-specific below keys off these, so the Ada and Blackwell images
+# cannot drift apart the way two Dockerfiles would.
+#
+#   ada (default)   NGC 24.10  torch 2.5.0a0  CUDA 12.6  py3.10   sm_86, sm_89
+#                   -> comfy-video-worker            g5 / g6 / g6e fleets
+#   blackwell       NGC 26.07  torch 2.13.0a0 CUDA 13.3  py3.12   + sm_120
+#                   -> comfy-video-worker-blackwell  g7e fleet
+#
+# Blackwell (RTX PRO 6000, compute capability 12.0) cannot run the ada image
+# at all: CUDA 12.8 is the first toolkit whose nvcc emits sm_120, and an
+# explicit TORCH_CUDA_ARCH_LIST without +PTX ships no PTX to JIT from, so the
+# first kernel launch hard-fails. See codebuild/buildspec-video-worker*.yml.
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:24.10-py3
+FROM ${BASE_IMAGE} AS base
+
+# Re-declared after FROM (Docker scopes pre-FROM ARGs to the FROM line only).
+ARG TORCH_ARCH_LIST="8.6;8.9"
+# "ada" | "blackwell" — gates the torch-2.5-only workarounds below.
+ARG BUILD_PROFILE=ada
+# Site-packages root, for the patch scripts. 24.10 is py3.10, 26.07 is py3.12.
+ARG PYTHON_SITE=/usr/local/lib/python3.10/dist-packages
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -24,11 +45,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NVCC_APPEND_FLAGS="--threads 2" \
     # Constrain CUDA arch to GPUs we actually deploy on. Without this nvcc
     # tries to compile for the default set (incl. sm_50 Maxwell) which sage
-    # 2.x doesn't support. We target only the cards in our fleet:
-    #   8.6 = A10G (g5.xlarge primary, g5.2xlarge fallback)
-    #   8.9 = L40S (g6e.xlarge fallback)
+    # 2.x doesn't support. Per profile (see the ARG above the FROM):
+    #   8.6  = A10G   (g5)
+    #   8.9  = L40S   (g6e)      + L4 (g6)
+    #   12.0 = RTX PRO 6000 (g7e, Blackwell profile only; +PTX so a future
+    #          arch can at least JIT instead of hard-failing)
     # Dropped 8.0 (A100) since we don't run those — cuts compile time/memory.
-    TORCH_CUDA_ARCH_LIST="8.6;8.9"
+    TORCH_CUDA_ARCH_LIST="${TORCH_ARCH_LIST}" \
+    BUILD_PROFILE="${BUILD_PROFILE}" \
+    PYTHON_SITE="${PYTHON_SITE}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git wget curl ca-certificates build-essential \
@@ -53,10 +78,21 @@ RUN git clone --depth 1 --branch ${COMFYUI_TAG} \
         https://github.com/comfyanonymous/ComfyUI.git . \
     && pip install -r requirements.txt
 
-# ---------- Pin torchaudio to the NGC torch ----------
+# ---------- Pin torchaudio to the NGC torch (ada profile) ----------
 # MiniMax H3 is native from ComfyUI v0.30.0 and comfy_extras/nodes_minimax_h3.py
 # does `import torchaudio` at module load — with a stub the import fails and
 # EVERY MiniMax node silently disappears from the graph.
+#
+# BLACKWELL PROFILE: the 2.5.1/cu124 reinstall below is ada-only, but the
+# extension PATCH applies to both. First blackwell build proved it: NGC 26.07
+# ships a custom torch on CUDA 13.3, while ComfyUI's requirements resolve the
+# PyPI torchaudio 2.11 built for CUDA 13.0, and torchaudio's
+# _check_cuda_version() refuses that pairing at import:
+#   "PyTorch has CUDA version 13.3 whereas TorchAudio has CUDA version 13.0"
+# Same failure shape as ada (a compiled half that cannot load), same cure —
+# patch_torchaudio_ext.py wraps that exact call and degrades to the pure-
+# Python DSP, which is all MiniMax H3 uses. There is no matching wheel to
+# install instead: nothing on PyPI is built against NGC's 13.3 torch.
 #
 # We cannot just take what ComfyUI's requirements.txt resolves to: that is
 # torchaudio 2.11, built for torch 2.11 / CUDA 13, while this NGC base is
@@ -87,8 +123,15 @@ RUN git clone --depth 1 --branch ${COMFYUI_TAG} \
 #
 # This runs BEFORE the bake so bake_nodes' generated constraint file pins
 # numpy==1.26.4 and no custom node can drag it forward again.
+# BLACKWELL PROFILE: torch 2.13 is built against NumPy 2.x, so the reason for
+# this pin (NGC 24.10's torch/opencv compiled against 1.x) does not exist
+# there. Leave whatever ComfyUI's requirements resolved.
 ARG NUMPY_VERSION=1.26.4
-RUN pip install --no-deps --force-reinstall "numpy==${NUMPY_VERSION}" \
+RUN if [ "$BUILD_PROFILE" = "ada" ]; then \
+        pip install --no-deps --force-reinstall "numpy==${NUMPY_VERSION}"; \
+    else \
+        echo "[$BUILD_PROFILE] keeping requirements-resolved numpy"; \
+    fi \
     && python -c "import numpy, torch; \
 t = torch.from_numpy(numpy.zeros(3, dtype='float32')); \
 assert t.shape[0] == 3; \
@@ -98,7 +141,10 @@ print('numpy', numpy.__version__, '| torch.from_numpy OK ->', tuple(t.shape))"
 # below v0.30.0 this file disappears and every MiniMax node goes with it, which
 # would otherwise only surface as "the nodes aren't in the editor".
 RUN test -f /opt/comfy/comfy_extras/nodes_minimax_h3.py \
-    || (echo "ERROR: comfy_extras/nodes_minimax_h3.py missing — COMFYUI_TAG=${COMFYUI_TAG} predates native MiniMax H3 (needs >= v0.30.0)" && exit 1)
+    || (echo "ERROR: comfy_extras/nodes_minimax_h3.py missing — COMFYUI_TAG=${COMFYUI_TAG} predates native MiniMax H3 (needs >= v0.30.0)"; \
+        echo "--- diagnostics: pwd=$(pwd)"; ls -la /opt/comfy | head -20; echo "--- comfy_extras:"; ls /opt/comfy/comfy_extras 2>&1 | head -5; \
+        echo "--- git:"; git -C /opt/comfy log --oneline -1 2>&1; git -C /opt/comfy status --short 2>&1 | head -5; \
+        exit 1)
 
 # The matching 2.5.1 wheel still cannot import as shipped: its prebuilt
 # libtorchaudio.so is linked against UPSTREAM torch 2.5.1 while NGC ships a
@@ -108,9 +154,13 @@ RUN test -f /opt/comfy/comfy_extras/nodes_minimax_h3.py \
 # I/O and sox, which nothing here uses.
 ARG TORCHAUDIO_VERSION=2.5.1
 COPY workers/video/patch_torchaudio_ext.py /tmp/patch_torchaudio_ext.py
-RUN pip install --no-deps --force-reinstall \
-        --index-url https://download.pytorch.org/whl/cu124 \
-        torchaudio==${TORCHAUDIO_VERSION} \
+RUN if [ "$BUILD_PROFILE" = "ada" ]; then \
+        pip install --no-deps --force-reinstall \
+            --index-url https://download.pytorch.org/whl/cu124 \
+            torchaudio==${TORCHAUDIO_VERSION}; \
+    else \
+        echo "[$BUILD_PROFILE] keeping requirements-resolved torchaudio; patching its extension load"; \
+    fi \
     && python3 /tmp/patch_torchaudio_ext.py \
     && python -c "import torch, torchaudio, torchaudio.transforms as T; \
 print('torch', torch.__version__, '| torchaudio', torchaudio.__version__); \
@@ -127,13 +177,23 @@ print('torchaudio DSP OK — resample', tuple(r.shape), 'mel', tuple(m.shape))"
 # see the existing torch + CUDA headers from the NGC base. Build is slow
 # (~15-20 min on BUILD_GENERAL1_LARGE) due to CUDA kernel compilation.
 # Pin to a known commit when reproducible builds matter; using HEAD here.
-RUN pip install --no-build-isolation \
-        git+https://github.com/thu-ml/SageAttention.git || \
-    (echo "ERROR: sageattention build failed. Check CUDA toolkit + torch version compat." && exit 1)
+#
+# FATAL on the ada profile, non-fatal on blackwell. The video fleet runs
+# ComfyUI with --use-sage-attention (workers/shared/worker.py, FLEET=video),
+# which imports sageattention at startup — a sage-less ada image would
+# crash-loop that whole fleet while the build reported success. The minimax
+# fleet never enables it, and it is the only fleet the blackwell profile
+# serves, so there a failed sage build must not block the image that unlocks
+# a GPU family. (It did build for sm_120 on 2026-08-26; this is the guard.)
+RUN set -e; if pip install --no-build-isolation git+https://github.com/thu-ml/SageAttention.git \
+       && python -c "import sageattention; print('sageattention import OK, attrs:', [a for a in dir(sageattention) if not a.startswith('_')][:5])"; then \
+      echo "sageattention OK on profile=$BUILD_PROFILE arch=$TORCH_CUDA_ARCH_LIST"; \
+    elif [ "$BUILD_PROFILE" = "ada" ]; then \
+      echo "ERROR: sageattention build/import failed on profile=ada; the video fleet runs --use-sage-attention" >&2; exit 1; \
+    else \
+      echo "WARNING: no sageattention on profile=$BUILD_PROFILE arch=$TORCH_CUDA_ARCH_LIST (never enabled on minimax) — continuing"; \
+    fi
 
-# Quick verification — fails build early if sage isn't importable.
-# (sageattention from GitHub HEAD doesn't expose __version__ on the module.)
-RUN python -c "import sageattention; print('sageattention import OK, attrs:', [a for a in dir(sageattention) if not a.startswith('_')][:5])"
 
 # ---------- ComfyUI custom nodes for Wan video ----------
 WORKDIR /opt/comfy/custom_nodes
@@ -206,8 +266,16 @@ RUN cd /opt/worker && python3 bake_nodes.py /tmp/baked_nodes.txt
 # to parse — the error propagates out of `import comfy.utils` and crash-loops
 # ComfyUI before it can serve a single job. Rewrites that one signature to the
 # typing.* forms torch 2.5 accepts; na3d keeps working.
+# BLACKWELL PROFILE: torch 2.13 parses PEP 585 generics in custom-op
+# signatures natively, so the patch is unnecessary — and its anchor may not
+# even exist in the comfy_kitchen that 26.07's ComfyUI resolves, which would
+# fail the build for no reason. Skipped.
 COPY workers/video/patch_comfy_kitchen.py /tmp/patch_comfy_kitchen.py
-RUN python3 /tmp/patch_comfy_kitchen.py
+RUN if [ "$BUILD_PROFILE" = "ada" ]; then \
+        python3 /tmp/patch_comfy_kitchen.py; \
+    else \
+        echo "[$BUILD_PROFILE] torch >= 2.7 accepts PEP 585 custom-op signatures; patch skipped"; \
+    fi
 
 # ---------- Prove ComfyUI can actually import ----------
 # The single most valuable check in this file. Everything above can succeed
@@ -236,15 +304,24 @@ RUN cd /opt/comfy && python -c "import ast; src=open('comfy_extras/nodes_minimax
 # wheel. Fail the BUILD here rather than lose every MiniMax node in production.
 # Re-apply the patch first: a node pack that reinstalled torchaudio would have
 # restored the unpatched (fatal) extension load.
-RUN pip install --no-deps --force-reinstall "numpy==${NUMPY_VERSION}" \
-    && python3 /tmp/patch_torchaudio_ext.py \
+# Per profile: ada re-pins numpy 1.x + re-patches torchaudio 2.5 and asserts
+# both; blackwell asserts the foundation is still torch-2.13-compatible
+# (numpy 2.x, torchaudio 2.11+) and that nothing dragged either BACK.
+RUN if [ "$BUILD_PROFILE" = "ada" ]; then \
+        pip install --no-deps --force-reinstall "numpy==${NUMPY_VERSION}" \
+        && python3 /tmp/patch_torchaudio_ext.py \
+        && python -c "import numpy; assert numpy.__version__.startswith('1.'), 'numpy dragged forward: ' + numpy.__version__" \
+        && python -c "import torchaudio; assert torchaudio.__version__.startswith('2.5'), 'torchaudio clobbered: ' + torchaudio.__version__"; \
+    else \
+        python3 /tmp/patch_torchaudio_ext.py \
+        && python -c "import numpy; assert not numpy.__version__.startswith('1.'), 'numpy dragged BACK to 1.x on blackwell: ' + numpy.__version__" \
+        && python -c "import torchaudio; v=tuple(int(x) for x in torchaudio.__version__.split('+')[0].split('.')[:2]); assert v >= (2, 11), 'torchaudio too old for torch 2.13: ' + torchaudio.__version__"; \
+    fi \
     && python -c "import numpy, torch, cv2; \
-assert numpy.__version__.startswith('1.'), 'numpy dragged forward: ' + numpy.__version__; \
 torch.from_numpy(numpy.zeros(3, dtype='float32')); \
 print('post-bake numpy', numpy.__version__, '| cv2', cv2.__version__, '| from_numpy OK')" \
     && python -c "import torch, torchaudio, torchaudio.transforms as T; \
 print('post-bake torch', torch.__version__, '| torchaudio', torchaudio.__version__); \
-assert torchaudio.__version__.startswith('2.5'), 'torchaudio clobbered: ' + torchaudio.__version__; \
 w = torch.zeros(1, 2, 16000); \
 assert torchaudio.functional.resample(w, 16000, 32000).shape[-1] == 32000; \
 assert T.MelSpectrogram(sample_rate=16000, n_mels=64)(torch.rand(1, 16000)).shape[1] == 64; \
@@ -255,6 +332,8 @@ RUN mkdir -p /opt/comfy/output
 # ---------- Smoke test ----------
 RUN cd /opt/comfy && python -c "import sys; sys.path.insert(0, '.'); import comfy" || \
     echo "WARNING: comfy module import quick-check failed (may still work at runtime)"
-RUN python -c "import sageattention; import torch; print('sage importable, torch:', torch.__version__)"
+RUN set -e; if python -c "import sageattention; import torch; print('sage importable, torch:', torch.__version__)"; then :; \
+    elif [ "$BUILD_PROFILE" = "ada" ]; then echo "ERROR: sage not importable in the final ada image" >&2; exit 1; \
+    else python -c "import torch; print('sage NOT importable (non-fatal, never enabled on minimax), torch:', torch.__version__)"; fi
 
 ENTRYPOINT ["/entrypoint.sh"]

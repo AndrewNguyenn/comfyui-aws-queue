@@ -27,4 +27,4 @@ phases:
   post_build:
     commands:
       - echo Build complete tag "$REPO:$SHA"
-      - echo To roll out run aws ecs update-service --cluster comfy-cluster --service comfy-video --force-new-deployment
+      - echo To roll out, pin "$SHA" as fleets.video.imageTag / fleets.minimax.imageTag in infra/lib/config.ts and deploy ComfyComputeStack. Task defs pin by SHA - force-new-deployment re-runs the OLD image.

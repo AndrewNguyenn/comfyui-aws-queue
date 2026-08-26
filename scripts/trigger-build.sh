@@ -5,13 +5,14 @@
 set -euo pipefail
 
 target="${1:-}"
-if [ "$target" != "image" ] && [ "$target" != "video" ]; then
-  echo "Usage: $0 {image|video}" >&2
-  exit 1
-fi
-
-PROJECT="comfy-build-${target}-worker"
-REGION="${AWS_REGION:-us-west-2}"
+case "$target" in
+  image|video)      PROJECT="comfy-build-${target}-worker" ;;
+  video-blackwell)  PROJECT="comfy-build-video-worker-blackwell" ;;
+  *)
+    echo "Usage: $0 {image|video|video-blackwell}" >&2
+    exit 1 ;;
+esac
+REGION="${AWS_REGION:-us-east-1}"
 
 echo "==> Starting CodeBuild project: $PROJECT"
 build_id=$(

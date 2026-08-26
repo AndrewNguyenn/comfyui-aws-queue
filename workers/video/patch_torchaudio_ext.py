@@ -31,14 +31,18 @@ is caught at build time rather than by every MiniMax node vanishing later.
 """
 
 import ast
+import os
 import pathlib
 import sys
 
+# Site-packages root differs per NGC base (24.10 = py3.10, 26.07 = py3.12);
+# the Dockerfile passes it through PYTHON_SITE.
 TARGET = pathlib.Path(
-    "/usr/local/lib/python3.10/dist-packages/torchaudio/_extension/__init__.py"
-)
+    os.environ.get("PYTHON_SITE", "/usr/local/lib/python3.10/dist-packages")
+) / "torchaudio/_extension/__init__.py"
 
-ANCHOR = """if _IS_TORCHAUDIO_EXT_AVAILABLE:
+# torchaudio 2.5 layout (ada profile, NGC 24.10).
+ANCHOR_25 = """if _IS_TORCHAUDIO_EXT_AVAILABLE:
     _load_lib("libtorchaudio")
 
     import torchaudio.lib._torchaudio  # noqa
@@ -47,7 +51,7 @@ ANCHOR = """if _IS_TORCHAUDIO_EXT_AVAILABLE:
     _IS_RIR_AVAILABLE = torchaudio.lib._torchaudio.is_rir_available()
     _IS_ALIGN_AVAILABLE = torchaudio.lib._torchaudio.is_align_available()"""
 
-REPLACEMENT = """if _IS_TORCHAUDIO_EXT_AVAILABLE:
+REPLACEMENT_25 = """if _IS_TORCHAUDIO_EXT_AVAILABLE:
     # PATCHED (workers/video/patch_torchaudio_ext.py): the prebuilt
     # libtorchaudio.so is linked against upstream torch, not NGC's custom
     # build, so loading it raises an undefined-symbol OSError. The pure-Python
@@ -69,6 +73,38 @@ REPLACEMENT = """if _IS_TORCHAUDIO_EXT_AVAILABLE:
         )
         _IS_TORCHAUDIO_EXT_AVAILABLE = False"""
 
+# torchaudio 2.11 layout (blackwell profile, NGC 26.07). Restructured upstream:
+# _load_lib now raises ImportError itself, RIR is gone, and the failure we
+# actually hit here is _check_cuda_version() refusing the CUDA 13.0 wheel
+# against NGC's CUDA 13.3 torch. Same cure: wrap the block, degrade to DSP.
+ANCHOR_211 = """if _IS_TORCHAUDIO_EXT_AVAILABLE:
+    if not _load_lib("libtorchaudio"):
+        raise ImportError("Failed to load libtorchaudio")
+
+    _check_cuda_version()
+    _IS_ALIGN_AVAILABLE = torch.ops._torchaudio.is_align_available()"""
+
+REPLACEMENT_211 = """if _IS_TORCHAUDIO_EXT_AVAILABLE:
+    # PATCHED (workers/video/patch_torchaudio_ext.py): the PyPI wheel is built
+    # against CUDA 13.0 while NGC's torch is 13.3, and _check_cuda_version()
+    # refuses the pairing. Only the pure-Python DSP is used, so degrade to the
+    # "compiled without the extension" state instead of taking every MiniMax
+    # H3 node down with the import.
+    try:
+        if not _load_lib("libtorchaudio"):
+            raise ImportError("Failed to load libtorchaudio")
+
+        _check_cuda_version()
+        _IS_ALIGN_AVAILABLE = torch.ops._torchaudio.is_align_available()
+    except Exception as _e:  # noqa: BLE001
+        _LG.warning(
+            "torchaudio C++ extension unavailable (%s); "
+            "pure-python DSP still works, file I/O and sox do not.", _e
+        )
+        _IS_TORCHAUDIO_EXT_AVAILABLE = False"""
+
+LAYOUTS = ((ANCHOR_25, REPLACEMENT_25), (ANCHOR_211, REPLACEMENT_211))
+
 
 def main() -> int:
     if not TARGET.exists():
@@ -78,11 +114,14 @@ def main() -> int:
     if "PATCHED (workers/video/patch_torchaudio_ext.py)" in src:
         print("torchaudio extension already patched")
         return 0
-    if ANCHOR not in src:
-        print(f"ERROR: anchor not found in {TARGET} — torchaudio layout changed",
+    for anchor, replacement in LAYOUTS:
+        if anchor in src:
+            patched = src.replace(anchor, replacement, 1)
+            break
+    else:
+        print(f"ERROR: no known anchor found in {TARGET} — torchaudio layout changed",
               file=sys.stderr)
         return 1
-    patched = src.replace(ANCHOR, REPLACEMENT, 1)
     try:
         ast.parse(patched)
     except SyntaxError as e:

@@ -1,0 +1,48 @@
+version: 0.2
+
+# Blackwell variant of the video worker — SAME Dockerfile as
+# buildspec-video-worker.yml, different build profile. Pushes to its OWN ECR
+# repo so the "keep last 10" lifecycle rule can't evict one variant to make
+# room for the other.
+#
+# Why a variant at all: g7e (RTX PRO 6000, compute capability 12.0) cannot run
+# the ada image — CUDA 12.8 is the first nvcc that emits sm_120, and the ada
+# arch list ships no PTX to JIT from, so the first kernel launch hard-fails.
+# The two images serve two DAEMON ECS services on ONE ASG, each constrained to
+# its own instance family (infra/lib/stacks/compute.ts).
+#
+# Slower than the ada build: three CUDA archs instead of two, and NGC 26.07
+# (torch 2.13 / CUDA 13.3) is a bigger base. MAX_JOBS=2 in the Dockerfile is
+# what keeps three archs under BUILD_GENERAL1_LARGE's 15 GB (4 jobs x 3 archs
+# was SIGKILL'd once). Budget 60-90 min cold.
+
+env:
+  variables:
+    REPO_NAME: "comfy-video-worker-blackwell"
+    BASE_IMAGE: "nvcr.io/nvidia/pytorch:26.07-py3"
+    # +PTX so a future arch can at least JIT; the ada profile deliberately
+    # omits it because that profile only ever targets cards it names.
+    TORCH_ARCH_LIST: "8.6;8.9;12.0+PTX"
+    BUILD_PROFILE: "blackwell"
+    PYTHON_SITE: "/usr/local/lib/python3.12/dist-packages"
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to ECR
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com"
+      - export REPO="$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO_NAME"
+      - export SHA="$CODEBUILD_RESOLVED_SOURCE_VERSION"
+      - if [ -z "$SHA" ]; then export SHA="$(date -u +%Y%m%d%H%M%S)"; fi
+      - echo Building "$REPO:$SHA" profile="$BUILD_PROFILE" base="$BASE_IMAGE" archs="$TORCH_ARCH_LIST"
+      - docker buildx create --use --name comfy-builder || docker buildx use comfy-builder
+
+  build:
+    commands:
+      - echo Build started on `date`
+      - docker buildx build --file workers/video/Dockerfile --build-arg "BASE_IMAGE=$BASE_IMAGE" --build-arg "TORCH_ARCH_LIST=$TORCH_ARCH_LIST" --build-arg "BUILD_PROFILE=$BUILD_PROFILE" --build-arg "PYTHON_SITE=$PYTHON_SITE" --tag "$REPO:$SHA" --tag "$REPO:latest" --cache-from "type=registry,ref=$REPO:cache" --cache-to "type=registry,ref=$REPO:cache,mode=max" --push .
+
+  post_build:
+    commands:
+      - echo Build complete tag "$REPO:$SHA"
+      - echo Pin it in infra/lib/config.ts fleets.minimax.blackwellImageTag and deploy ComfyComputeStack. Do NOT rely on :latest.
