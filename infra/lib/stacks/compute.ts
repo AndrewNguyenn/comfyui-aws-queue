@@ -549,12 +549,11 @@ export class ComputeStack extends Stack {
       },
       mixedInstancesPolicy: {
         launchTemplate,
-        launchTemplateOverrides: [
-          { instanceType: new ec2.InstanceType(fleet.primaryInstanceType) },
-          ...fleet.fallbackInstanceTypes.map((t) => ({
-            instanceType: new ec2.InstanceType(t),
-          })),
-        ],
+        // Weighted when the fleet says so — see FleetConfig.instanceWeights.
+        launchTemplateOverrides: [fleet.primaryInstanceType, ...fleet.fallbackInstanceTypes].map((t) => ({
+          instanceType: new ec2.InstanceType(t),
+          ...(fleet.instanceWeights?.[t] ? { weightedCapacity: fleet.instanceWeights[t] } : {}),
+        })),
         instancesDistribution: {
           // Pure spot — user explicitly never wants on-demand (and the
           // account's on-demand G/VT quota is 0 anyway).

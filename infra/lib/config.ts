@@ -92,6 +92,14 @@ export interface FleetConfig {
    *  are not offered in every VPC AZ — otherwise the ASG spends launch
    *  attempts on AZs that reject the type outright. Unset = all VPC AZs. */
   readonly availabilityZones?: readonly string[];
+  /** Capacity units per instance type (ASG instance weights). Set it when
+   *  the pool's instance types differ in throughput: the allocation strategy
+   *  then ranks Spot pools by price PER UNIT (price / weight), which is the
+   *  only way to make a price-aware strategy prefer a pricier-per-hour but
+   *  faster-per-job type. Desired/min/max capacity are then in units, and
+   *  the group can sit ABOVE desired (a 2-unit instance satisfies desired=1).
+   *  Unset = every type counts 1. */
+  readonly instanceWeights?: Readonly<Record<string, number>>;
   /** ECR tag the task definition pins. Use an immutable commit SHA, never
    *  'latest'.
    *
@@ -353,33 +361,33 @@ export const APP_CONFIG: AppConfig = {
       // every g6e size carries exactly ONE L40S, so this buys no GPU and costs
       // no speed — the workload is GPU-bound and samples identically on both.
       //
-      // SINGLE entry, deliberately. price-capacity-optimized ignores the order
-      // below and weighs interruption risk as heavily as price, which is why
-      // this fleet kept landing on 4xlarge even while 8xlarge was 43% cheaper.
-      // Leaving 4xlarge in the list as a "fallback" would therefore not be a
-      // fallback — it would keep being the pick, at 2 x 16 = 32 vCPU, stranding
-      // half the quota. The only way to actually select a pool under this
-      // strategy is to be the only pool.
+      // 2026-08-26: g7e.4xlarge is PRIMARY, g6e.8xlarge the drought fallback,
+      // and the ASG is told so through instance WEIGHTS — the only lever that
+      // moves a price-aware allocation strategy. price-capacity-optimized
+      // ignores the order below and ranks pools by price per unit hour, and
+      // per instance-hour g6e.8xlarge ($1.68-1.76) undercuts g7e ($1.79-1.97).
+      // Per VIDEO it is the other way round: the same 8-step clip measured
+      // 760 s on g6e (4xlarge and 8xlarge alike, one L40S each) and 400 s on
+      // g7e (RTX PRO 6000 Blackwell, 96 GB VRAM, no weight offload), so g7e
+      // is ~42% cheaper per clip on spot ($0.21 vs $0.36) and its ON-DEMAND
+      // ($0.44) beats g6e.4xlarge SPOT ($0.57). Weighting g7e=2, g6e=1 makes
+      // the allocator see $0.94/unit vs $1.72/unit and pick g7e whenever it
+      // has capacity; g6e fires when g7e is dry (it lives in 1b/1d only).
       //
-      // The cost is real: no fallback means an 8xlarge capacity drought stalls
-      // the fleet outright rather than degrading to a pricier size. Re-adding
-      // 'g6e.4xlarge' here is the one-line rollback if that happens.
+      // Units, not instances: minimaxMax and the scaler's desired capacity are
+      // in g6e-worker-equivalents. desired=1 or 2 -> one g7e (the group sits
+      // at or above desired); a second g7e arrives at 3+, i.e. at the
+      // scaler's MAX band. That is throughput-equivalent to the old ladder
+      // (one g7e ~ two g6e), with better per-clip cost, and it never strands
+      // quota: 16 vCPU each, four fit the 64 vCPU G/VT spot quota.
       //
-      // vCPU accounting against the 64 G/VT spot quota: 2 x 32 = 64 exactly,
-      // which is why minimaxMax is 2. Three 8xlarges cannot coexist under this
-      // quota, so asking for a third would strand it pending forever.
-      primaryInstanceType: 'g6e.8xlarge',
-      // 2026-08-26: g7e.4xlarge joins as the drought fallback. It is a
-      // SEPARATE silicon pool (RTX PRO 6000 Blackwell, 96 GB VRAM — no weight
-      // offload at all), only in 1b/1d, and its spot ($1.79-1.97) sits just
-      // above g6e.8xlarge's ($1.68-1.76), so price-capacity-optimized keeps
-      // 8xlarge preferred and reaches for g7e when 8xlarge is dry. 16 vCPU, so
-      // it never strands quota. It needs its own image — the ada image cannot
-      // run a single kernel on sm_120 — which is what blackwellImageTag and
-      // the second daemon service are for. Do NOT add g7e here without that
-      // tag set, or a g7e launch is an idle, billing instance no service
-      // places on.
-      fallbackInstanceTypes: ['g7e.4xlarge'],
+      // The two types need two images — the ada image cannot run one kernel
+      // on sm_120 — which is what blackwellImageTag and the second daemon
+      // service are for. Do NOT list g7e here without that tag set, or a g7e
+      // launch is an idle, billing instance no service places on.
+      primaryInstanceType: 'g7e.4xlarge',
+      fallbackInstanceTypes: ['g6e.8xlarge'],
+      instanceWeights: { 'g7e.4xlarge': 2, 'g6e.8xlarge': 1 },
       // Bid ceiling. Without one AWS bids the on-demand price, which is how
       // the 4xlarge ended up costing exactly on-demand ($3.0042) with a 0%
       // spot discount. g6e.8xlarge has held $1.74-1.90 across every AZ for
@@ -439,11 +447,8 @@ export const APP_CONFIG: AppConfig = {
     videoMin: 0,
     videoMax: 3, // v3: lowered from 5 (resolves N2)
     minimaxMin: 0,
-    // 2 not 3, and the binding constraint is the G/VT spot quota rather than
-    // appetite: the fleet is now g6e.8xlarge (32 vCPU each), so 2 x 32 = 64
-    // saturates the quota exactly. A third would sit pending forever, which is
-    // the MaxSpotInstanceCountExceeded failure this fleet already hit once at
-    // 3 x 4xlarge. Raise to 3 only if the pending 96 vCPU increase lands.
+    // History: 1 -> 2 (2026-08-21, g6e.8xlarge x2 = the whole 64 vCPU G/VT
+    // spot quota) -> 4 units (2026-08-26, weighted pool, see below).
     //
     // Was 1 ("raise once there is a real queue for it"). That queue arrived:
     // ~30 clips at ~16 min each is ~8 hours serialised behind one worker, so
@@ -452,7 +457,10 @@ export const APP_CONFIG: AppConfig = {
     // ~50 GiB of MiniMax weights plus ~13 GiB of RedMix for frame 0, so this
     // only pays off across a deep queue — which is exactly when the scaler's
     // depth bands ramp to it.
-    minimaxMax: 2,
+    // UNITS, not instances (fleets.minimax.instanceWeights): g7e.4xlarge=2,
+    // g6e.8xlarge=1. 4 units = two g7e (32 vCPU) or two g6e.8xlarge (64 vCPU,
+    // the whole G/VT spot quota — a third fails to launch, harmlessly).
+    minimaxMax: 4,
     // NOTE: targetBacklogPerTask is a leftover from a BacklogPerTask design
     // that was never wired up (both fleets used a flat targetValue=1 message
     // instead — see attachSqsTargetTracking's history) and is unread anywhere
