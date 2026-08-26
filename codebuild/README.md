@@ -32,8 +32,14 @@ After a successful build, the new image is in ECR but running workers continue
 using their cached image. To pick up the new version:
 
 ```
-aws ecs update-service --cluster comfy-cluster --service comfy-image --force-new-deployment
-aws ecs update-service --cluster comfy-cluster --service comfy-video --force-new-deployment
+# Task definitions pin images by commit SHA (infra/lib/config.ts fleets.*.imageTag),
+# so a rebuild does NOT roll out by itself and `--force-new-deployment` would just
+# restart the OLD image. Roll out = bump the tag and deploy:
+#   1. copy the SHA the build printed ("Build complete tag ...:<sha>")
+#   2. set fleets.<fleet>.imageTag (video AND minimax share comfy-video-worker;
+#      minimax's Blackwell image is fleets.minimax.blackwellImageTag)
+#   3. cd infra && npx cdk deploy ComfyComputeStack
+# Rollback is the same edit with the previous SHA.
 ```
 
 This terminates running tasks and lets ECS launch new ones with the latest tag.

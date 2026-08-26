@@ -12,7 +12,7 @@ case "$target" in
     echo "Usage: $0 {image|video|video-blackwell}" >&2
     exit 1 ;;
 esac
-REGION="${AWS_REGION:-us-west-2}"
+REGION="${AWS_REGION:-us-east-1}"
 
 echo "==> Starting CodeBuild project: $PROJECT"
 build_id=$(

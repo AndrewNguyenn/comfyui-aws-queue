@@ -34,12 +34,10 @@ import logging
 import os
 
 import boto3
-import urllib3
+
+import imds
 
 log = logging.getLogger(__name__)
-
-_IMDS = "http://169.254.169.254/latest"
-_http = urllib3.PoolManager(timeout=urllib3.Timeout(connect=1.0, read=2.0))
 
 # Set by the task definition. Empty on fleets that still use ECS managed
 # termination protection (image, video), which disables this module entirely.
@@ -51,29 +49,11 @@ _instance_id: str | None = None
 
 
 def _fetch_instance_id() -> str:
-    """This instance's id via IMDSv2, or '' if unavailable.
-
-    Cached: the id cannot change under a running worker, and we ask for it on
-    every job. Mirrors _fetch_instance_type in worker.py.
-    """
+    """This instance's id via IMDSv2, or '' if unavailable. Cached: it cannot
+    change under a running worker, and we ask on every job."""
     global _instance_id
-    if _instance_id is not None:
-        return _instance_id
-    _instance_id = ""
-    try:
-        tok = _http.request(
-            "PUT", f"{_IMDS}/api/token",
-            headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"},
-        )
-        if tok.status == 200:
-            r = _http.request(
-                "GET", f"{_IMDS}/meta-data/instance-id",
-                headers={"X-aws-ec2-metadata-token": tok.data.decode().strip()},
-            )
-            if r.status == 200:
-                _instance_id = r.data.decode().strip()
-    except Exception:  # noqa: BLE001
-        log.exception("instance-id lookup failed (non-fatal)")
+    if _instance_id is None:
+        _instance_id = imds.text("meta-data/instance-id")
     return _instance_id
 
 

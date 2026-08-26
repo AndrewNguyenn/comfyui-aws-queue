@@ -20,12 +20,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import boto3
-import urllib3
 
 # Model files appear under /opt/comfy/models/<type>/ via mount-s3 (see
 # workers/image/entrypoint.sh). No download path needed here.
 from comfy_client import ComfyClient, JobCancelled
 from comfy_supervisor import ComfySupervisor
+import imds
 import scale_in_protection
 from object_info_publisher import publish_object_info
 from output_uploader import OutputUploader
@@ -72,32 +72,13 @@ sqs = boto3.client("sqs", region_name=REGION)
 ddb = boto3.client("dynamodb", region_name=REGION)
 s3 = boto3.client("s3", region_name=REGION)
 
-_IMDS = "http://169.254.169.254/latest"
-_imds_http = urllib3.PoolManager(timeout=urllib3.Timeout(connect=1.0, read=2.0))
-
-
 def _fetch_instance_type() -> str:
     """This worker's EC2 instance type via IMDSv2, or '' if unavailable.
 
-    Both GPU fleets run a spot-capacity ASG spanning several instance types
-    (g5/g6 .xlarge/.2xlarge), so the type is only knowable from the instance
-    itself — there is no fleet-wide constant. Best-effort: a lookup failure
-    just means the job carries no instance_type."""
-    try:
-        tok = _imds_http.request(
-            "PUT", f"{_IMDS}/api/token",
-            headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"},
-        )
-        if tok.status != 200:
-            return ""
-        r = _imds_http.request(
-            "GET", f"{_IMDS}/meta-data/instance-type",
-            headers={"X-aws-ec2-metadata-token": tok.data.decode().strip()},
-        )
-        return r.data.decode().strip() if r.status == 200 else ""
-    except Exception:  # noqa: BLE001
-        log.exception("instance-type lookup failed (non-fatal)")
-        return ""
+    Both GPU fleets run a spot-capacity ASG spanning several instance types,
+    so the type is only knowable from the instance itself. Best-effort: a
+    lookup failure just means the job carries no instance_type."""
+    return imds.text("meta-data/instance-type")
 
 
 def main() -> int:
@@ -150,8 +131,16 @@ def main() -> int:
 
     # SIGTERM (from ECS draining or manual stop) — graceful shutdown
     def _on_sigterm(_signo, _frame):
-        log.warning("received SIGTERM; draining")
+        # Release the in-flight job FIRST (SQS visibility 0 + DDB queued) so it
+        # redelivers now instead of after the visibility timeout. SystemExit
+        # then unwinds through the job's finally (protection released, message
+        # NOT deleted) without hitting `except Exception`. Review M1.
+        log.warning("received SIGTERM; releasing in-flight job and draining")
         spot.terminating = True
+        try:
+            on_terminate(spot.take_in_flight())
+        except Exception:  # noqa: BLE001
+            log.exception("release on SIGTERM failed")
         comfy.stop(timeout=30)
         sys.exit(0)
 
@@ -331,8 +320,14 @@ def main() -> int:
             success = True
 
         except Exception as e:  # noqa: BLE001
-            log.exception("job %s failed", job_id)
-            _set_job_status(job_id, "failed", extra={"error": str(e)[:500]})
+            if spot.terminating:
+                # The termination path already released the job back to the
+                # queue (status=queued, visibility 0); the failure here is just
+                # ComfyUI being stopped under it. Don't overwrite that.
+                log.warning("job %s interrupted by termination; left queued for redelivery", job_id)
+            else:
+                log.exception("job %s failed", job_id)
+                _set_job_status(job_id, "failed", extra={"error": str(e)[:500]})
 
         finally:
             heartbeat_stop.set()
