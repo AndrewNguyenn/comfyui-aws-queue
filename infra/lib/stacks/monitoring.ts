@@ -87,11 +87,19 @@ export class MonitoringStack extends Stack {
 
     // ---------- Kill-switch Lambda ----------
     // Names are deterministic (see compute.ts: cluster `${projectName}-cluster`,
-    // services 'comfy-image'/'comfy-video', ASGs `comfy-${fleet}-asg`), so we
+    // ASGs `comfy-${fleet}-asg`, services 'comfy-image'/'comfy-video'), so we
     // target them by name and avoid a cross-stack ref to ComputeStack.
-    const fleets = ['image', 'video'];
-    const asgNames = fleets.map((f) => `comfy-${f}-asg`);
-    const serviceNames = fleets.map((f) => `comfy-${f}`);
+    //
+    // ALL three ASGs get MaxSize=0 — that is the only durable stop (the
+    // handler docstring explains why). minimax matters most here: its ASG is
+    // driven directly by the fleet scaler, so MaxSize=0 is its entire safety
+    // net. Its services are DAEMON (comfy-minimax-ada/-blackwell) and have no
+    // desiredCount to zero, so they are deliberately NOT in the service list;
+    // with MaxSize=0 there is nothing for a daemon to place on anyway.
+    const asgFleets = ['image', 'video', 'minimax'];
+    const serviceFleets = ['image', 'video'];
+    const asgNames = asgFleets.map((f) => `comfy-${f}-asg`);
+    const serviceNames = serviceFleets.map((f) => `comfy-${f}`);
     const clusterName = `${config.projectName}-cluster`;
 
     const killSwitchFn = new lambda.Function(this, 'KillSwitchFn', {
