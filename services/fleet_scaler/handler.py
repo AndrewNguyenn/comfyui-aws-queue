@@ -18,10 +18,10 @@ by which env vars are set. The decision logic is identical in both.
       GPU. DAEMON tasks never sit pending, so managed scaling has nothing to
       react to and is turned off for those fleets; this Lambda owns capacity.
 
-UNITS, NOT WORKERS, on a weighted ASG. minimax's ASG carries instance
-weights (config.ts fleets.minimax.instanceWeights: g7e.4xlarge=2,
-g6e.8xlarge=1), so for that fleet every number this module produces or
-reads — band targets, max_workers, DesiredCapacity — is in capacity UNITS
+UNITS, NOT WORKERS, whenever an ASG carries instance weights (config.ts
+fleets.*.instanceWeights — unset as of 2026-08-26, when minimax went
+g7e-only; it was g7e.4xlarge=2, g6e.8xlarge=1 while both were pooled). With
+weights set, every number this module produces or reads — band targets, max_workers, DesiredCapacity — is in capacity UNITS
 (g6e-worker-equivalents), not instances. A desired of 1 or 2 is ONE g7e; the
 group sits at or above desired (AWS never terminates an instance that would
 drop it below), so the release ladder 4->3->2->1->0 can take a tick that
@@ -112,7 +112,7 @@ VIDEO_BANDS = [(1, 0), (2, 1), (6, 2)]
 # So spread it. At ~16 min a clip, a second worker only earns its cold start
 # once the queue is deep enough that it saves more than it costs; below that,
 # waiting is cheaper than warming.
-MINIMAX_BANDS = [(1, 0), (6, 1), (15, 2)]  # in capacity UNITS — see module docstring
+MINIMAX_BANDS = [(1, 0), (6, 1), (15, 2)]  # instances today; UNITS if weights return — see docstring
 
 _BANDS = {"image": IMAGE_BANDS, "video": VIDEO_BANDS, "minimax": MINIMAX_BANDS}
 

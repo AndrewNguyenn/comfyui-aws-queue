@@ -363,33 +363,31 @@ export const APP_CONFIG: AppConfig = {
       // every g6e size carries exactly ONE L40S, so this buys no GPU and costs
       // no speed — the workload is GPU-bound and samples identically on both.
       //
-      // 2026-08-26: g7e.4xlarge is PRIMARY, g6e.8xlarge the drought fallback,
-      // and the ASG is told so through instance WEIGHTS — the only lever that
-      // moves a price-aware allocation strategy. price-capacity-optimized
-      // ignores the order below and ranks pools by price per unit hour, and
-      // per instance-hour g6e.8xlarge ($1.68-1.76) undercuts g7e ($1.79-1.97).
-      // Per VIDEO it is the other way round: the same 8-step clip measured
-      // 760 s on g6e (4xlarge and 8xlarge alike, one L40S each) and 400 s on
-      // g7e (RTX PRO 6000 Blackwell, 96 GB VRAM, no weight offload), so g7e
-      // is ~42% cheaper per clip on spot ($0.21 vs $0.36) and its ON-DEMAND
-      // ($0.44) beats g6e.4xlarge SPOT ($0.57). Weighting g7e=2, g6e=1 makes
-      // the allocator see $0.94/unit vs $1.72/unit and pick g7e whenever it
-      // has capacity; g6e fires when g7e is dry (it lives in 1b/1d only).
+      // 2026-08-26 (later the same day): g7e.4xlarge ONLY. It had joined as
+      // the weighted primary beside g6e.8xlarge, but the per-clip numbers
+      // are not close: the same 8-step clip measured 760 s on g6e (4xlarge
+      // and 8xlarge alike, one L40S each) and 237-446 s on g7e (RTX PRO 6000
+      // Blackwell, 96 GB VRAM, no weight offload), so g7e is ~42% cheaper per
+      // clip on spot ($0.21 vs $0.36) and even its ON-DEMAND ($0.44) beats
+      // g6e.4xlarge SPOT ($0.57). A single pool is also the only way to be
+      // sure of the pick: price-capacity-optimized ranks by price per unit
+      // hour, and per instance-hour g6e.8xlarge undercuts g7e.
       //
-      // Units, not instances: minimaxMax and the scaler's desired capacity are
-      // in g6e-worker-equivalents. desired=1 or 2 -> one g7e (the group sits
-      // at or above desired); a second g7e arrives at 3+, i.e. at the
-      // scaler's MAX band. That is throughput-equivalent to the old ladder
-      // (one g7e ~ two g6e), with better per-clip cost, and it never strands
-      // quota: 16 vCPU each, four fit the 64 vCPU G/VT spot quota.
+      // THE COST IS A STALL, NOT A BILL. g7e is offered in us-east-1b/1d only
+      // and its capacity has been as scarce as g6e's (placement score 1/10,
+      // spot AND on-demand refused for ~50 min on 2026-08-26). With no second
+      // pool, a g7e drought leaves the queue waiting with desired > 0 and
+      // nothing launching. Rollback is two lines: fallbackInstanceTypes:
+      // ['g6e.8xlarge'] plus instanceWeights: { 'g7e.4xlarge': 2,
+      // 'g6e.8xlarge': 1 } (and minimaxMax then means UNITS again) — the
+      // weights are what make the allocator prefer g7e over the cheaper-
+      // per-hour g6e. The ada daemon service stays deployed so that rollback
+      // needs nothing else.
       //
-      // The two types need two images — the ada image cannot run one kernel
-      // on sm_120 — which is what blackwellImageTag and the second daemon
-      // service are for. Do NOT list g7e here without that tag set, or a g7e
-      // launch is an idle, billing instance no service places on.
+      // vCPU accounting: 16 each, so minimaxMax 4 = 64 = the whole G/VT spot
+      // quota. A fifth would sit pending forever (MaxSpotInstanceCountExceeded).
       primaryInstanceType: 'g7e.4xlarge',
-      fallbackInstanceTypes: ['g6e.8xlarge'],
-      instanceWeights: { 'g7e.4xlarge': 2, 'g6e.8xlarge': 1 },
+      fallbackInstanceTypes: [],
       // Bid ceiling. Without one AWS bids the on-demand price, which is how
       // the 4xlarge ended up costing exactly on-demand ($3.0042) with a 0%
       // spot discount. g6e.8xlarge has held $1.74-1.90 across every AZ for
@@ -407,9 +405,10 @@ export const APP_CONFIG: AppConfig = {
       // over both g7e and g6e.8xlarge ($1.68-1.76 today) and still under the
       // on-demand price of every size in the family.
       spotMaxPrice: '2.50',
-      // Only the AZs that offer g6e (1a-1d) and g7e (1b/1d). The VPC also
-      // spans 1f, which offers neither; see compute.ts vpcSubnets.
-      availabilityZones: ['us-east-1a', 'us-east-1b', 'us-east-1c', 'us-east-1d'],
+      // Only the AZs that offer g7e.4xlarge. Every other VPC AZ would just
+      // fail each launch attempt with InvalidFleetConfiguration; see
+      // compute.ts vpcSubnets. Widen to 1a-1d if g6e comes back.
+      availabilityZones: ['us-east-1b', 'us-east-1d'],
       // 45 GiB of weights land on the NVMe instance store, not this volume,
       // but the ~26 GB container image is extracted here on every cold boot.
       rootVolumeGb: 250,
@@ -459,14 +458,9 @@ export const APP_CONFIG: AppConfig = {
     // ~50 GiB of MiniMax weights plus ~13 GiB of RedMix for frame 0, so this
     // only pays off across a deep queue — which is exactly when the scaler's
     // depth bands ramp to it.
-    // UNITS, not instances (fleets.minimax.instanceWeights): g7e.4xlarge=2,
-    // g6e.8xlarge=1. 4 units = two g7e (32 vCPU), or FOUR g6e.8xlarge —
-    // 128 vCPU, double the 64 vCPU G/VT spot quota, so in a g7e drought with
-    // a deep queue (target 4) the third and fourth g6e launches fail with
-    // MaxSpotInstanceCountExceeded and the ASG keeps retrying them. Accepted:
-    // it is not billed and the two that did launch drain the queue. Giving
-    // g6e.8xlarge weight 2 would cap that, but would also make it the
-    // cheaper pool per unit again ($0.86 vs $0.94) and undo the preference.
+    // Instances again (the pool is g7e.4xlarge only, no weights): 4 x 16 vCPU
+    // = 64 = the whole G/VT spot quota. If a second, heavier type returns
+    // with instanceWeights, this becomes UNITS — see fleets.minimax.
     minimaxMax: 4,
     // NOTE: targetBacklogPerTask is a leftover from a BacklogPerTask design
     // that was never wired up (both fleets used a flat targetValue=1 message
