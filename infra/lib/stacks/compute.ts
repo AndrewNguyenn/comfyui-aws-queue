@@ -201,6 +201,51 @@ export class ComputeStack extends Stack {
     });
     void minimaxService;
 
+    // ----- MINIMAX fleet, Blackwell half -----
+    // Second DAEMON service on the SAME ASG, constrained to g7e.*, running the
+    // sm_120 image. Once both an Ada and a Blackwell instance exist in the
+    // ASG each gets exactly one task and both drain the same queue; the
+    // constraints are what stop a g7e instance from ever pulling the Ada
+    // image (which cannot execute a single kernel on it — see
+    // workers/video/Dockerfile) and vice versa.
+    //
+    // Gated on blackwellImageTag so this is a no-op until a Blackwell image has
+    // been built AND proven on a g7e outside the ASG. Do not add g7e to the
+    // fleet's instance types before this service exists: with
+    // price-capacity-optimized, g7e's cheaper spot makes it the PREFERRED
+    // pool, and an instance with no matching daemon service is a billing
+    // no-op that looks exactly like a capacity outage.
+    if (config.fleets.minimax.blackwellImageTag) {
+      const minimaxBlackwellTaskDef = this.makeTaskDefinition('minimax', {
+        ecrRepository: ci.videoWorkerBlackwellRepo,
+        queueUrl: queue.minimaxJobsQueue.queueUrl,
+        storage,
+        config,
+        asgName: this.minimaxAsg.autoScalingGroupName,
+        variant: 'blackwell',
+        imageTag: config.fleets.minimax.blackwellImageTag,
+      });
+      this.grantWorkerPermissions(
+        minimaxBlackwellTaskDef.taskRole,
+        queue.minimaxJobsQueue,
+        storage,
+        this.minimaxAsg,
+      );
+      const minimaxBlackwellService = new ecs.Ec2Service(this, 'MinimaxBlackwellService', {
+        serviceName: 'comfy-minimax-blackwell',
+        cluster: this.cluster,
+        taskDefinition: minimaxBlackwellTaskDef,
+        daemon: true,
+        minHealthyPercent: 0,
+        placementConstraints: [
+          ecs.PlacementConstraint.memberOf(
+            `attribute:fleet == minimax and attribute:ecs.instance-type =~ g7e.*`,
+          ),
+        ],
+      });
+      void minimaxBlackwellService;
+    }
+
     // ONE Lambda drives all fleets' desired counts — see makeFleetScaler.
     // Replaces video's former ECS Application Auto Scaling target-tracking
     // policy (removed 2026-08-10): target-tracking's scale-in alarm needs
@@ -626,20 +671,36 @@ export class ComputeStack extends Stack {
    */
   private makeTaskDefinition(
     fleetName: FleetName,
-    deps: { ecrRepository: import('aws-cdk-lib/aws-ecr').IRepository; queueUrl: string; storage: StorageStack; config: AppConfig; asgName?: string }
+    deps: {
+      ecrRepository: import('aws-cdk-lib/aws-ecr').IRepository;
+      queueUrl: string;
+      storage: StorageStack;
+      config: AppConfig;
+      asgName?: string;
+      /** A second task def for the SAME fleet (e.g. a Blackwell image beside
+       *  the Ada one). Suffixes every construct id and physical name that is
+       *  otherwise keyed on fleetName, so two can coexist. FLEET env stays the
+       *  bare fleet name — the dispatcher validates it against a fixed list. */
+      variant?: string;
+      /** Overrides config.fleets[fleetName].imageTag. */
+      imageTag?: string;
+    }
   ): ecs.Ec2TaskDefinition {
-    const { ecrRepository, queueUrl, storage, config, asgName } = deps;
+    const { ecrRepository, queueUrl, storage, config, asgName, variant, imageTag } = deps;
+    // '' for the default task def, so existing ids/names/families are unchanged.
+    const v = variant ? `-${variant}` : '';
+    const V = variant ? variant[0].toUpperCase() + variant.slice(1) : '';
 
     // Both fleets use mount-s3 + NVMe cache. host-cache bind-mount + FUSE
     // capability + /dev/fuse device are uniform across image and video.
-    const taskDef = new ecs.Ec2TaskDefinition(this, `${fleetName}TaskDef`, {
-      family: `comfy-${fleetName}`,
+    const taskDef = new ecs.Ec2TaskDefinition(this, `${fleetName}${V}TaskDef`, {
+      family: `comfy-${fleetName}${v}`,
       networkMode: ecs.NetworkMode.HOST,
       volumes: [{ name: 'host-cache', host: { sourcePath: '/opt/cache' } }],
     });
 
-    const logGroup = new logs.LogGroup(this, `${fleetName}WorkerLogs`, {
-      logGroupName: `/comfy/workers/${fleetName}`,
+    const logGroup = new logs.LogGroup(this, `${fleetName}${V}WorkerLogs`, {
+      logGroupName: `/comfy/workers/${fleetName}${v}`,
       retention: logs.RetentionDays.ONE_WEEK,
       removalPolicy: RemovalPolicy.DESTROY,
     });
@@ -652,8 +713,8 @@ export class ComputeStack extends Stack {
     const workerApiKeyId = require('aws-cdk-lib/aws-ssm').StringParameter
       .valueForStringParameter(this, '/comfy/api/worker-key-id');
 
-    const container = taskDef.addContainer(`${fleetName}Container`, {
-      containerName: `comfy-${fleetName}-worker`,
+    const container = taskDef.addContainer(`${fleetName}${V}Container`, {
+      containerName: `comfy-${fleetName}${v}-worker`,
       // Pinned to an immutable commit SHA, never 'latest'. CodeBuild pushes
       // both tags in one `buildx --push`, so 'latest' meant any rebuild
       // silently became prod on the next instance launch — and, because the
@@ -661,14 +722,14 @@ export class ComputeStack extends Stack {
       // moved the other's image too. See FleetConfig.imageTag in config.ts.
       image: ecs.ContainerImage.fromEcrRepository(
         ecrRepository,
-        config.fleets[fleetName].imageTag,
+        imageTag ?? config.fleets[fleetName].imageTag,
       ),
       gpuCount: 1,
       // FUSE access for mount-s3 — uniform across image + video.
       // TODO: investigate unprivileged FUSE fd handoff (mount-s3 CONFIGURATION.md)
       // if we ever need to drop CAP_SYS_ADMIN — currently requires a host-side
       // helper we don't have.
-      linuxParameters: new ecs.LinuxParameters(this, `${fleetName}LinuxParams`, {}),
+      linuxParameters: new ecs.LinuxParameters(this, `${fleetName}${V}LinuxParams`, {}),
       // Memory:
       //   - memoryReservationMiB (soft / used for ECS placement): 11264 fits
       //     both .xlarge (16 GB) and .2xlarge (32 GB) with ECS-agent + OS
@@ -695,7 +756,7 @@ export class ComputeStack extends Stack {
       memoryLimitMiB: fleetName === 'video' ? 28672 : undefined,
       essential: true,
       logging: ecs.LogDrivers.awsLogs({
-        streamPrefix: fleetName,
+        streamPrefix: `${fleetName}${v}`,
         logGroup,
         // Multiline pattern alone — docker rejects both multilinePattern AND
         // datetimeFormat in the same log driver config:

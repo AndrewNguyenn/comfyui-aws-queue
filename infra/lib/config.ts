@@ -100,6 +100,12 @@ export interface FleetConfig {
    *
    *  Bump this deliberately, after the new image has been tested. */
   readonly imageTag: string;
+  /** Blackwell (sm_120) build of the same worker, from
+   *  comfy-video-worker-blackwell. When set, compute.ts adds a SECOND DAEMON
+   *  service on this fleet's ASG constrained to g7e.* running this image,
+   *  beside the Ada one on g6e.*. Requires daemonScheduling. Unset = the
+   *  fleet is Ada-only and g7e must NOT be in its instance types. */
+  readonly blackwellImageTag?: string;
   /** Run this fleet's ECS service with schedulingStrategy DAEMON — exactly
    *  one task on every instance matching its placement constraints — instead
    *  of REPLICA with a desiredCount.
