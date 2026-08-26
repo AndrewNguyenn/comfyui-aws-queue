@@ -141,7 +141,10 @@ print('numpy', numpy.__version__, '| torch.from_numpy OK ->', tuple(t.shape))"
 # below v0.30.0 this file disappears and every MiniMax node goes with it, which
 # would otherwise only surface as "the nodes aren't in the editor".
 RUN test -f /opt/comfy/comfy_extras/nodes_minimax_h3.py \
-    || (echo "ERROR: comfy_extras/nodes_minimax_h3.py missing — COMFYUI_TAG=${COMFYUI_TAG} predates native MiniMax H3 (needs >= v0.30.0)" && exit 1)
+    || (echo "ERROR: comfy_extras/nodes_minimax_h3.py missing — COMFYUI_TAG=${COMFYUI_TAG} predates native MiniMax H3 (needs >= v0.30.0)"; \
+        echo "--- diagnostics: pwd=$(pwd)"; ls -la /opt/comfy | head -20; echo "--- comfy_extras:"; ls /opt/comfy/comfy_extras 2>&1 | head -5; \
+        echo "--- git:"; git -C /opt/comfy log --oneline -1 2>&1; git -C /opt/comfy status --short 2>&1 | head -5; \
+        exit 1)
 
 # The matching 2.5.1 wheel still cannot import as shipped: its prebuilt
 # libtorchaudio.so is linked against UPSTREAM torch 2.5.1 while NGC ships a
