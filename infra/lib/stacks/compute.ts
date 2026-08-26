@@ -599,6 +599,17 @@ export class ComputeStack extends Stack {
           }
         : {}),
       spotInstanceDraining: true, // Critical: graceful drain on spot termination notice
+      // NOT redundant with spotInstanceDraining — different mechanisms, and
+      // this one is load-bearing here for a second reason. CDK adds its own
+      // InstanceDrainHook Lambda + SNS topic + ASG lifecycle hook UNLESS
+      // `enableManagedTerminationProtection || enableManagedDraining` (see
+      // Cluster.addAsgCapacityProvider, which passes taskDrainTime: 0 in that
+      // case). Turning termination protection off for the DAEMON fleet would
+      // therefore have summoned that hook — on an ASG that ALREADY carries
+      // ECS's own `ecs-managed-draining-termination-hook`. Two drain hooks
+      // racing on EC2_INSTANCE_TERMINATING is exactly the shape that wedged an
+      // instance in Terminating:Wait for ~17h in 2026-07.
+      enableManagedDraining: true,
     });
   }
 
