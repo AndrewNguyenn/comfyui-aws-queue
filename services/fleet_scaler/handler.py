@@ -10,6 +10,14 @@ by which env vars are set. The decision logic is identical in both.
       desiredCount; the capacity provider's managed scaling turns that into
       instances. Used by image and video.
 
+  ASG mode ({FLEET}_ASG)  — sets the Auto Scaling group's desired capacity
+      directly. Used where the service is DAEMON-scheduled (one task per
+      matching instance, no desiredCount to set), which is how one ASG can
+      launch a mix of GPU architectures and have each instance pick up the
+      task definition — and therefore the container image — built for its own
+      GPU. DAEMON tasks never sit pending, so managed scaling has nothing to
+      react to and is turned off for those fleets; this Lambda owns capacity.
+
 UNITS, NOT WORKERS, on a weighted ASG. minimax's ASG carries instance
 weights (config.ts fleets.minimax.instanceWeights: g7e.4xlarge=2,
 g6e.8xlarge=1), so for that fleet every number this module produces or
@@ -20,14 +28,6 @@ drop it below), so the release ladder 4->3->2->1->0 can take a tick that
 moves nothing. The bands below still read naturally: one g7e does two g6e
 worth of clips in the same time, so "2 units at 6 queued" is the same
 throughput promise either way.
-
-  ASG mode ({FLEET}_ASG)  — sets the Auto Scaling group's desired capacity
-      directly. Used where the service is DAEMON-scheduled (one task per
-      matching instance, no desiredCount to set), which is how one ASG can
-      launch a mix of GPU architectures and have each instance pick up the
-      task definition — and therefore the container image — built for its own
-      GPU. DAEMON tasks never sit pending, so managed scaling has nothing to
-      react to and is turned off for those fleets; this Lambda owns capacity.
 
 Both modes coexist deliberately: converting a fleet is a service REPLACEMENT
 (schedulingStrategy is immutable), so fleets migrate one at a time rather than

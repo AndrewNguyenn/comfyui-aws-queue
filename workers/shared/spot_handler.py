@@ -122,15 +122,21 @@ def make_default_on_terminate(
             )
         except Exception:  # noqa: BLE001
             log.exception("failed to reset SQS visibility for %s", job_id)
-        # Then update DDB so a worker picking it up sees status=queued.
+        # Then update DDB so a worker picking it up sees status=queued — but
+        # only if it is still 'running'. A job that finished inside the
+        # notice-to-stop window has already been written 'complete' and its
+        # message deleted; a 'queued' landing after that would orphan it.
         try:
             ddb.update_item(
                 TableName=jobs_table,
                 Key={"job_id": {"S": job_id}},
                 UpdateExpression="SET #s = :s",
+                ConditionExpression="#s = :running",
                 ExpressionAttributeNames={"#s": "status"},
-                ExpressionAttributeValues={":s": {"S": "queued"}},
+                ExpressionAttributeValues={":s": {"S": "queued"}, ":running": {"S": "running"}},
             )
+        except ddb.exceptions.ConditionalCheckFailedException:
+            log.info("job %s already left 'running'; not re-queued", job_id)
         except Exception:  # noqa: BLE001
             log.exception("failed to revert job %s to queued", job_id)
 

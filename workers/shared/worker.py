@@ -124,6 +124,10 @@ def main() -> int:
     def _terminate_chain(in_flight):
         on_terminate(in_flight)
         comfy.stop(timeout=10)
+        # Runs on the watcher thread, where SystemExit only ends THAT thread.
+        # The process actually exits because stopping ComfyUI fails the
+        # running job and the poll loop below checks spot.terminating before
+        # taking another. Keep that loop guard; this line is not the exit.
         sys.exit(0)
 
     spot = SpotHandler(on_terminate=_terminate_chain)
