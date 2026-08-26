@@ -1,4 +1,4 @@
-import { Stack, StackProps, Duration, RemovalPolicy } from 'aws-cdk-lib';
+import { ArnFormat, Stack, StackProps, Duration, RemovalPolicy } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
@@ -187,19 +187,7 @@ export class ComputeStack extends Stack {
     // scaling off the capacity provider does no scheduling work, and the
     // daemon places on whatever the ASG launches. Omitting both launchType
     // and capacityProviderStrategies makes CDK emit LaunchType: EC2.
-    const minimaxService = new ecs.Ec2Service(this, 'MinimaxAdaService', {
-      serviceName: 'comfy-minimax-ada',
-      cluster: this.cluster,
-      taskDefinition: minimaxTaskDef,
-      daemon: true,
-      minHealthyPercent: 0,
-      placementConstraints: [
-        ecs.PlacementConstraint.memberOf(
-          `attribute:fleet == minimax and attribute:ecs.instance-type =~ g6e.*`,
-        ),
-      ],
-    });
-    void minimaxService;
+    this.makeDaemonService('MinimaxAdaService', 'comfy-minimax-ada', 'minimax', minimaxTaskDef, 'g6e');
 
     // ----- MINIMAX fleet, Blackwell half -----
     // Second DAEMON service on the SAME ASG, constrained to g7e.*, running the
@@ -211,10 +199,10 @@ export class ComputeStack extends Stack {
     //
     // Gated on blackwellImageTag so this is a no-op until a Blackwell image has
     // been built AND proven on a g7e outside the ASG. Do not add g7e to the
-    // fleet's instance types before this service exists: with
-    // price-capacity-optimized, g7e's cheaper spot makes it the PREFERRED
-    // pool, and an instance with no matching daemon service is a billing
-    // no-op that looks exactly like a capacity outage.
+    // fleet's instance types before this service exists: the instance
+    // weights in config.ts make g7e the PREFERRED pool, and an instance with
+    // no matching daemon service is a billing no-op that looks exactly like
+    // a capacity outage.
     if (config.fleets.minimax.blackwellImageTag) {
       const minimaxBlackwellTaskDef = this.makeTaskDefinition('minimax', {
         ecrRepository: ci.videoWorkerBlackwellRepo,
@@ -222,8 +210,7 @@ export class ComputeStack extends Stack {
         storage,
         config,
         asgName: this.minimaxAsg.autoScalingGroupName,
-        variant: 'blackwell',
-        imageTag: config.fleets.minimax.blackwellImageTag,
+        variant: { name: 'blackwell', imageTag: config.fleets.minimax.blackwellImageTag },
       });
       this.grantWorkerPermissions(
         minimaxBlackwellTaskDef.taskRole,
@@ -231,19 +218,7 @@ export class ComputeStack extends Stack {
         storage,
         this.minimaxAsg,
       );
-      const minimaxBlackwellService = new ecs.Ec2Service(this, 'MinimaxBlackwellService', {
-        serviceName: 'comfy-minimax-blackwell',
-        cluster: this.cluster,
-        taskDefinition: minimaxBlackwellTaskDef,
-        daemon: true,
-        minHealthyPercent: 0,
-        placementConstraints: [
-          ecs.PlacementConstraint.memberOf(
-            `attribute:fleet == minimax and attribute:ecs.instance-type =~ g7e.*`,
-          ),
-        ],
-      });
-      void minimaxBlackwellService;
+      this.makeDaemonService('MinimaxBlackwellService', 'comfy-minimax-blackwell', 'minimax', minimaxBlackwellTaskDef, 'g7e');
     }
 
     // ONE Lambda drives all fleets' desired counts — see makeFleetScaler.
@@ -383,7 +358,7 @@ export class ComputeStack extends Stack {
           actions: ['autoscaling:SetDesiredCapacity'],
           resources: asgFleets.map(
             (f) =>
-              `arn:aws:autoscaling:${this.region}:${this.account}:autoScalingGroup:*:autoScalingGroupName/${f.asg!.autoScalingGroupName}`
+              this.asgArn(f.asg!.autoScalingGroupName)
           ),
         })
       );
@@ -534,6 +509,16 @@ export class ComputeStack extends Stack {
       minimax: config.scaling.minimaxMax,
     }[fleetName];
 
+    for (const az of fleet.availabilityZones ?? []) {
+      if (!network.vpc.availabilityZones.includes(az)) {
+        // A typo that still leaves one valid subnet would silently narrow
+        // the ASG instead of failing; make it fail at synth.
+        throw new Error(
+          `fleets.${fleetName}.availabilityZones: '${az}' is not a VPC AZ (${network.vpc.availabilityZones.join(', ')})`,
+        );
+      }
+    }
+
     const asg = new autoscaling.AutoScalingGroup(this, `${fleetName}Asg`, {
       autoScalingGroupName: `comfy-${fleetName}-asg`,
       vpc: network.vpc,
@@ -677,6 +662,43 @@ export class ComputeStack extends Stack {
    * DISPATCHER_API_URL and worker API key are looked up from SSM at deploy
    * time (resolves circular Compute ↔ Api dependency from review C3).
    */
+  /** `arn:<partition>:autoscaling:<region>:<account>:autoScalingGroup:*:autoScalingGroupName/<name>`
+   *  — the shape IAM wants for SetDesiredCapacity / SetInstanceProtection /
+   *  UpdateAutoScalingGroup. The group's own UUID is unknowable at synth. */
+  private asgArn(name: string): string {
+    return Stack.of(this).formatArn({
+      service: 'autoscaling',
+      resource: 'autoScalingGroup',
+      resourceName: `*:autoScalingGroupName/${name}`,
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    });
+  }
+
+  /** One task on every instance of `fleetName`'s ASG whose type matches
+   *  `instanceFamily` (e.g. 'g6e' -> `=~ g6e.*`). DAEMON so the ASG decides
+   *  how many and the instance decides which image; no capacity provider
+   *  strategy (ECS rejects it for DAEMON) so CDK emits launchType EC2. */
+  private makeDaemonService(
+    id: string,
+    serviceName: string,
+    fleetName: FleetName,
+    taskDefinition: ecs.Ec2TaskDefinition,
+    instanceFamily: string,
+  ): ecs.Ec2Service {
+    return new ecs.Ec2Service(this, id, {
+      serviceName,
+      cluster: this.cluster,
+      taskDefinition,
+      daemon: true,
+      minHealthyPercent: 0,
+      placementConstraints: [
+        ecs.PlacementConstraint.memberOf(
+          `attribute:fleet == ${fleetName} and attribute:ecs.instance-type =~ ${instanceFamily}.*`,
+        ),
+      ],
+    });
+  }
+
   private makeTaskDefinition(
     fleetName: FleetName,
     deps: {
@@ -686,18 +708,20 @@ export class ComputeStack extends Stack {
       config: AppConfig;
       asgName?: string;
       /** A second task def for the SAME fleet (e.g. a Blackwell image beside
-       *  the Ada one). Suffixes every construct id and physical name that is
-       *  otherwise keyed on fleetName, so two can coexist. FLEET env stays the
+       *  the Ada one). `name` suffixes every construct id and physical name
+       *  that is otherwise keyed on fleetName, so two can coexist; `imageTag`
+       *  replaces config.fleets[fleetName].imageTag. One object, because a
+       *  variant without its own tag would pull the base fleet's SHA from the
+       *  variant's repo — a tag that does not exist there. FLEET env stays the
        *  bare fleet name — the dispatcher validates it against a fixed list. */
-      variant?: string;
-      /** Overrides config.fleets[fleetName].imageTag. */
-      imageTag?: string;
+      variant?: { name: string; imageTag: string };
     }
   ): ecs.Ec2TaskDefinition {
-    const { ecrRepository, queueUrl, storage, config, asgName, variant, imageTag } = deps;
+    const { ecrRepository, queueUrl, storage, config, asgName, variant } = deps;
+    const imageTag = variant?.imageTag ?? config.fleets[fleetName].imageTag;
     // '' for the default task def, so existing ids/names/families are unchanged.
-    const v = variant ? `-${variant}` : '';
-    const V = variant ? variant[0].toUpperCase() + variant.slice(1) : '';
+    const v = variant ? `-${variant.name}` : '';
+    const V = variant ? variant.name[0].toUpperCase() + variant.name.slice(1) : '';
 
     // Both fleets use mount-s3 + NVMe cache. host-cache bind-mount + FUSE
     // capability + /dev/fuse device are uniform across image and video.
@@ -730,7 +754,7 @@ export class ComputeStack extends Stack {
       // moved the other's image too. See FleetConfig.imageTag in config.ts.
       image: ecs.ContainerImage.fromEcrRepository(
         ecrRepository,
-        imageTag ?? config.fleets[fleetName].imageTag,
+        imageTag,
       ),
       gpuCount: 1,
       // FUSE access for mount-s3 — uniform across image + video.
@@ -849,7 +873,7 @@ export class ComputeStack extends Stack {
         new iam.PolicyStatement({
           actions: ['autoscaling:SetInstanceProtection'],
           resources: [
-            `arn:aws:autoscaling:${this.region}:${this.account}:autoScalingGroup:*:autoScalingGroupName/${asg.autoScalingGroupName}`,
+            this.asgArn(asg.autoScalingGroupName),
           ],
         })
       );

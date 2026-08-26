@@ -1,4 +1,4 @@
-import { Stack, StackProps, Duration, RemovalPolicy } from 'aws-cdk-lib';
+import { ArnFormat, Stack, StackProps, Duration, RemovalPolicy } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as budgets from 'aws-cdk-lib/aws-budgets';
 import * as sns from 'aws-cdk-lib/aws-sns';
@@ -114,7 +114,7 @@ export class MonitoringStack extends Stack {
         ECS_CLUSTER: clusterName,
         ECS_SERVICES: serviceNames.join(','),
       },
-      description: 'Cost kill-switch: zeros the image+video ASGs and ECS services on a budget breach.',
+      description: 'Cost kill-switch: zeros every GPU ASG (image, video, minimax) and the replica ECS services on a budget breach.',
     });
 
     // Describe has no resource-level support; scope Update to the two ASGs and
@@ -124,9 +124,16 @@ export class MonitoringStack extends Stack {
       resources: ['*'],
     }));
     killSwitchFn.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['autoscaling:UpdateAutoScalingGroup'],
-      resources: asgNames.map((n) =>
-        `arn:aws:autoscaling:${this.region}:${this.account}:autoScalingGroup:*:autoScalingGroupName/${n}`),
+      // SetInstanceProtection: minimax workers hold scale-in protection while
+      // rendering, and an ASG cannot terminate a protected instance, so the
+      // handler clears it before zeroing (services/killswitch/handler.py).
+      actions: ['autoscaling:UpdateAutoScalingGroup', 'autoscaling:SetInstanceProtection'],
+      resources: asgNames.map((n) => Stack.of(this).formatArn({
+        service: 'autoscaling',
+        resource: 'autoScalingGroup',
+        resourceName: `*:autoScalingGroupName/${n}`,
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      })),
     }));
     killSwitchFn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['ecs:UpdateService'],

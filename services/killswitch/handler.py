@@ -33,7 +33,8 @@ DRIFT from CloudFormation. To bring compute back, either redeploy the compute
 stack (`cd infra && npx cdk deploy ComfyComputeStack -c useGoldenAmi=true` —
 resets the ASG bounds from config) or manually restore, e.g.
 `aws autoscaling update-auto-scaling-group --auto-scaling-group-name \
-comfy-image-asg --min-size 0 --max-size 6 --desired-capacity 0` (video max 3),
+comfy-image-asg --min-size 0 --max-size 6 --desired-capacity 0` (video max 3,
+minimax max 4 — units, see config.ts instanceWeights),
 then let the ECS services scale back up.
 """
 import json

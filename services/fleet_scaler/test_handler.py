@@ -279,6 +279,98 @@ def test_asg_not_found_is_a_noop_not_a_crash():
     assert results["video"]["reason"] == "asg-not-found"
 
 
+def test_scale_down_actuates_on_the_asg():
+    """A drained ASG-mode fleet steps its DESIRED CAPACITY down by one — on the
+    ASG, not on a service. The scale-up sibling proved the up path; nothing
+    proved the release ever reaches the ASG API."""
+    calls = []
+
+    class FakeSqs:
+        def get_queue_attributes(self, QueueUrl, AttributeNames):
+            return {"Attributes": {"ApproximateNumberOfMessages": "0",
+                                   "ApproximateNumberOfMessagesNotVisible": "0"}}
+
+    class FakeAsg:
+        def describe_auto_scaling_groups(self, AutoScalingGroupNames):
+            return {"AutoScalingGroups": [{"DesiredCapacity": 2}]}
+
+        def set_desired_capacity(self, **kw):
+            calls.append(kw)
+
+    class FakeEcs:
+        def describe_services(self, cluster, services):
+            return {"services": [{"desiredCount": 0}]}
+
+        def update_service(self, **kwargs):
+            raise AssertionError("release must not touch a service in ASG mode")
+
+    saved = h.sqs, h.asg, h.ecs
+    h.sqs, h.asg, h.ecs = FakeSqs(), FakeAsg(), FakeEcs()
+    try:
+        results = h.lambda_handler({}, None)
+    finally:
+        h.sqs, h.asg, h.ecs = saved
+
+    assert results["video"]["action"] == "scale-down"
+    assert calls == [{"AutoScalingGroupName": "asg-video", "DesiredCapacity": 1}]
+
+
+def test_asg_wins_when_both_actuators_are_set():
+    """Half-finished migration: both VIDEO_ASG and VIDEO_SERVICE present. The
+    scaler must drive the ASG and forget the service, or it would be setting
+    desiredCount on a DAEMON service that has none."""
+    os.environ["VIDEO_SERVICE"] = "s-video-stale"
+    try:
+        fleets = {f["name"]: f for f in h._discover_fleets()}
+    finally:
+        del os.environ["VIDEO_SERVICE"]
+    assert fleets["video"]["asg"] == "asg-video"
+    assert fleets["video"]["service"] is None
+    assert fleets["image"]["service"] == "s-image" and fleets["image"]["asg"] is None
+
+
+def test_asg_mode_never_consults_warm_capacity():
+    """warm_capacity() counts ECS container instances to raise a SERVICE-mode
+    target toward boxes that are already up. Under DAEMON scheduling task
+    count == instance count by construction, so the scaler skips it — and
+    must not even call ECS for it (the Lambda's IAM has no ecs:* for ASG
+    fleets)."""
+    class FakeSqs:
+        def get_queue_attributes(self, QueueUrl, AttributeNames):
+            n = "1" if QueueUrl == "x-video" else "0"
+            return {"Attributes": {"ApproximateNumberOfMessages": n,
+                                   "ApproximateNumberOfMessagesNotVisible": "0"}}
+
+    class FakeAsg:
+        def describe_auto_scaling_groups(self, AutoScalingGroupNames):
+            return {"AutoScalingGroups": [{"DesiredCapacity": 1}]}
+
+        def set_desired_capacity(self, **kw):
+            raise AssertionError("1 waiting on 1 worker is a hold, not a scale")
+
+    class FakeEcs:
+        def describe_services(self, cluster, services):
+            return {"services": [{"desiredCount": 0}]}
+
+        def list_container_instances(self, **kw):
+            raise AssertionError("ASG-mode fleet consulted warm_capacity()")
+
+        def describe_container_instances(self, **kw):
+            raise AssertionError("ASG-mode fleet consulted warm_capacity()")
+
+        def update_service(self, **kwargs):
+            raise AssertionError("SERVICE call in ASG mode")
+
+    saved = h.sqs, h.asg, h.ecs
+    h.sqs, h.asg, h.ecs = FakeSqs(), FakeAsg(), FakeEcs()
+    try:
+        results = h.lambda_handler({}, None)
+    finally:
+        h.sqs, h.asg, h.ecs = saved
+
+    assert results["video"]["action"] == "hold", results["video"]
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
