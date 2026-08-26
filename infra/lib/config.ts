@@ -316,6 +316,12 @@ export const APP_CONFIG: AppConfig = {
       // was ':latest', which meant rotating comfy-video silently moved this
       // fleet's image too (and vice versa) with nothing recording it.
       imageTag: '59a5cadf212756394db2e30764bec79415561bb4',
+      // Blackwell (g7e / sm_120) image: NGC 26.07, torch 2.13, CUDA 13.3.
+      // Setting this creates the second DAEMON service (comfy-minimax-blackwell)
+      // constrained to g7e.*. Proven 2026-08-26 on a g7e.4xlarge outside the
+      // ASG: forward-compat engages on the AMI's 580 driver, sm_120 kernels
+      // launch, DynamicVRAM on, 97 GB VRAM. Same repo/SHA discipline as above.
+      blackwellImageTag: '258bbc51aaa779f021bcb6eabe2d50e441225371',
       // g6e.2xlarge (64 GB RAM) is primary, not g6e.xlarge (32 GB), for the
       // same reason the video fleet left g5.xlarge: the binding constraint is
       // SYSTEM memory, not VRAM. ComfyUI parks the 25.3 GiB int8_convrot text
@@ -363,7 +369,17 @@ export const APP_CONFIG: AppConfig = {
       // which is why minimaxMax is 2. Three 8xlarges cannot coexist under this
       // quota, so asking for a third would strand it pending forever.
       primaryInstanceType: 'g6e.8xlarge',
-      fallbackInstanceTypes: [],
+      // 2026-08-26: g7e.4xlarge joins as the drought fallback. It is a
+      // SEPARATE silicon pool (RTX PRO 6000 Blackwell, 96 GB VRAM — no weight
+      // offload at all), only in 1b/1d, and its spot ($1.79-1.97) sits just
+      // above g6e.8xlarge's ($1.68-1.76), so price-capacity-optimized keeps
+      // 8xlarge preferred and reaches for g7e when 8xlarge is dry. 16 vCPU, so
+      // it never strands quota. It needs its own image — the ada image cannot
+      // run a single kernel on sm_120 — which is what blackwellImageTag and
+      // the second daemon service are for. Do NOT add g7e here without that
+      // tag set, or a g7e launch is an idle, billing instance no service
+      // places on.
+      fallbackInstanceTypes: ['g7e.4xlarge'],
       // Bid ceiling. Without one AWS bids the on-demand price, which is how
       // the 4xlarge ended up costing exactly on-demand ($3.0042) with a 0%
       // spot discount. g6e.8xlarge has held $1.74-1.90 across every AZ for
