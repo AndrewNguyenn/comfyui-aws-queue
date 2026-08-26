@@ -178,19 +178,21 @@ print('torchaudio DSP OK — resample', tuple(r.shape), 'mel', tuple(m.shape))"
 # (~15-20 min on BUILD_GENERAL1_LARGE) due to CUDA kernel compilation.
 # Pin to a known commit when reproducible builds matter; using HEAD here.
 #
-# NON-FATAL. We do not pass --use-sage-attention on the minimax fleet at all,
-# and whether SageAttention 2.x even compiles for sm_120 is unverified. A
-# kernel we never enable must not be able to block the image that unlocks a
-# whole GPU family. The import check below records the outcome in the build
-# log; workers/shared/worker.py already tolerates a missing module.
-RUN pip install --no-build-isolation \
-        git+https://github.com/thu-ml/SageAttention.git \
-    || echo "WARNING: sageattention build failed on profile=$BUILD_PROFILE arch=$TORCH_CUDA_ARCH_LIST — continuing without it"
-
-# Records whether sage made it in. Not fatal for the reason above.
-# (sageattention from GitHub HEAD doesn't expose __version__ on the module.)
-RUN python -c "import sageattention; print('sageattention import OK, attrs:', [a for a in dir(sageattention) if not a.startswith('_')][:5])" \
-    || echo "WARNING: sageattention not importable on profile=$BUILD_PROFILE"
+# FATAL on the ada profile, non-fatal on blackwell. The video fleet runs
+# ComfyUI with --use-sage-attention (workers/shared/worker.py, FLEET=video),
+# which imports sageattention at startup — a sage-less ada image would
+# crash-loop that whole fleet while the build reported success. The minimax
+# fleet never enables it, and it is the only fleet the blackwell profile
+# serves, so there a failed sage build must not block the image that unlocks
+# a GPU family. (It did build for sm_120 on 2026-08-26; this is the guard.)
+RUN set -e; if pip install --no-build-isolation git+https://github.com/thu-ml/SageAttention.git \
+       && python -c "import sageattention; print('sageattention import OK, attrs:', [a for a in dir(sageattention) if not a.startswith('_')][:5])"; then \
+      echo "sageattention OK on profile=$BUILD_PROFILE arch=$TORCH_CUDA_ARCH_LIST"; \
+    elif [ "$BUILD_PROFILE" = "ada" ]; then \
+      echo "ERROR: sageattention build/import failed on profile=ada; the video fleet runs --use-sage-attention" >&2; exit 1; \
+    else \
+      echo "WARNING: no sageattention on profile=$BUILD_PROFILE arch=$TORCH_CUDA_ARCH_LIST (never enabled on minimax) — continuing"; \
+    fi
 
 
 # ---------- ComfyUI custom nodes for Wan video ----------
@@ -330,7 +332,8 @@ RUN mkdir -p /opt/comfy/output
 # ---------- Smoke test ----------
 RUN cd /opt/comfy && python -c "import sys; sys.path.insert(0, '.'); import comfy" || \
     echo "WARNING: comfy module import quick-check failed (may still work at runtime)"
-RUN python -c "import sageattention; import torch; print('sage importable, torch:', torch.__version__)" \
-    || python -c "import torch; print('sage NOT importable (non-fatal, never enabled on minimax), torch:', torch.__version__)"
+RUN set -e; if python -c "import sageattention; import torch; print('sage importable, torch:', torch.__version__)"; then :; \
+    elif [ "$BUILD_PROFILE" = "ada" ]; then echo "ERROR: sage not importable in the final ada image" >&2; exit 1; \
+    else python -c "import torch; print('sage NOT importable (non-fatal, never enabled on minimax), torch:', torch.__version__)"; fi
 
 ENTRYPOINT ["/entrypoint.sh"]

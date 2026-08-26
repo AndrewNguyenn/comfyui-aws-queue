@@ -43,13 +43,24 @@ export class CiStack extends Stack {
     const { config } = props;
 
     // ----- ECR Repos -----
-    // Lifecycle: keep last 10 by imagePushedAt, regardless of tag (since we
-    // tag every image with both `latest` and the commit SHA).
+    // Lifecycle. Task definitions pin images by commit SHA (config.ts
+    // imageTag), so a pinned image must outlive many rebuilds: the old
+    // "keep last 10, any tag" rule counted the buildx `:cache` manifest each
+    // build leaves untagged, which made it ~5 builds of retention — and an
+    // evicted pin only surfaces as CannotPullContainerError at the next
+    // instance launch. Expire untagged manifests on age, keep 30 of the rest
+    // (ECR requires the ANY rule to carry the highest priority number).
     const lifecycleRules: ecr.LifecycleRule[] = [
       {
         rulePriority: 1,
-        description: 'Keep last 10 images',
-        maxImageCount: 10,
+        description: 'Expire untagged (superseded buildx cache manifests)',
+        tagStatus: ecr.TagStatus.UNTAGGED,
+        maxImageAge: Duration.days(14),
+      },
+      {
+        rulePriority: 2,
+        description: 'Keep last 30 images',
+        maxImageCount: 30,
         tagStatus: ecr.TagStatus.ANY,
       },
     ];
