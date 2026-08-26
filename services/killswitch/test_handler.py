@@ -60,9 +60,8 @@ def test_fire_zeros_all_asgs_and_services():
     for c in prot_calls:
         assert c.kwargs["ProtectedFromScaleIn"] is False
         assert sorted(c.kwargs["InstanceIds"]) == ["i-busy", "i-idle"]
-    first_unprotect = ks.asg.method_calls.index(prot_calls[0])
-    first_zero = ks.asg.method_calls.index(asg_calls[0])
-    assert first_unprotect < first_zero
+    names = [c[0] for c in ks.asg.mock_calls]
+    assert names.index("set_instance_protection") < names.index("update_auto_scaling_group")
     svc_calls = ks.ecs.update_service.call_args_list
     assert len(svc_calls) == 2
     for c in svc_calls:
