@@ -83,11 +83,16 @@ RUN git clone --depth 1 --branch ${COMFYUI_TAG} \
 # does `import torchaudio` at module load — with a stub the import fails and
 # EVERY MiniMax node silently disappears from the graph.
 #
-# BLACKWELL PROFILE: none of this section applies. NGC 26.07 is torch 2.13 on
-# CUDA 13, which is exactly what ComfyUI's requirements.txt resolves torchaudio
-# (2.11+) against — the "libcudart.so.13 mismatch" below is the ada base being
-# too OLD, and it does not exist on 26.07. So there the requirements-resolved
-# torchaudio is kept as-is, and the 2.5.1 pin + extension patch are skipped.
+# BLACKWELL PROFILE: the 2.5.1/cu124 reinstall below is ada-only, but the
+# extension PATCH applies to both. First blackwell build proved it: NGC 26.07
+# ships a custom torch on CUDA 13.3, while ComfyUI's requirements resolve the
+# PyPI torchaudio 2.11 built for CUDA 13.0, and torchaudio's
+# _check_cuda_version() refuses that pairing at import:
+#   "PyTorch has CUDA version 13.3 whereas TorchAudio has CUDA version 13.0"
+# Same failure shape as ada (a compiled half that cannot load), same cure —
+# patch_torchaudio_ext.py wraps that exact call and degrades to the pure-
+# Python DSP, which is all MiniMax H3 uses. There is no matching wheel to
+# install instead: nothing on PyPI is built against NGC's 13.3 torch.
 #
 # We cannot just take what ComfyUI's requirements.txt resolves to: that is
 # torchaudio 2.11, built for torch 2.11 / CUDA 13, while this NGC base is
@@ -149,11 +154,11 @@ COPY workers/video/patch_torchaudio_ext.py /tmp/patch_torchaudio_ext.py
 RUN if [ "$BUILD_PROFILE" = "ada" ]; then \
         pip install --no-deps --force-reinstall \
             --index-url https://download.pytorch.org/whl/cu124 \
-            torchaudio==${TORCHAUDIO_VERSION} \
-        && python3 /tmp/patch_torchaudio_ext.py; \
+            torchaudio==${TORCHAUDIO_VERSION}; \
     else \
-        echo "[$BUILD_PROFILE] keeping requirements-resolved torchaudio"; \
+        echo "[$BUILD_PROFILE] keeping requirements-resolved torchaudio; patching its extension load"; \
     fi \
+    && python3 /tmp/patch_torchaudio_ext.py \
     && python -c "import torch, torchaudio, torchaudio.transforms as T; \
 print('torch', torch.__version__, '| torchaudio', torchaudio.__version__); \
 w = torch.zeros(1, 2, 16000); \
@@ -303,7 +308,8 @@ RUN if [ "$BUILD_PROFILE" = "ada" ]; then \
         && python -c "import numpy; assert numpy.__version__.startswith('1.'), 'numpy dragged forward: ' + numpy.__version__" \
         && python -c "import torchaudio; assert torchaudio.__version__.startswith('2.5'), 'torchaudio clobbered: ' + torchaudio.__version__"; \
     else \
-        python -c "import numpy; assert not numpy.__version__.startswith('1.'), 'numpy dragged BACK to 1.x on blackwell: ' + numpy.__version__" \
+        python3 /tmp/patch_torchaudio_ext.py \
+        && python -c "import numpy; assert not numpy.__version__.startswith('1.'), 'numpy dragged BACK to 1.x on blackwell: ' + numpy.__version__" \
         && python -c "import torchaudio; v=tuple(int(x) for x in torchaudio.__version__.split('+')[0].split('.')[:2]); assert v >= (2, 11), 'torchaudio too old for torch 2.13: ' + torchaudio.__version__"; \
     fi \
     && python -c "import numpy, torch, cv2; \
