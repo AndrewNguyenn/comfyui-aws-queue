@@ -273,6 +273,17 @@ ARG TRANSFORMERS_PIN=transformers==4.53.3
 ENV COMFY_TRANSFORMERS_PIN=${TRANSFORMERS_PIN}
 RUN if [ "$BUILD_PROFILE" = "ada" ]; then pip install "${TRANSFORMERS_PIN}"; fi
 
+# ---------- Drop NGC's own OpenCV (ada profile) ----------
+# NGC 24.10 ships a source-built OpenCV 4.7.0 (pip dist "opencv") in the same
+# cv2/ directory that opencv-python-headless installs into. Its loader config
+# puts python-3.10/cv2.cpython-310-x86_64-linux-gnu.so ahead of the wheel's
+# cv2.abi3.so, so `import cv2` loaded 4.7.0 even after the bake installed
+# 4.11, and that build has no cv2.dnn.NMSBoxes: SCAIL's pose detector
+# (PoseDetectionVitPoseToDWPose) died on it (2026-10-18). _force_clean_opencv
+# never removed it because "opencv" is not in its package list. Remove it here,
+# before the bake, so the bake's clean reinstall is the only cv2 left.
+RUN if [ "$BUILD_PROFILE" = "ada" ]; then pip uninstall -y opencv; fi
+
 COPY workers/video/baked_nodes.txt /tmp/baked_nodes.txt
 RUN cd /opt/worker && python3 bake_nodes.py /tmp/baked_nodes.txt
 
@@ -328,7 +339,8 @@ RUN if [ "$BUILD_PROFILE" = "ada" ]; then \
         && python3 /tmp/patch_torchaudio_ext.py \
         && python -c "import numpy; assert numpy.__version__.startswith('1.'), 'numpy dragged forward: ' + numpy.__version__" \
         && python -c "import torchaudio; assert torchaudio.__version__.startswith('2.5'), 'torchaudio clobbered: ' + torchaudio.__version__" \
-        && python -c "import transformers; from transformers.utils import is_torch_available; assert is_torch_available(), 'transformers ' + transformers.__version__ + ' disabled torch'; print('transformers', transformers.__version__, 'sees torch')"; \
+        && python -c "import transformers; from transformers.utils import is_torch_available; assert is_torch_available(), 'transformers ' + transformers.__version__ + ' disabled torch'; print('transformers', transformers.__version__, 'sees torch')" \
+        && python -c "import cv2; assert hasattr(cv2.dnn, 'NMSBoxes'), 'cv2 ' + cv2.__version__ + ' has no dnn.NMSBoxes'; assert not cv2.__version__.startswith('4.7'), 'NGC opencv 4.7 is back'; print('cv2', cv2.__version__, 'has dnn.NMSBoxes')"; \
     else \
         python3 /tmp/patch_torchaudio_ext.py \
         && python -c "import numpy; assert not numpy.__version__.startswith('1.'), 'numpy dragged BACK to 1.x on blackwell: ' + numpy.__version__" \
