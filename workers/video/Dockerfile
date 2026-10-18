@@ -257,6 +257,22 @@ RUN chmod +x /entrypoint.sh
 # declared after the bake step instead of before it.
 ENV COMFY_KEEP_TORCHAUDIO=1
 
+# ---------- Pin transformers to one that accepts NGC's torch (ada profile) ----------
+# ComfyUI v0.33 asks for transformers>=4.50.3, so pip resolved the latest, and
+# transformers raised its torch floor to 2.5 after 5.9. NGC's torch reports
+# 2.5.0a0, which sorts BELOW 2.5, so transformers logs "Disabling PyTorch
+# because PyTorch >= 2.5 is required" and every node that tokenizes to tensors
+# dies: WanVideoTextEncode raised "PyTorch is not installed" and no Wan/SCAIL
+# job could run (2026-10-18). MiniMax was unaffected because its nodes are
+# native. The image fleet's 4.46.3 is below ComfyUI's floor; 4.53.3 meets it,
+# needs torch>=2.1 and predates the 4.54 device_mesh import (see
+# _force_transformers). Installing it BEFORE the bake makes bake_nodes'
+# constraint file record it. Before, the file recorded the latest and the
+# post-bake repair to 4.46.3 conflicted with it and failed, logging only.
+ARG TRANSFORMERS_PIN=transformers==4.53.3
+ENV COMFY_TRANSFORMERS_PIN=${TRANSFORMERS_PIN}
+RUN if [ "$BUILD_PROFILE" = "ada" ]; then pip install "${TRANSFORMERS_PIN}"; fi
+
 COPY workers/video/baked_nodes.txt /tmp/baked_nodes.txt
 RUN cd /opt/worker && python3 bake_nodes.py /tmp/baked_nodes.txt
 
@@ -311,7 +327,8 @@ RUN if [ "$BUILD_PROFILE" = "ada" ]; then \
         pip install --no-deps --force-reinstall "numpy==${NUMPY_VERSION}" \
         && python3 /tmp/patch_torchaudio_ext.py \
         && python -c "import numpy; assert numpy.__version__.startswith('1.'), 'numpy dragged forward: ' + numpy.__version__" \
-        && python -c "import torchaudio; assert torchaudio.__version__.startswith('2.5'), 'torchaudio clobbered: ' + torchaudio.__version__"; \
+        && python -c "import torchaudio; assert torchaudio.__version__.startswith('2.5'), 'torchaudio clobbered: ' + torchaudio.__version__" \
+        && python -c "import transformers; from transformers.utils import is_torch_available; assert is_torch_available(), 'transformers ' + transformers.__version__ + ' disabled torch'; print('transformers', transformers.__version__, 'sees torch')"; \
     else \
         python3 /tmp/patch_torchaudio_ext.py \
         && python -c "import numpy; assert not numpy.__version__.startswith('1.'), 'numpy dragged BACK to 1.x on blackwell: ' + numpy.__version__" \

@@ -214,7 +214,9 @@ def _restore_torchaudio_stub() -> None:
         log.error("torchaudio stub restore failed: %r", e)
 
 
-_TRANSFORMERS_PIN = "transformers==4.46.3"
+# The video image overrides this: its ComfyUI v0.33 needs transformers>=4.50.3
+# (see workers/video/Dockerfile).
+_TRANSFORMERS_PIN = os.environ.get("COMFY_TRANSFORMERS_PIN", "transformers==4.46.3")
 
 
 def _force_transformers() -> None:
