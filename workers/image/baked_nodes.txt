@@ -3,41 +3,43 @@
 # bake_nodes.py clones + installs these during `docker build`; the runtime
 # manifest_installer skips anything with a .baked marker. Net-new packs the
 # user installs later still go through the runtime manifest.
-civicomfy https://github.com/MoonGoblinDev/Civicomfy
-comfyui-impact-pack https://github.com/ltdrdata/ComfyUI-Impact-Pack
-rgthree-comfy https://github.com/rgthree/rgthree-comfy
-comfyui-custom-scripts https://github.com/pythongosssss/ComfyUI-Custom-Scripts
-comfyui-kjnodes https://github.com/kijai/ComfyUI-KJNodes
-comfyui-easy-use https://github.com/yolain/ComfyUI-Easy-Use
-comfyui-florence2 https://github.com/kijai/ComfyUI-Florence2
-comfyui_ultimatesdupscale https://github.com/ssitu/ComfyUI_UltimateSDUpscale
-comfyui-wd14-tagger https://github.com/pythongosssss/ComfyUI-WD14-Tagger
-RES4LYF https://github.com/ClownsharkBatwing/RES4LYF
-comfyui_essentials https://github.com/cubiq/ComfyUI_essentials
-comfyui-impact-subpack https://github.com/ltdrdata/ComfyUI-Impact-Subpack
-comfyui-image-saver https://github.com/alexopus/ComfyUI-Image-Saver
-derfuu_comfyui_moddednodes https://github.com/Derfuu/Derfuu_ComfyUI_ModdedNodes
-comfyui-logicutils https://github.com/aria1th/ComfyUI-LogicUtils
-cg-use-everywhere https://github.com/chrisgoringe/cg-use-everywhere
-virtuoso-nodes https://github.com/chrisfreilich/virtuoso-nodes
-comfyui-mxtoolkit https://github.com/Smirnov75/ComfyUI-mxToolkit
-comfy-image-saver https://github.com/giriss/comfy-image-saver
-was-ns https://github.com/ltdrdata/was-node-suite-comfyui
-ComfyUI_Comfyroll_CustomNodes https://github.com/Suzie1/ComfyUI_Comfyroll_CustomNodes
-comfyui-advancedliveportrait https://github.com/PowerHouseMan/ComfyUI-AdvancedLivePortrait
-comfyui-levelpixel https://github.com/LevelPixel/ComfyUI-LevelPixel
-comfyui_image_metadata_extension https://github.com/edelvarden/comfyui_image_metadata_extension
-comfyui_layerstyle https://github.com/chflame163/ComfyUI_LayerStyle
-comfyui-post-processing-nodes https://github.com/EllangoK/ComfyUI-post-processing-nodes
-comfyui-crystools https://github.com/crystian/ComfyUI-Crystools
-comfyui_controlnet_aux https://github.com/Fannovel16/comfyui_controlnet_aux
-seedvr2_videoupscaler https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler
-controlaltai-nodes https://github.com/gseth/ControlAltAI-Nodes
-comfyui-cyberdelia-z-engineer https://github.com/cyberdeliaAI/comfyui-cyberdelia-z-engineer
-comfyui-cyberdelia-metadata https://github.com/cyberdeliaAI/comfyui-cyberdelia-metadata
-vrgamedev_video_nodes https://github.com/vrgamegirl19/comfyui-vrgamedevgirl
-comfyui_ipadapter_plus https://github.com/cubiq/ComfyUI_IPAdapter_plus
-comfyui-lora-manager https://github.com/willmiao/ComfyUI-Lora-Manager
-z-tipo-extension https://github.com/KohakuBlueleaf/z-tipo-extension
-comfyui-ppm https://github.com/pamparamm/ComfyUI-ppm
-comfyui-fbcnn https://github.com/Miosp/ComfyUI-FBCNN
+# Every pack is pinned to the commit the 2026-10-18 build baked; bump one
+# deliberately (and rebuild) rather than letting a rebuild drift them all.
+civicomfy https://github.com/MoonGoblinDev/Civicomfy 555e984bbcb02fc955075cb8eb699a6884c51239
+comfyui-impact-pack https://github.com/ltdrdata/ComfyUI-Impact-Pack 429d0159ad429e64d2b3916e6e7be9c22d025c3c
+rgthree-comfy https://github.com/rgthree/rgthree-comfy d7297b42f0fa78bec1c0411478f887423c249502
+comfyui-custom-scripts https://github.com/pythongosssss/ComfyUI-Custom-Scripts 609f3afaa74b2f88ef9ce8d939626065e3247469
+comfyui-kjnodes https://github.com/kijai/ComfyUI-KJNodes 17195fcfa8a05f601b766a0f09c9733284f47416
+comfyui-easy-use https://github.com/yolain/ComfyUI-Easy-Use 4ba22aa1ec2dd606995574d93d70c6c8a3744859
+comfyui-florence2 https://github.com/kijai/ComfyUI-Florence2 9ece3de914214c5f581d725167bc9d0eeb0d1120
+comfyui_ultimatesdupscale https://github.com/ssitu/ComfyUI_UltimateSDUpscale a5547db9e1d07d3318bb21e9e9c474f4c1e9c8df
+comfyui-wd14-tagger https://github.com/pythongosssss/ComfyUI-WD14-Tagger 9e0a6e700299182fc05c58b62e7ad9f72182a78b
+RES4LYF https://github.com/ClownsharkBatwing/RES4LYF 56e44755d866c87ff9cb4b6608c8e42155db6ecc
+comfyui_essentials https://github.com/cubiq/ComfyUI_essentials 9d9f4bedfc9f0321c19faf71855e228c93bd0dc9
+comfyui-impact-subpack https://github.com/ltdrdata/ComfyUI-Impact-Subpack 50c7b71a6a224734cc9b21963c6d1926816a97f1
+comfyui-image-saver https://github.com/alexopus/ComfyUI-Image-Saver dbf94571699d6750182821cfe7d90c4e8840257d
+derfuu_comfyui_moddednodes https://github.com/Derfuu/Derfuu_ComfyUI_ModdedNodes d0905bed31249f2bd0814c67585cf4fe3c77c015
+comfyui-logicutils https://github.com/aria1th/ComfyUI-LogicUtils f77c699543b8f9977b24581af66ad026d340b663
+cg-use-everywhere https://github.com/chrisgoringe/cg-use-everywhere 50ae9f8c5d8b9538589663c90a15d4067a02969c
+virtuoso-nodes https://github.com/chrisfreilich/virtuoso-nodes b3725230f593a42ffdb229a7544f1069c01b7d4c
+comfyui-mxtoolkit https://github.com/Smirnov75/ComfyUI-mxToolkit 7f7a0e584f12078a1c589645d866ae96bad0cc35
+comfy-image-saver https://github.com/giriss/comfy-image-saver c6223965d45871d1ff2931b6ac9518a13947c920
+was-ns https://github.com/ltdrdata/was-node-suite-comfyui 44de705818d4663fefefde57ffe0ea5a9ea39df4
+ComfyUI_Comfyroll_CustomNodes https://github.com/Suzie1/ComfyUI_Comfyroll_CustomNodes d78b780ae43fcf8c6b7c6505e6ffb4584281ceca
+comfyui-advancedliveportrait https://github.com/PowerHouseMan/ComfyUI-AdvancedLivePortrait 3bba732915e22f18af0d221b9c5c282990181f1b
+comfyui-levelpixel https://github.com/LevelPixel/ComfyUI-LevelPixel cea37a918882cd4ca5d22807eaa125a93a76ac7a
+comfyui_image_metadata_extension https://github.com/edelvarden/comfyui_image_metadata_extension 0fbd59eed23268d46ac43c110246a7dcaa09295b
+comfyui_layerstyle https://github.com/chflame163/ComfyUI_LayerStyle 51977b27869af9369e3d11a75d6fe8eb706f9821
+comfyui-post-processing-nodes https://github.com/EllangoK/ComfyUI-post-processing-nodes c49a05254795403648f2c1774b6f5ea39f96e7d5
+comfyui-crystools https://github.com/crystian/ComfyUI-Crystools 2f18256c5b5063937106f29a8e0a7db3ae3869b7
+comfyui_controlnet_aux https://github.com/Fannovel16/comfyui_controlnet_aux a587a4c1594524c1d2de5cd1a86cd868ff448e1c
+seedvr2_videoupscaler https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler 4490bd1f482e026674543386bb2a4d176da245b9
+controlaltai-nodes https://github.com/gseth/ControlAltAI-Nodes 721492b66c9cede8ae23ae10615462ad80cfd061
+comfyui-cyberdelia-z-engineer https://github.com/cyberdeliaAI/comfyui-cyberdelia-z-engineer 7ab25270f33ddfd7453af019064fded945d66ebb
+comfyui-cyberdelia-metadata https://github.com/cyberdeliaAI/comfyui-cyberdelia-metadata 17da40c1626c07118e78299d711657d66bf1ba5b
+vrgamedev_video_nodes https://github.com/vrgamegirl19/comfyui-vrgamedevgirl 182f98f977834c5edf58e33b9c1b6ed71c0714fc
+comfyui_ipadapter_plus https://github.com/cubiq/ComfyUI_IPAdapter_plus a0f451a5113cf9becb0847b92884cb10cbdec0ef
+comfyui-lora-manager https://github.com/willmiao/ComfyUI-Lora-Manager b5d313113c9a5bcf444d7f3b131735c304c93f1f
+z-tipo-extension https://github.com/KohakuBlueleaf/z-tipo-extension 319be75ed08e237770c31fcfde87cab711f74372
+comfyui-ppm https://github.com/pamparamm/ComfyUI-ppm 8475fdbe76f530d5ba8bd655538700d54fe14a8b
+comfyui-fbcnn https://github.com/Miosp/ComfyUI-FBCNN c737c933f88a62eb7dc6fbb4f97d5aa4ab1c8bb4

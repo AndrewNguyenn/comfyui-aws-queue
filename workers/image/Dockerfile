@@ -110,12 +110,6 @@ RUN mkdir -p ComfyUI-Manager && \
 COPY workers/shared/requirements.txt /tmp/req.txt
 RUN pip install -r /tmp/req.txt && rm /tmp/req.txt
 
-# ---------- Worker code ----------
-WORKDIR /opt/worker
-COPY workers/shared/ /opt/worker/
-COPY workers/image/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
 # ---------- Bake common custom nodes ----------
 # Clone + install the custom-node set at BUILD time so cold workers don't
 # spend ~13 min doing it on every boot. Dependency conflicts surface here
@@ -124,8 +118,18 @@ RUN chmod +x /entrypoint.sh
 # clean OpenCV, cv2 typing patch) and drops a .baked marker per pack; the
 # runtime manifest_installer skips anything baked. Net-new packs the user
 # installs later still go through the runtime manifest path.
+# Only the two bake scripts are copied here, so a worker-code change doesn't
+# re-run the ~30 min bake; the rest of workers/shared/ lands at the end.
+WORKDIR /opt/worker
+COPY workers/shared/bake_nodes.py workers/shared/manifest_installer.py /opt/worker/
 COPY workers/image/baked_nodes.txt /tmp/baked_nodes.txt
 RUN cd /opt/worker && python3 bake_nodes.py /tmp/baked_nodes.txt
+
+# ---------- Verify xformers' Triton kernels import ----------
+# A pack's deps once swapped Triton under xformers (see manifest_installer
+# _constraints_file); that broke every node importing xformers.ops at runtime.
+# Fail the build instead.
+RUN python -c "import triton, xformers, xformers.ops; print('xformers OK:', xformers.__version__, 'triton', triton.__version__)"
 
 # ---------- Re-assert the torchaudio stub ----------
 # The bake pulls a real torchaudio (demucs / openai-whisper deps). ComfyUI
@@ -161,6 +165,11 @@ RUN python3 /tmp/patch_folder_cache.py
 
 # Per-job scratch dir (output_uploader watches this)
 RUN mkdir -p /opt/comfy/output
+
+# ---------- Worker code ----------
+COPY workers/shared/ /opt/worker/
+COPY workers/image/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 # ---------- Smoke test (catches broken nodes at build time) ----------
 # Quick validation: import ComfyUI's main module path. Failing here = visible in

@@ -347,6 +347,17 @@ def _constraints_file() -> Optional[str]:
             lines.append(f"{pkg}=={md.version(pkg)}")
         except Exception:  # noqa: BLE001
             pass
+    # triton: NGC ships its torch-matched Triton under another dist name, so a
+    # node wanting triton>=2 (openai-whisper, via vrgamedev's stable-ts) got
+    # PyPI's latest written over the same module — and xformers' split-k
+    # kernel raises TypeError on import under Triton 3.8, killing every node
+    # that imports xformers.ops (Metric3D, DepthAnythingV2). Pin the version
+    # that is actually importable.
+    try:
+        import triton
+        lines.append(f"triton=={triton.__version__.split('+')[0]}")
+    except Exception:  # noqa: BLE001
+        pass
     path: Optional[str] = None
     if lines:
         path = "/tmp/comfy-pip-constraints.txt"
