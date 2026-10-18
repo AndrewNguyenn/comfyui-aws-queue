@@ -101,8 +101,8 @@ class SpotHandler:
 def make_default_on_terminate(
     queue_url: str, jobs_table: str, region: str
 ) -> Callable[[Optional[tuple[str, str]]], None]:
-    """Standard handler: reset SQS visibility on the in-flight message AND
-    mark DDB status=queued. Both must succeed for the job to redeliver
+    """Standard handler: mark DDB status=queued AND reset SQS visibility on
+    the in-flight message. Both must succeed for the job to redeliver
     quickly (resolves code review C4)."""
     sqs = boto3.client("sqs", region_name=region)
     ddb = boto3.client("dynamodb", region_name=region)
@@ -113,19 +113,13 @@ def make_default_on_terminate(
             return
         job_id, receipt_handle = in_flight
         log.warning("releasing in-flight job %s back to queue", job_id)
-        # Reset SQS visibility FIRST so message redelivers immediately.
-        try:
-            sqs.change_message_visibility(
-                QueueUrl=queue_url,
-                ReceiptHandle=receipt_handle,
-                VisibilityTimeout=0,
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("failed to reset SQS visibility for %s", job_id)
-        # Then update DDB so a worker picking it up sees status=queued — but
-        # only if it is still 'running'. A job that finished inside the
-        # notice-to-stop window has already been written 'complete' and its
-        # message deleted; a 'queued' landing after that would orphan it.
+        # Update DDB FIRST, and only if the job is still 'running'. The order
+        # matters: once visibility is 0 another worker can receive the message
+        # within milliseconds, and if DDB still says 'running' it deletes the
+        # message as a duplicate delivery, orphaning the job at 'queued' when
+        # this write lands (job 4deb4389, 2026-10-18). The condition covers a
+        # job that finished inside the notice-to-stop window: it is already
+        # 'complete' with its message deleted, so there is nothing to release.
         try:
             ddb.update_item(
                 TableName=jobs_table,
@@ -137,7 +131,17 @@ def make_default_on_terminate(
             )
         except ddb.exceptions.ConditionalCheckFailedException:
             log.info("job %s already left 'running'; not re-queued", job_id)
+            return
         except Exception:  # noqa: BLE001
             log.exception("failed to revert job %s to queued", job_id)
+        # Then reset SQS visibility so the message redelivers immediately.
+        try:
+            sqs.change_message_visibility(
+                QueueUrl=queue_url,
+                ReceiptHandle=receipt_handle,
+                VisibilityTimeout=0,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("failed to reset SQS visibility for %s", job_id)
 
     return handler

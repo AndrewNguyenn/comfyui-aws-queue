@@ -222,7 +222,7 @@ def main() -> int:
         heartbeat_stop = threading.Event()
         heartbeat_thread = threading.Thread(
             target=_heartbeat_loop,
-            args=(receipt, job_id, heartbeat_stop),
+            args=(receipt, job_id, heartbeat_stop, spot),
             daemon=True,
         )
         heartbeat_thread.start()
@@ -482,9 +482,14 @@ def _set_job_status(job_id: str, status: str, extra: dict | None = None) -> None
     )
 
 
-def _heartbeat_loop(receipt_handle: str, job_id: str, stop_event: threading.Event) -> None:
+def _heartbeat_loop(receipt_handle: str, job_id: str, stop_event: threading.Event,
+                    spot: SpotHandler) -> None:
     """Extend SQS visibility every 60s. v3 N9: prevents duplicate delivery on long jobs."""
     while not stop_event.wait(HEARTBEAT_INTERVAL_SEC):
+        # Once termination has handed the job back (visibility 0), a tick here
+        # would hide the message again for VISIBILITY_TIMEOUT_SEC.
+        if spot.terminating:
+            return
         try:
             sqs.change_message_visibility(
                 QueueUrl=QUEUE_URL,
