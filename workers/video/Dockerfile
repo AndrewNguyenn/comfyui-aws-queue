@@ -281,8 +281,14 @@ RUN if [ "$BUILD_PROFILE" = "ada" ]; then pip install "${TRANSFORMERS_PIN}"; fi
 # 4.11, and that build has no cv2.dnn.NMSBoxes: SCAIL's pose detector
 # (PoseDetectionVitPoseToDWPose) died on it (2026-10-18). _force_clean_opencv
 # never removed it because "opencv" is not in its package list. Remove it here,
-# before the bake, so the bake's clean reinstall is the only cv2 left.
-RUN if [ "$BUILD_PROFILE" = "ada" ]; then pip uninstall -y opencv; fi
+# before the bake, so the bake's clean reinstall is the only cv2 left. The
+# uninstall alone is not enough: the dist's RECORD omits python-3.10/ and
+# config-3.10.py (the loader still found 4.7.0 after it), so delete the whole
+# cv2/ dir as well.
+RUN if [ "$BUILD_PROFILE" = "ada" ]; then \
+        pip uninstall -y opencv \
+        && rm -rf "$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')/cv2"; \
+    fi
 
 COPY workers/video/baked_nodes.txt /tmp/baked_nodes.txt
 RUN cd /opt/worker && python3 bake_nodes.py /tmp/baked_nodes.txt
