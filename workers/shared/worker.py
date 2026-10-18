@@ -23,6 +23,7 @@ import boto3
 
 # Model files appear under /opt/comfy/models/<type>/ via mount-s3 (see
 # workers/image/entrypoint.sh). No download path needed here.
+import affinity
 from comfy_client import ComfyClient, JobCancelled
 from comfy_supervisor import ComfySupervisor
 import imds
@@ -67,6 +68,9 @@ HEARTBEAT_INTERVAL_SEC = 60
 CANCEL_POLL_INTERVAL_SEC = 5  # how often the cancel-watch thread re-checks DDB
 COMFY_OUTPUT_DIR = Path("/opt/comfy/output")
 COMFY_INPUT_DIR = Path("/opt/comfy/input")  # where LoadImage reads input/<name>
+# Jobs pulled per poll for model affinity (see affinity.py). Small, because
+# every pull counts toward the queue's maxReceiveCount.
+AFFINITY_BATCH = 5
 
 sqs = boto3.client("sqs", region_name=REGION)
 ddb = boto3.client("dynamodb", region_name=REGION)
@@ -181,20 +185,36 @@ def main() -> int:
 
     uploader = OutputUploader(OUTPUTS_BUCKET, REGION, COMFY_OUTPUT_DIR)
 
+    # The checkpoint/unet this worker last ran, and how many jobs in a row it
+    # has run on it: what model affinity picks against.
+    loaded_model: str | None = None
+    model_run = 0
+    loaded_loras: list[str] | None = None
+
     log.info("worker ready, entering SQS poll loop")
     while not spot.terminating:
         msgs = sqs.receive_message(
             QueueUrl=QUEUE_URL,
             WaitTimeSeconds=20,
-            MaxNumberOfMessages=1,
+            MaxNumberOfMessages=AFFINITY_BATCH,
             VisibilityTimeout=VISIBILITY_TIMEOUT_SEC,
+            AttributeNames=["SentTimestamp"],
             MessageAttributeNames=["All"],
         )
         messages = msgs.get("Messages", [])
         if not messages:
             continue
 
-        msg = messages[0]
+        # Take the job for the model already loaded; hand the rest straight back.
+        models = _job_models(messages)
+        i = affinity.pick(
+            models,
+            [int(m.get("Attributes", {}).get("SentTimestamp", 0)) for m in messages],
+            loaded_model,
+            model_run,
+        )
+        _release([m for j, m in enumerate(messages) if j != i])
+        msg, job_model = messages[i], models[i]
         receipt = msg["ReceiptHandle"]
         body = json.loads(msg["Body"])
         job_id = body["job_id"]
@@ -240,6 +260,21 @@ def main() -> int:
             if not _claim_job(job_id, instance_type):
                 log.info("job %s no longer queued (cancelled or claimed elsewhere); skipping", job_id)
                 continue
+
+            # One line per checkpoint/unet load (from=None is the worker's
+            # first), and a separate count of LoRA-set changes.
+            if job_model and job_model != loaded_model:
+                log.info("MODEL_LOAD from=%s to=%s job=%s", loaded_model, job_model, job_id)
+                loaded_model, model_run = job_model, 0
+            if job_model:
+                model_run += 1
+            loras = sorted(
+                str(n["inputs"]["lora_name"]) for n in workflow.values()
+                if isinstance(n, dict) and "lora_name" in (n.get("inputs") or {})
+            )
+            if loaded_loras is not None and loras != loaded_loras:
+                log.info("LORA_CHANGE job=%s loras=%s", job_id, "|".join(loras))
+            loaded_loras = loras
 
             # Background-fetch every referenced model so mount-s3 starts
             # streaming it from S3 while ComfyUI is still parsing the workflow.
@@ -355,6 +390,37 @@ def main() -> int:
 
     log.info("worker exiting cleanly")
     return 0
+
+
+def _job_models(messages: list[dict]) -> list[str]:
+    """Each message's job model (checkpoint/unet, the dispatcher's `model`
+    attr), '' when unknown. A lookup failure makes every job '' = run anywhere."""
+    ids = [json.loads(m["Body"])["job_id"] for m in messages]
+    try:
+        r = ddb.batch_get_item(RequestItems={JOBS_TABLE: {
+            "Keys": [{"job_id": {"S": j}} for j in set(ids)],
+            "ProjectionExpression": "job_id, model",
+        }})
+        got = {it["job_id"]["S"]: it.get("model", {}).get("S", "")
+               for it in r.get("Responses", {}).get(JOBS_TABLE, [])}
+    except Exception:  # noqa: BLE001
+        log.exception("model lookup failed; picking without affinity")
+        got = {}
+    return [got.get(j, "") for j in ids]
+
+
+def _release(messages: list[dict]) -> None:
+    """Make messages this worker won't run visible again at once. If this
+    fails they come back when their visibility timeout lapses: late, not lost."""
+    if not messages:
+        return
+    try:
+        sqs.change_message_visibility_batch(QueueUrl=QUEUE_URL, Entries=[
+            {"Id": str(n), "ReceiptHandle": m["ReceiptHandle"], "VisibilityTimeout": 0}
+            for n, m in enumerate(messages)
+        ])
+    except Exception:  # noqa: BLE001
+        log.exception("could not release %d unpicked message(s)", len(messages))
 
 
 def _read_job(job_id: str) -> dict | None:
