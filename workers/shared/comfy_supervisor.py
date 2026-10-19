@@ -74,6 +74,12 @@ class ComfySupervisor:
         except Exception:  # noqa: BLE001
             log.exception("error stopping comfy")
 
+    def is_ready(self) -> bool:
+        try:
+            return http.request("GET", f"{self.base_url}/system_stats").status == 200
+        except urllib3.exceptions.HTTPError:
+            return False
+
     def wait_for_ready(self, timeout_seconds: int = 180) -> None:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:

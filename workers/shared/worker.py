@@ -193,6 +193,16 @@ def main() -> int:
 
     log.info("worker ready, entering SQS poll loop")
     while not spot.terminating:
+        # Take nothing while ComfyUI is down (crashed, supervisor restarting it):
+        # every job pulled in that gap fails at once on a refused /prompt, and a
+        # restart takes a couple of minutes (25 jobs lost that way on 2026-10-19).
+        if not comfy.is_ready():
+            log.warning("comfyui not responding; not taking jobs until it is back")
+            try:
+                comfy.wait_for_ready(timeout_seconds=300)
+            except RuntimeError:
+                log.exception("comfyui still down; checking again")
+            continue
         msgs = sqs.receive_message(
             QueueUrl=QUEUE_URL,
             WaitTimeSeconds=20,
