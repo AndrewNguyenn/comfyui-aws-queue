@@ -73,7 +73,7 @@ else
             controlnet) echo 8 ;;
             upscale)    echo 5 ;;
             ipadapter)  echo 5 ;;
-            clip_vision) echo 5 ;;   # IPAdapter's CLIP-ViT-bigG is 3.5 GB; at the floor share (~2 GB) it never stayed cached and every load re-streamed from S3 (~7 min)
+            clip_vision) echo 12 ;;  # IPAdapter's CLIP-ViT-bigG is 9.7 GB on disk (fp32); at the floor (~2 GB) or 5 (~9 GB) it never fit, so every load re-streamed from S3
             vae)        echo 2 ;;
             *)          echo 1 ;;     # light / unused on the image fleet
         esac
